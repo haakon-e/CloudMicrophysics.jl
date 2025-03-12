@@ -1,8 +1,7 @@
 """
 Predicted particle properties scheme P3 for ice [MorrisonMilbrandt2015](@cite).
 
-!!! note "Particle size definition" 
-    Particle size is defined as its maximum length (i.e. max dimesion).
+See online docs for more information.
 """
 module P3Scheme
 
@@ -12,7 +11,7 @@ import SpecialFunctions as SF
 import QuadGK as QGK
 import RootSolvers as RS
 import HCubature as HC
-import LogExpFunctions: logsumexp
+import LogExpFunctions
 
 import ClimaParams as CP
 import CloudMicrophysics.Parameters as CMP
@@ -24,8 +23,6 @@ import Thermodynamics as TD
 import Thermodynamics.Parameters as TDP
 
 const PSP3 = CMP.ParametersP3
-using CloudMicrophysics.Parameters:
-    MassPowerLaw, AreaPowerLaw, SlopeLaw, SlopePowerLaw, SlopeConstant
 
 include("P3_particle_properties.jl")
 include("P3_size_distribution.jl")

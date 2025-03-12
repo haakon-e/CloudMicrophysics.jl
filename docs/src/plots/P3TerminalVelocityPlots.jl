@@ -2,15 +2,13 @@ import ClimaParams as CP
 import CloudMicrophysics as CM
 import CloudMicrophysics.P3Scheme as P3
 import CloudMicrophysics.Parameters as CMP
-using CairoMakie
+import CairoMakie: Makie
 
 const PSP3 = CMP.ParametersP3
 
 FT = Float64
 
-override_file = Dict("Heymsfield_mu_coeff1" => Dict("value" => 3.0))
-toml_dict = CP.create_toml_dict(FT; override_file)
-params = CMP.ParametersP3(toml_dict; slope_law = :constant)
+params = CMP.ParametersP3(FT; slope_law = :constant)
 
 function get_values(
     params::CMP.ParametersP3,
@@ -75,7 +73,7 @@ function get_values(
     return (; F_rims, ρ_rs, D_m_regimes, D_m, ϕᵢ, V_m, V_m_ϕ)
 end
 
-theme = Theme(
+theme = Makie.Theme(
     Axis = (;
         width = 350,
         height = 350,
@@ -120,34 +118,34 @@ function figure_2()
         get_values(params, Chen2022, L_l, N_l, ρ_a, xres, yres)
 
     ### PLOT ###
-    fig = Figure()
+    fig = Makie.Figure()
 
     # Plot velocities as in Fig 2 in Morrison and Milbrandt 2015
 
-    colormap = cgrad(:PuBuGn_3, 3, categorical = true)
+    colormap = Makie.cgrad(:PuBuGn_3, 3, categorical = true)
     regime_contour_kwargs = (; levels = 3, colormap)
 
     row = 1
-    ax1 = Axis(fig[row, 1]; title = "Particle regimes with small Dₘ")
-    hm = contourf!(ax1, F_rims, ρ_rs, D_m_regimes_s; regime_contour_kwargs...)
+    ax1 = Makie.Axis(fig[row, 1]; title = "Particle regimes with small Dₘ")
+    hm = Makie.contourf!(ax1, F_rims, ρ_rs, D_m_regimes_s; regime_contour_kwargs...)
 
-    ax2 = Axis(fig[row, 2]; title = "Particle regimes with medium Dₘ")
-    hm = contourf!(ax2, F_rimm, ρ_rm, D_m_regimes_m; regime_contour_kwargs...)
+    ax2 = Makie.Axis(fig[row, 2]; title = "Particle regimes with medium Dₘ")
+    hm = Makie.contourf!(ax2, F_rimm, ρ_rm, D_m_regimes_m; regime_contour_kwargs...)
 
-    ax3 = Axis(fig[row, 3]; title = "Particle regimes with large Dₘ")
-    hm = contourf!(ax3, F_riml, ρ_rl, D_m_regimes_l; regime_contour_kwargs...)
+    ax3 = Makie.Axis(fig[row, 3]; title = "Particle regimes with large Dₘ")
+    hm = Makie.contourf!(ax3, F_riml, ρ_rl, D_m_regimes_l; regime_contour_kwargs...)
 
     map(1:3) do col
         ticks = (
             [1, 2, 3],
             ["dense\n nonspherical ice", "graupel", "partially\n rimed ice"],
         )
-        Colorbar(
+        Makie.Colorbar(
             fig[row, col];
             colormap,
             ticks,
             vertical = false,
-            width = Relative(0.95),
+            width = Makie.Relative(0.95),
             height = 10,
             halign = 0.5,
             valign = 0.02,
@@ -167,7 +165,7 @@ function figure_2()
         title = "",
     )
         gp = fig[row, col]
-        ax = Axis(gp; title)
+        ax = Makie.Axis(gp; title)
         row3_opts =
             row == 3 ?
             (;
@@ -178,19 +176,19 @@ function figure_2()
                 bottomspinecolor = :white,
                 topspinecolor = :white,
             ) : (;)
-        hm = contourf!(ax, F_rim, ρ_r, cfvals)
-        Colorbar(
+        hm = Makie.contourf!(ax, F_rim, ρ_r, cfvals)
+        Makie.Colorbar(
             gp,
             hm;
             halign = 0.05,
             valign = 0.05,
-            height = Relative(0.60),
+            height = Makie.Relative(0.60),
             width = 10,
             tellwidth = false,
             ticklabelpad = 0,
             row3_opts...,
         )
-        !isnothing(cvals) && contour!(ax, F_rim, ρ_r, cvals)
+        !isnothing(cvals) && Makie.contour!(ax, F_rim, ρ_r, cvals)
     end
 
     row += 1
@@ -225,14 +223,14 @@ function figure_2()
     title = "Vₘ (using ϕᵢ) with large Dₘ"
     make_plots(row, 3, F_riml, ρ_rl; cfvals = V_m_ϕ_l, cvals = D_m_l, title)
 
-    axs = filter(ax -> ax isa Axis, fig.content)
-    linkaxes!(axs...)
+    axs = filter(ax -> ax isa Makie.Axis, fig.content)
+    Makie.linkaxes!(axs...)
 
-    resize_to_layout!(fig)
-    save("MorrisonandMilbrandtFig2.svg", fig)
+    Makie.resize_to_layout!(fig)
+    Makie.save("MorrisonandMilbrandtFig2.svg", fig)
     fig
 end
 #! format: on
 
 # Terminal Velocity figure
-with_theme(figure_2, theme)
+Makie.with_theme(figure_2, theme)

@@ -25,16 +25,14 @@ $(DocStringExtensions.FIELDS)
     This function is not typically called directly. Instead, see [`ParametersP3`](@ref)
 
 # Examples
-```julia-repl
-julia> import CloudMicrophysics.Parameters as CMP
-julia> import ClimaParams as CP
-julia> toml_dict = CP.create_toml_dict(Float64)
-julia> CMP.MassPowerLaw(toml_dict)
+```jldoctest
+julia> import CloudMicrophysics.Parameters as CMP, ClimaParams as CP
+
+julia> CMP.MassPowerLaw(CP.create_toml_dict(Float64))
 MassPowerLaw{Float64}
 ├── α_va = 0.018537721864540644 [kg μm^(-β_va)]
 └── β_va = 1.9 [-]
 ```
-
 """
 Base.@kwdef struct MassPowerLaw{FT} <: ParametersType{FT}
     "Coefficient in mass(size) relation [kg m^(-β_va)]"
@@ -66,11 +64,10 @@ $(DocStringExtensions.FIELDS)
 
 # Examples
 
-```julia-repl
-julia> import CloudMicrophysics.Parameters as CMP
-julia> import ClimaParams as CP
-julia> toml_dict = CP.create_toml_dict(Float64)
-julia> CMP.AreaPowerLaw(toml_dict)
+```jldoctest
+julia> import CloudMicrophysics.Parameters as CMP, ClimaParams as CP
+
+julia> CMP.AreaPowerLaw(CP.create_toml_dict(Float64))
 AreaPowerLaw{Float64}
 ├── γ = 0.2285 [μm^(2-σ)]
 └── σ = 1.88 [-]
@@ -117,11 +114,10 @@ $(DocStringExtensions.FIELDS)
 
 # Examples
 
-```julia-repl
-julia> import CloudMicrophysics.Parameters as CMP
-julia> import ClimaParams as CP
-julia> toml_dict = CP.create_toml_dict(Float64)
-julia> CMP.SlopePowerLaw(toml_dict)
+```jldoctest
+julia> import CloudMicrophysics.Parameters as CMP, ClimaParams as CP
+
+julia> CMP.SlopePowerLaw(CP.create_toml_dict(Float64))
 SlopePowerLaw{Float64}
 ├── a = 0.00191 [m^b]
 ├── b = 0.8 [-]
@@ -165,12 +161,10 @@ $(DocStringExtensions.FIELDS)
 
 # Examples
 
-```julia-repl
-julia> import CloudMicrophysics.Parameters as CMP
-julia> import ClimaParams as CP
-julia> override_file = Dict("Heymsfield_mu_coeff1" => Dict("value" => 3.0))
-julia> toml_dict = CP.create_toml_dict(Float64; override_file)
-julia> CMP.SlopeConstant(toml_dict)
+```jldoctest
+julia> import CloudMicrophysics.Parameters as CMP, ClimaParams as CP
+
+julia> CMP.SlopeConstant(CP.create_toml_dict(Float64))
 SlopeConstant{Float64}
 └── μ = 3.0 [-]
 ```
@@ -180,7 +174,7 @@ Base.@kwdef struct SlopeConstant{FT} <: SlopeLaw{FT}
     μ::FT
 end
 function SlopeConstant(td::CP.AbstractTOMLDict)
-    name_map = (; :Heymsfield_mu_coeff1 => :μ)
+    name_map = (; :P3_constant_slope_parameterization_value => :μ)
     params = CP.get_parameter_values(td, name_map, "CloudMicrophysics")
     FT = CP.float_type(td)
     return SlopeConstant{FT}(; params...)
@@ -205,11 +199,10 @@ $(DocStringExtensions.FIELDS)
 
 # Examples
 
-```julia-repl
-julia> import CloudMicrophysics.Parameters as CMP
-julia> import ClimaParams as CP
-julia> toml_dict = CP.create_toml_dict(Float64)
-julia> CMP.VentilationSB2005(toml_dict)
+```jldoctest
+julia> import CloudMicrophysics.Parameters as CMP, ClimaParams as CP
+
+julia> CMP.VentilationSB2005(CP.create_toml_dict(Float64))
 VentilationSB2005{Float64}
 ├── vent_a = 0.78 [-]
 └── vent_b = 0.308 [-]
@@ -271,10 +264,11 @@ Create a `ParametersP3` object from a floating point type.
 
 # Examples
 
-```julia-repl
+```jldoctest
 julia> import CloudMicrophysics.Parameters as CMP
+
 julia> CMP.ParametersP3(Float64)
-ParametersP3
+ParametersP3{Float64}
 ├── mass: MassPowerLaw
 │   ├── α_va = 0.018537721864540644 [kg μm^(-β_va)]
 │   └── β_va = 1.9 [-]
@@ -306,29 +300,6 @@ Create a `ParametersP3` object from a `ClimaParams` TOML dictionary.
 - `td::CP.AbstractTOMLDict`: `ClimaParams` TOML dictionary
 - `slope_law`: Slope law to use (`:constant` or `:powerlaw`)
 
-# Examples
-
-```julia-repl
-julia> import ClimaParams as CP
-julia> override_file = Dict("Heymsfield_mu_coeff1" => Dict("value" => 3.0))
-julia> toml_dict = CP.create_toml_dict(Float64; override_file)
-julia> CMP.ParametersP3(toml_dict; slope_law=:constant)
-ParametersP3{Float64}
-├── mass: MassPowerLaw
-│   ├── α_va = 0.018537721864540644 [kg μm^(-β_va)]
-│   └── β_va = 1.9 [-]
-├── area: AreaPowerLaw
-│   ├── γ = 0.2285 [μm^(2-σ)]
-│   └── σ = 1.88 [-]
-├── slope: SlopeConstant
-│   └── μ = 3.0 [-]
-├── vent: VentilationSB2005
-│   ├── vent_a = 0.78 [-]
-│   └── vent_b = 0.308 [-]
-├── ρ_i = 916.7 [kg m⁻³]
-├── ρ_l = 1000.0 [kg m⁻³]
-└── T_freeze = 273.15 [K]
-```
 """
 function ParametersP3(td::CP.AbstractTOMLDict; slope_law = :powerlaw)
     @assert slope_law in (:constant, :powerlaw)

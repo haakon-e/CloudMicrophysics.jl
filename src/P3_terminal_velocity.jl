@@ -1,15 +1,15 @@
 """
     ice_particle_terminal_velocity(state, D, Chen2022, ρₐ, use_aspect_ratio)
-
- - state - P3State
- - D - maximum particle dimension
- - Chen2022 - a struct with terminal velocity parameters from Chen 2022
- - ρₐ - air density
- - use_aspect_ratio - Bool flag set to true if we want to consider the effects
-   of particle aspect ratio on its terminal velocity (default: true)
-
 Returns the terminal velocity of a single ice particle as a function
-of its size (maximum dimension, D) using the Chen 2022 parametrization.
+    of its size (maximum dimension, D) using the Chen 2022 parametrization.
+
+# Arguments
+ - `state`: The [`P3State`](@ref) object
+ - `D`: Maximum particle dimension
+ - `Chen2022`: The [`CMP.Chen2022VelType`](@ref) object with terminal velocity parameters
+ - `ρₐ`: Air density
+ - `use_aspect_ratio`: Bool flag set to `true` if we want to consider the effects
+    of particle aspect ratio on its terminal velocity (default: `true`)
 """
 function ice_particle_terminal_velocity(
     state::P3State,
@@ -32,15 +32,12 @@ function ice_particle_terminal_velocity(
 end
 
 """
-   p3_particle_terminal_velocity(p3, D, Chen2022, ρₐ, F_rim, F_liq, th, use_aspect_ratio)
+   p3_particle_terminal_velocity(p3, D, Chen2022, ρₐ, use_aspect_ratio)
 
  - p3 - p3 parameters
  - D - maximum particle dimension
  - Chen2022 - struct with terminal velocity parameters from Chen 2022
  - ρₐ - air density
- - F_rim - rime mass fraction (L_rim/L_ice) [-]
- - F_liq - liquid fraction (L_liq / L_p3_tot) [-]
- - th - thresholds as calculated by thresholds()
  - use_aspect_ratio - Bool flag set to true if we want to consider the effects
    of particle aspect ratio on its terminal velocity (default: true)
 
@@ -153,8 +150,7 @@ function ice_terminal_velocity(
     use_aspect_ratio = true;
     accurate = false,
 ) where {FT}
-    state = get_state(dist)
-    (; L, N) = dist
+    (; state, L, N) = dist
     if N < eps(FT) || L < eps(FT)
         return FT(0), FT(0)
     end

@@ -91,7 +91,7 @@ P3Scheme.get_state
 ### State relationships
 
 ```@docs
-P3Scheme.get_ρ_d_exact
+P3Scheme.get_ρ_d
 P3Scheme.get_ρ_g
 P3Scheme.get_D_th
 P3Scheme.get_D_gr
@@ -103,7 +103,6 @@ P3Scheme.get_threshold
 
 ```@docs
 P3Scheme.get_parameters
-P3Scheme.isrimed
 P3Scheme.isunrimed
 P3Scheme.threshold_tuple
 ```

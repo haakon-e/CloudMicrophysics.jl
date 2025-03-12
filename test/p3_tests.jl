@@ -10,17 +10,14 @@ import ClimaParams as CP
 function test_p3_state_creation(FT)
     @testset "P3State Creation and Properties" begin
         # Test creating a state with valid parameters
-        FT = Float64
         params = CMP.ParametersP3(FT)
 
         # Test unrimed state
         state_unrimed = P3.get_state(params; F_rim = FT(0.0), ρ_r = FT(400))
         @test P3.isunrimed(state_unrimed)
-        @test !P3.isrimed(state_unrimed)
 
         # Test rimed state
         state_rimed = P3.get_state(params; F_rim = FT(0.5), ρ_r = FT(400))
-        @test P3.isrimed(state_rimed)
         @test !P3.isunrimed(state_rimed)
 
         # Test thresholds for unrimed state
@@ -80,7 +77,7 @@ function test_thresholds_solver(FT)
 
         # Test if the P3 scheme solution satisifies the conditions
         # from eqs. 14-17 in Morrison and Milbrandt 2015
-        function get_ρ_d((; α_va, β_va)::CMP.MassPowerLaw; D_cr, D_gr)
+        function get_ρ_d_paper((; α_va, β_va)::CMP.MassPowerLaw; D_cr, D_gr)
             # This is Eq. 17 in Morrison and Milbrandt 2015
             βm2 = β_va - 2
             num = 6 * α_va * (D_cr^βm2 - D_gr^βm2)
@@ -92,8 +89,8 @@ function test_thresholds_solver(FT)
             for ρ_r in ρ_r_good
                 state = P3.get_state(params; F_rim, ρ_r)
 
-                ρ_d = P3.get_ρ_d_exact(params.mass, F_rim, ρ_r)
-                @test get_ρ_d(
+                ρ_d = P3.get_ρ_d(params.mass, F_rim, ρ_r)
+                @test get_ρ_d_paper(
                     params.mass;
                     D_cr = state.D_cr,
                     D_gr = state.D_gr,
@@ -181,13 +178,7 @@ function test_shape_solver(FT)
 
     slope_laws = (:constant, :powerlaw)
     for slope_law in slope_laws
-        override_file = if slope_law == :constant
-            Dict("Heymsfield_mu_coeff1" => Dict("value" => 3.0))
-        else
-            Dict()
-        end
-        toml_dict = CP.create_toml_dict(FT; override_file)
-        params = CMP.ParametersP3(toml_dict; slope_law)
+        params = CMP.ParametersP3(FT; slope_law)
 
         @testset "Shape parameters - nonlinear solver" begin
 
@@ -213,7 +204,7 @@ function test_shape_solver(FT)
                             logλ_ex = log(λ_ex)
                             logN₀_ex = P3.get_log_N₀(state; N, log_λ = logλ_ex)
                             # Compute mass density based on input shape parameters
-                            L_calc = exp(log(N) + P3.log_LdN(state, logλ_ex))
+                            L_calc = exp(log(N) + P3.log_L_div_N(state, logλ_ex))
 
                             if L_calc < FT(1)
                                 # Solve for shape parameters
@@ -338,7 +329,7 @@ function test_bulk_terminal_velocities(FT)
     N = FT(1e6)
     ρ_a = FT(1.2)
     ρ_r = FT(800)
-    F_rims = [FT(0), FT(0.6)]
+    F_rims = FT[0, 0.6]
 
     # TODO: Implement `F_liq != 0`. The tests break below since they expect `F_liq != 0`
     # F_liqs = [FT(0.5), FT(1)]
@@ -355,13 +346,12 @@ function test_bulk_terminal_velocities(FT)
         ref_v_m = [7.790036674136336, 5.799151695989574]
         ref_v_m_ϕ = [7.790036674136336, 5.799151695989574]
 
-        for k in 1:length(F_rims)
-            F_rim = F_rims[k]
+        for (k, F_rim) in enumerate(F_rims)
             state = P3.get_state(params; F_rim, ρ_r)
             dist = P3.get_distribution_parameters(state; L, N)
-            vel_n, vel_m = P3.ice_terminal_velocity(dist, Chen2022, ρ_a, false)
+            vel_n, vel_m = P3.ice_terminal_velocity(dist, Chen2022, ρ_a, false; accurate = true)
             vel_n_ϕ, vel_m_ϕ =
-                P3.ice_terminal_velocity(dist, Chen2022, ρ_a, true)
+                P3.ice_terminal_velocity(dist, Chen2022, ρ_a, true; accurate = true)
 
             # number weighted
             @test vel_n > 0
@@ -372,8 +362,8 @@ function test_bulk_terminal_velocities(FT)
             # mass weighted
             @test vel_m > 0
             @test vel_m_ϕ > 0
-            @test vel_m ≈ ref_v_m[k] rtol = 1e-6
-            @test vel_m_ϕ ≈ ref_v_m_ϕ[k] rtol = 1e-6
+            @test vel_m ≈ ref_v_m[k] rtol = 5e-5
+            @test vel_m_ϕ ≈ ref_v_m_ϕ[k] rtol = 5e-5
 
             # slower with aspect ratio
             @test vel_n_ϕ <= vel_n
@@ -461,7 +451,7 @@ function test_numerical_integrals(FT)
             N_estim = P3.∫fdD(state; accurate = true) do D
                 P3.N′ice(dist, D)
             end
-            @test N ≈ N_estim rtol = 1e-6
+            @test N ≈ N_estim rtol = 1e-5
 
             # Bulk velocity comparison
             vel_N, vel_m = P3.ice_terminal_velocity(
@@ -493,7 +483,7 @@ function test_numerical_integrals(FT)
             D_m_estim = P3.∫fdD(state; accurate = true) do D
                 D * P3.ice_mass(state, D) * P3.N′ice(dist, D) / L
             end
-            @test D_m ≈ D_m_estim rtol = 1e-2
+            @test D_m ≈ D_m_estim rtol = 1e-5
         end
     end
 end
@@ -561,7 +551,7 @@ function test_p3_melting(FT)
         @test rate.dLdt == 0
 
         T_warm = FT(273.15 + 0.01)
-        rate = P3.ice_melt(dist, vel, aps, tps, T_warm, ρₐ, dt)
+        rate = P3.ice_melt(dist, vel, aps, tps, T_warm, ρₐ, dt; ∫kwargs = (; accurate = true))
 
         @test rate.dNdt >= 0
         @test rate.dLdt >= 0
@@ -569,8 +559,15 @@ function test_p3_melting(FT)
         # NOTE: All reference values are output from the code.
         # A failing test indicates that the code has changed.
         # But if the changes are intentional, the reference values can be updated.
-        @test rate.dNdt ≈ 171953.27800922014 rtol = 1e-6
-        @test rate.dLdt ≈ 8.597663900461007e-5 rtol = 1e-6
+        if FT == Float64
+            ref_dNdt = FT(171953.27800922818)
+            ref_dLdt = FT(8.597663900461409e-5)
+        else
+            ref_dNdt = FT(172121.12)
+            ref_dLdt = FT(8.6060565f-5)
+        end
+        @test rate.dNdt ≈ ref_dNdt rtol = 1e-6
+        @test rate.dLdt ≈ ref_dLdt rtol = 1e-6
 
         T_vwarm = FT(273.15 + 0.1)
         rate = P3.ice_melt(dist, vel, aps, tps, T_vwarm, ρₐ, dt)
@@ -588,25 +585,14 @@ for FT in [Float32, Float64]
 
     # numerics
     test_thresholds_solver(FT)
-
-    # velocity
-    test_particle_terminal_velocities(FT)
-
-    # processes
-    test_p3_het_freezing(FT)
-end
-
-# TODO - make work for Float32
-for FT in [Float64]
-    @info("Tests that only work for Float64")
-
-    # numerics
     test_shape_solver(FT)
     test_numerical_integrals(FT)
 
     # velocity
+    test_particle_terminal_velocities(FT)
     test_bulk_terminal_velocities(FT)
 
     # processes
+    test_p3_het_freezing(FT)
     test_p3_melting(FT)
 end

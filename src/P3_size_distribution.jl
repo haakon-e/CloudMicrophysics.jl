@@ -46,13 +46,6 @@ Return the parameters from a [`P3Distribution`](@ref) object.
 get_parameters(dist::P3Distribution) = get_parameters(get_state(dist))
 
 """
-    isrimed(dist::P3Distribution)
-
-Return `true` if the particle state associated with a [`P3Distribution`](@ref) object is rimed, `false` otherwise.
-"""
-isrimed(dist::P3Distribution) = isrimed(get_state(dist))
-
-"""
     isunrimed(dist::P3Distribution)
 
 Return `true` if the particle state associated with a [`P3Distribution`](@ref) object is unrimed, `false` otherwise.
@@ -86,18 +79,18 @@ N′ice(dist::P3Distribution, D) = exp(log_N′ice(dist, D))
 
 
 """
-    log_integrate_moment_psd(x, y, a, b, μ, log_λ)
+    log_integrate_moment_psd(D₁, D₂, a, b, μ, log_λ)
 
-Computes the log of the integral of the moment of the PSD from x to y
+Computes the log of the integral of the moment of the PSD from `D₁` to `D₂`
 
 i.e. integral of the form
-    ``∫_x^y (aD^b) D^μ e^{-λD} dD``
+    ``∫_{D₁}^{D₂} (aD^b) D^μ e^{-λD} dD``
 """
-function log_integrate_moment_psd(x, y, a, b, μ, log_λ)
+function log_integrate_moment_psd(D₁, D₂, a, b, μ, log_λ)
     b_μ_1 = b + μ + 1
-    (_, q_x) = SF.gamma_inc(b_μ_1, exp(log_λ) * x)
-    (_, q_y) = SF.gamma_inc(b_μ_1, exp(log_λ) * y)
-    return log(a) - b_μ_1 * log_λ + SF.loggamma(b_μ_1) + log(abs(q_x - q_y))
+    (_, q_D₁) = SF.gamma_inc(b_μ_1, exp(log_λ) * D₁)
+    (_, q_D₂) = SF.gamma_inc(b_μ_1, exp(log_λ) * D₂)
+    return log(a) - b_μ_1 * log_λ + SF.loggamma(b_μ_1) + log(abs(q_D₁ - q_D₂))
 end
 
 """
@@ -108,43 +101,53 @@ end
 Compute the slope parameter μ
 
 # Arguments
-- `dist::P3Distribution`: [`P3Distribution`](@ref) object
-- `state::P3State`: [`P3State`](@ref) object
-- `params::PSP3`: [`CMP.ParametersP3`](@ref) object
+- `dist`: [`P3Distribution`](@ref) object
+- `state`: [`P3State`](@ref) object
+- `params`: [`CMP.ParametersP3`](@ref) object
 - `log_λ`: The log of the slope parameter [log(1/m)]
 """
 get_μ(dist::P3Distribution) = get_μ(get_state(dist), dist.log_λ)
 get_μ(state::P3State, log_λ) = get_μ(get_parameters(state), log_λ)
 get_μ(params::PSP3, log_λ) = get_μ(params.slope, log_λ)
 
-get_μ((; a, b, c, μ_max)::SlopePowerLaw, log_λ) =
+get_μ((; a, b, c, μ_max)::CMP.SlopePowerLaw, log_λ) =
     clamp(a * exp(log_λ)^b - c, 0, μ_max)
-get_μ((; μ)::SlopeConstant, _) = μ
+get_μ((; μ)::CMP.SlopeConstant, _) = μ
 
 """
-    log_LdN₀(state, log_λ)
+    log∫DⁿmN′dD(state, log_λ; n = 0)
 
-Compute `log(L/N₀)` given the `state` and `log_λ`
+Compute `log(∫_0^∞ Dⁿ m(D) N′(D) dD)` given the `state` and `log_λ`.
+    This is the log of the `n`-th moment of the mass-weighted PSD.
+
+# Arguments
+- `state::P3State`: [`P3State`](@ref) object
+- `log_λ`: The log of the slope parameter [log(1/m)]
+- `n`: The order of the moment [dimensionless]
+
+# Note:
+- For `n = 0`, this evaluates to `log(L/N₀)`, see [`log_L_div_N₀`](@ref)
+- For `n = 1`, this evaluates to the (unnormalized) mass-weighted mean particle size, see [`D_m`](@ref)
 """
-function log_LdN₀(state::P3State{FT}, log_λ) where {FT}
+function log∫DⁿmN′dD(state::P3State{FT}, log_λ; n = 0) where {FT}
+    @assert n ≥ 0 "The moment order must be non-negative"
     (; F_rim, ρ_g, D_th, D_gr, D_cr) = state
     (; ρ_i, mass) = get_parameters(state)
     (; α_va, β_va) = mass
 
     μ = get_μ(state, log_λ)
+    ∞ = FT(Inf)
     G = log_integrate_moment_psd
-    G_small_spherical = G(FT(0), D_th, ρ_i * FT(π) / 6, 3, μ, log_λ)
-    # G_liqfrac = G(FT(0), FT(Inf), ρ_l * π / 6, 3, μ, log_λ)  # TODO: Implement liquid fraction (need to do weighted average)
+    # G_liqfrac = G(FT(0), FT(Inf), ρ_l * FT(π) / 6, 3 + n, μ, log_λ)  # TODO: Implement liquid fraction (need to do weighted average)
+    G_small_spherical = G(0, D_th, ρ_i * π / 6, 3 + n, μ, log_λ)
     if isunrimed(state)
-        # L_rim = 0
-        G_large_unrimed = G(D_th, FT(Inf), α_va, β_va, μ, log_λ)
-        return logsumexp((G_small_spherical, G_large_unrimed))
+        G_large_unrimed = G(D_th, ∞, α_va, β_va + n, μ, log_λ)
+        return LogExpFunctions.logsumexp((G_small_spherical, G_large_unrimed))
     else
-        # L_rim > 0
-        G_dense_nonspherical = G(D_th, D_gr, α_va, β_va, μ, log_λ)
-        G_graupel = G(D_gr, D_cr, ρ_g * FT(π) / 6, 3, μ, log_λ)
-        G_partially_rimed = G(D_cr, FT(Inf), α_va / (1 - F_rim), β_va, μ, log_λ)
-        return logsumexp((
+        G_dense_nonspherical = G(D_th, D_gr, α_va, β_va + n, μ, log_λ)
+        G_graupel = G(D_gr, D_cr, ρ_g * π / 6, 3 + n, μ, log_λ)
+        G_partially_rimed = G(D_cr, ∞, α_va / (1 - F_rim), β_va + n, μ, log_λ)
+        return LogExpFunctions.logsumexp((
             G_small_spherical,
             G_dense_nonspherical,
             G_graupel,
@@ -153,23 +156,31 @@ function log_LdN₀(state::P3State{FT}, log_λ) where {FT}
     end
 end
 
+
 """
-    log_NdN₀(state, log_λ)
-    log_NdN₀(slope, log_λ)
+    log_L_div_N₀(state, log_λ)
+
+Compute `log(L/N₀)` given the `state` and `log_λ`
+"""
+log_L_div_N₀(state::P3State, log_λ) = log∫DⁿmN′dD(state, log_λ; n = 0)
+
+"""
+    log_N_div_N₀(state, log_λ)
+    log_N_div_N₀(slope, log_λ)
 
 Compute `log(N/N₀)` given either the `state` or the `slope` parameterization, and `log_λ`
 
 Note: This function is equivalent to `log_integrate_moment_psd(0, Inf, 1, 0, μ, log_λ)`
 """
-log_NdN₀(state::P3State, log_λ) = log_NdN₀(get_parameters(state), log_λ)
-log_NdN₀(params::PSP3, log_λ) = log_NdN₀(params.slope, log_λ)
-function log_NdN₀(slope::SlopeLaw, log_λ)
+log_N_div_N₀(state::P3State, log_λ) = log_N_div_N₀(get_parameters(state), log_λ)
+log_N_div_N₀(params::PSP3, log_λ) = log_N_div_N₀(params.slope, log_λ)
+function log_N_div_N₀(slope::CMP.SlopeLaw, log_λ)
     μ = get_μ(slope, log_λ)
     return SF.loggamma(μ + 1) - (μ + 1) * log_λ
 end
 
 """
-    log_LdN(state, log_λ)
+    log_L_div_N(state, log_λ)
 
 Compute `log(L/N)` given the `state` (or `params`) and `log_λ`
 
@@ -178,7 +189,7 @@ Compute `log(L/N)` given the `state` (or `params`) and `log_λ`
 - `params::PSP3`: [`CMP.ParametersP3`](@ref) object, and
 - `log_λ`: The log of the slope parameter [log(1/m)]
 """
-log_LdN(state::P3State, log_λ) = log_LdN₀(state, log_λ) - log_NdN₀(state, log_λ)
+log_L_div_N(state::P3State, log_λ) = log_L_div_N₀(state, log_λ) - log_N_div_N₀(state, log_λ)
 
 """
     get_log_N₀(state; N, log_λ)
@@ -242,18 +253,17 @@ where `m(D)` is the mass of a particle at diameter `D` (see [`ice_mass`](@ref)).
 
 # Examples
 
-```julia-repl
-julia> import CloudMicrophysics.Parameters as CMP
-julia> import CloudMicrophysics.P3Scheme as P3
+```jldoctest
+julia> import CloudMicrophysics.Parameters as CMP,
+              CloudMicrophysics.P3Scheme   as P3
 
 # Get a state object
-julia> params = CMP.ParametersP3(Float64)
-julia> state = P3.get_state(params; F_rim = 0.0, ρ_r = 400.0)
+julia> params = CMP.ParametersP3(Float64);
+
+julia> state = P3.get_state(params; F_rim = 0.0, ρ_r = 400.0);
 
 # Solve for the distribution parameters
-julia> L = 1e-3
-julia> N = 1e3
-julia> dist = P3.get_distribution_parameters(state; L, N)
+julia> dist = P3.get_distribution_parameters(state; L = 1e-3, N = 1e3)
 P3Distribution{Float64}
 ├── state: is unrimed
 ├── log_λ = 5.4897008376530385 [log(1/m)]
@@ -269,12 +279,12 @@ function get_distribution_parameters(
 ) where {FT}
     target_log_LdN = log(L) - log(N)
 
-    shape_problem(log_λ) = log_LdN(state, log_λ) - target_log_LdN
+    shape_problem(log_λ) = log_L_div_N(state, log_λ) - target_log_LdN
 
     # Find slope parameter
     sol = RS.find_zero(
         shape_problem,
-        RS.SecantMethod(log_λ_min, log_λ_max),
+        RS.SecantMethod(FT(log_λ_min), FT(log_λ_max)),
         RS.CompactSolution(),
         RS.RelativeSolutionTolerance(eps(FT)),
         50,
@@ -304,7 +314,7 @@ function get_distribution_parameters_all_solutions(
     # Find bounds by evaluating function incrementally, then apply root finding with bounds above and below zero-point
     target_log_LdN = log(L) - log(N)
 
-    shape_problem(log_λ) = log_LdN(state, log_λ) - target_log_LdN
+    shape_problem(log_λ) = log_L_div_N(state, log_λ) - target_log_LdN
 
     Δλ = 0.01
     λs = 10.0 .^ (2.0:Δλ:6.0)
@@ -331,7 +341,7 @@ end
 ### ----------------- ###
 
 function Base.show(io::IO, p3s::P3Distribution{FT}) where {FT}
-    rimed = isrimed(p3s) ? "rimed" : "unrimed"
+    rimed = isunrimed(p3s) ? "unrimed" : "rimed"
     println(io, "P3Distribution{$FT}")
     println(io, "├── state: is $rimed")
     println(io, "├── log_λ = $(p3s.log_λ) [log(1/m)]")
