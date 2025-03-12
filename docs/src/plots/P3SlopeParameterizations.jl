@@ -25,7 +25,7 @@ slope_power_law = CMP.ParametersP3(FT).slope
 fig = Makie.with_theme(Makie.theme_minimal()) do
     make_slope_plot(slope_power_law, "μ as a function of λ (power law)")
 end
-Makie.save("P3SlopeParameterizations_power_law.pdf", fig)
+Makie.save("P3SlopeParameterizations_power_law.svg", fig)
 
 # Constant parameterization
 # params = CMP.ParametersP3(FT; slope_law = :constant)
@@ -34,4 +34,4 @@ Makie.save("P3SlopeParameterizations_power_law.pdf", fig)
 # fig = Makie.with_theme(Makie.theme_minimal()) do
 #     make_slope_plot(slope_constant, "μ as a constant")
 # end
-# save("P3SlopeParameterizations_constant.pdf", fig)
+# save("P3SlopeParameterizations_constant.svg", fig)

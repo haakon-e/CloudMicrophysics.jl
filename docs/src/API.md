@@ -73,12 +73,12 @@ CMP.ParametersP3(::Parameters.CP.AbstractTOMLDict)
 
 ### Sub-parameterizations
 ```@docs
-Parameters.MassPowerLaw
-Parameters.AreaPowerLaw
-Parameters.SlopeLaw
-Parameters.SlopePowerLaw
-Parameters.SlopeConstant
-Parameters.VentilationSB2005
+CMP.MassPowerLaw
+CMP.AreaPowerLaw
+CMP.SlopeLaw
+CMP.SlopePowerLaw{Float64}
+CMP.SlopeConstant{Float64}
+CMP.VentilationSB2005
 ```
 
 ## Obtain particle state
@@ -123,7 +123,6 @@ P3Scheme.ϕᵢ
 
 ```@docs
 P3Scheme.weighted_average
-P3Scheme.volume_sphere
 P3Scheme.mass_spherical
 P3Scheme.mass_nonspherical
 P3Scheme.mass_rimed
@@ -146,9 +145,9 @@ P3Scheme.log_N′ice
 P3Scheme.N′ice
 P3Scheme.get_μ
 P3Scheme.log_integrate_moment_psd
-P3Scheme.log_LdN₀
-P3Scheme.log_NdN₀
-P3Scheme.log_LdN
+P3Scheme.log_L_div_N₀
+P3Scheme.log_N_div_N₀
+P3Scheme.log_L_div_N
 P3Scheme.get_log_N₀
 ```
 
@@ -243,6 +242,8 @@ Common.Chen2022_exponential_pdf
 Common.Chen2022_vel_coeffs_B1
 Common.Chen2022_vel_coeffs_B2
 Common.Chen2022_vel_coeffs_B4
+Common.volume_sphere_D
+Common.volume_sphere_R
 ```
 
 # Parameters

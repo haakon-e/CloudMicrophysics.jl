@@ -213,7 +213,7 @@ function test_volume_sphere(FT)
     TT.@testset "volume_sphere_{R/D} implemenations and type stability" begin
         R = FT(4)
         D = FT(2R)
-        TT.@test CO.volume_sphere_D(D) === FT(π * D^3  / 6)
+        TT.@test CO.volume_sphere_D(D) === FT(π * D^3 / 6)
         TT.@test CO.volume_sphere_R(R) === FT(π * (2R)^3 / 6)
     end
 end

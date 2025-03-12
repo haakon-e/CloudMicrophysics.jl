@@ -7,20 +7,12 @@ State of the P3 scheme.
 This struct bundles the P3 parameterizations `params`, the provided rime state (`F_rim`, `ρ_r`), 
     and the derived threshold variables (`D_th`, `D_gr`, `D_cr`, `ρ_g`).
 
-# Fields
-$(FIELDS)
-
-# Examples
-
 To obtain a `P3State` object, use the [`get_state`](@ref) function.
 
-```julia
-FT = Float64
-params = ParametersP3(FT)
-state = get_state(params; F_rim = FT(0.5), ρ_r = FT(916.7))
-```
+# Fields
+$(FIELDS)
 """
-Base.@kwdef struct P3State{FT}
+@kwdef struct P3State{FT}
     "[`CMP.ParametersP3`](@ref) object"
     params::PSP3{FT}
 

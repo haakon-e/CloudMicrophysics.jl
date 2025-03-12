@@ -18,8 +18,8 @@ This method calls [`∫fdD_error`](@ref), which returns both the value of the in
 # Arguments
 - `f`: The function to integrate
 - `state`: The [`P3State`](@ref) object
-- `D_max`: The maximum diameter to integrate to [m]
-- `kwargs`: Additional keyword arguments to pass to [`QGK.quadgk`](https://juliamath.github.io/QuadGK.jl/stable/api/#QuadGK.quadgk)
+- `D_max`: The maximum diameter to integrate to [m] (default: `D_max = 1 m`)
+- `kwargs`: Additional optional keyword arguments to pass to [`QGK.quadgk`](https://juliamath.github.io/QuadGK.jl/stable/api/#QuadGK.quadgk)
     - `rtol`: The relative tolerance for the integration, default: `rtol = sqrt(eps(FT))`
     - `atol`: The absolute tolerance for the integration, default: `atol = 0`
     - `maxevals`: The maximum number of function evaluations, default: `maxevals = 10^7`
@@ -42,20 +42,16 @@ This method calls [`∫fdD_error`](@ref), which returns both the value of the in
 julia> import CloudMicrophysics.Parameters as CMP,
               CloudMicrophysics.P3Scheme   as P3
 
-# Get a state object
 julia> params = CMP.ParametersP3(Float64);
 
 julia> state = P3.get_state(params; F_rim = 0.0, ρ_r = 400.0);
 
-# Define a function to integrate
-julia> f(D) = D^3;
+julia> f(D) = D^3;  # Define a function to integrate
 
-# Integrate the function
-julia> P3.∫fdD(f, state)
+julia> P3.∫fdD(f, state)    # Integrate the function
 0.25
 
-# Integrate with a `do`-block
-julia> P3.∫fdD(state) do D
+julia> P3.∫fdD(state) do D  # Integrate with a `do`-block
            P3.ice_mass(state, D)
        end
 0.006392317884295288
@@ -66,7 +62,7 @@ function ∫fdD(f, state::P3State; D_max = 1, kwargs...)
 end
 
 """
-    ∫fdD_error(f, state::P3State; D_max = 1, kwargs...)
+    ∫fdD_error(f, state::P3State; [D_max = 1], kwargs...)
 
 Integrate the function `f` over the size distribution of the ice particles.
 

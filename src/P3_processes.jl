@@ -71,7 +71,7 @@ function ice_melt(
     Tₐ::FT,
     ρₐ::FT,
     dt::FT;
-    ∫kwargs = (;)
+    ∫kwargs = (;),
 ) where {FT}
     # Note: process not dependent on `F_liq`
     # (we want ice core shape params)

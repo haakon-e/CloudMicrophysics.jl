@@ -11,7 +11,7 @@ Distribution of ice particles in size.
 # Fields
 $(FIELDS)
 """
-Base.@kwdef struct P3Distribution{FT}
+@kwdef struct P3Distribution{FT}
     "Particle state, see [`P3State`](@ref)"
     state::P3State{FT}
 
@@ -224,7 +224,7 @@ The assumed distribution is of the form
 N(D) = N₀ D^μ e^{-λD}
 ```
 where `N(D)` is the number concentration at diameter `D` and `μ` is the slope parameter.
-    The slope parameter is parameterized, e.g. [`SlopePowerLaw`](@ref) or [`SlopeConstant`](@ref).
+    The slope parameter is parameterized, e.g. [`CMP.SlopePowerLaw`](@ref) or [`CMP.SlopeConstant`](@ref).
 
 This algorithm solves for `log_λ = log(λ)` and `log_N₀ = log(N₀)` 
     given `L` and `N` by solving the equations:
@@ -257,12 +257,10 @@ where `m(D)` is the mass of a particle at diameter `D` (see [`ice_mass`](@ref)).
 julia> import CloudMicrophysics.Parameters as CMP,
               CloudMicrophysics.P3Scheme   as P3
 
-# Get a state object
 julia> params = CMP.ParametersP3(Float64);
 
 julia> state = P3.get_state(params; F_rim = 0.0, ρ_r = 400.0);
 
-# Solve for the distribution parameters
 julia> dist = P3.get_distribution_parameters(state; L = 1e-3, N = 1e3)
 P3Distribution{Float64}
 ├── state: is unrimed
