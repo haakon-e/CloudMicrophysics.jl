@@ -1,7 +1,7 @@
 using Test
 using KernelAbstractions
 using ClimaComms
-# ClimaComms.@import_required_backends
+ClimaComms.@import_required_backends
 
 # Needed for parameters
 import CloudMicrophysics.Parameters as CMP
@@ -23,7 +23,7 @@ import CloudMicrophysics.P3Scheme as P3
 
 const work_groups = (1,)
 
-# ClimaComms.device() isa ClimaComms.CUDADevice || error("No GPU found")
+ClimaComms.device() isa ClimaComms.CUDADevice || error("No GPU found")
 
 # Set up GPU
 using CUDA
