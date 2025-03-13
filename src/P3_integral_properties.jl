@@ -18,7 +18,7 @@ This method calls [`∫fdD_error`](@ref), which returns both the value of the in
 # Arguments
 - `f`: The function to integrate
 - `state`: The [`P3State`](@ref) object
-- `D_max`: The maximum diameter to integrate to [m] (default: `D_max = 1 m`)
+- `D_max`: The maximum diameter to integrate to [m]. Default: `D_max = 1 m`.
 - `kwargs`: Additional optional keyword arguments to pass to [`QGK.quadgk`](https://juliamath.github.io/QuadGK.jl/stable/api/#QuadGK.quadgk)
     - `rtol`: The relative tolerance for the integration, default: `rtol = sqrt(eps(FT))`
     - `atol`: The absolute tolerance for the integration, default: `atol = 0`
