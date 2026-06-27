@@ -287,6 +287,7 @@ Compute the coefficients for the Chen 2022 terminal velocity parametrization.
 See [Chen2022](@cite) for more details.
 """
 @inline function Chen2022_vel_coeffs(coeffs::CMP.Chen2022VelTypeRain, ρₐ)
+    ρₐ = max(ρₐ, zero(ρₐ))  # air density ≥ 0: the fractional power ρₐ^a3_pow requires a non-negative base
     (; ρ0, a, a3_pow, b, b_ρ, c) = coeffs
     # Table B1
     q = exp(ρ0 * ρₐ)
@@ -300,6 +301,7 @@ See [Chen2022](@cite) for more details.
 end
 
 @inline function Chen2022_vel_coeffs(coeffs::CMP.Chen2022VelTypeSmallIce, ρₐ, ρᵢ)
+    ρₐ = max(ρₐ, zero(ρₐ))  # air density ≥ 0: the fractional power ρₐ^As requires a non-negative base
     FT = eltype(coeffs)
     (; A, B, C, E, F, G) = coeffs
     # Table B3 - cache sqrt for reuse
@@ -322,6 +324,7 @@ end
 end
 
 @inline function Chen2022_vel_coeffs(coeffs::CMP.Chen2022VelTypeLargeIce, ρₐ, ρᵢ)
+    ρₐ = max(ρₐ, zero(ρₐ))  # air density ≥ 0: the fractional power ρₐ^Al requires a non-negative base
     FT = eltype(coeffs)
     (; A, B, C, E, F, G, H) = coeffs
     # Table B5 - cache sqrt for reuse
