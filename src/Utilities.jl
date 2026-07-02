@@ -150,9 +150,10 @@ end
 # happens to be a `Dual` with zero partials (e.g. promoted from a constant) is
 # allowed and treated as a constant.
 @inline function _assert_const_shape(a::FD.Dual)
+    # A single string literal: runtime string concatenation does not compile in
+    # device kernels.
     iszero(FD.partials(a)) || error(
-        "gamma_inc/gamma_inc_inv: differentiation with respect to the shape " *
-        "parameter `a` is not supported (only the x-/p-derivative is implemented).",
+        "gamma_inc/gamma_inc_inv: differentiation with respect to the shape parameter `a` is not supported (only the x-/p-derivative is implemented).",
     )
     return nothing
 end
