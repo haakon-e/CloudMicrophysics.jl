@@ -393,6 +393,24 @@ Assumes exponential size distribution (μ=0).
 end
 
 """
+    Chen2022VelocityCurve(ai, bi, ci)
+
+Callable holding the Chen 2022 terminal-velocity coefficients `(ai, bi, ci)`.
+Evaluating it at a diameter `D` returns `∑ₖ aₖ D^bₖ exp(-cₖ D)` [m/s].
+"""
+struct Chen2022VelocityCurve{N, FT}
+    ai::NTuple{N, FT}
+    bi::NTuple{N, FT}
+    ci::NTuple{N, FT}
+end
+function Chen2022VelocityCurve(ai::NTuple{N, Any}, bi::NTuple{N, Any}, ci::NTuple{N, Any}) where {N}
+    FT = promote_type(map(typeof, ai)..., map(typeof, bi)..., map(typeof, ci)...)
+    return Chen2022VelocityCurve{N, FT}(map(FT, ai), map(FT, bi), map(FT, ci))
+end
+@inline (v::Chen2022VelocityCurve)(D) =
+    unrolled_sum(abc -> abc[1] * D^abc[2] * exp(-abc[3] * D), map(tuple, v.ai, v.bi, v.ci))
+
+"""
     particle_terminal_velocity(velocity_params, ρₐ)
     particle_terminal_velocity(velocity_params, ρₐ, ρᵢ)
 
@@ -414,13 +432,7 @@ Needed for numerical integrals in the P3 scheme.
 """
 function particle_terminal_velocity(velocity_params::CMP.TerminalVelocityType, ρs...)
     (ai, bi, ci) = Chen2022_vel_coeffs(velocity_params, ρs...)
-    v_terms = Chen2022_monodisperse_pdf.(ai, bi, ci)  # tuple of functions
-    # NB: name the closure arg `vt` (not `v_term`) — shadowing the enclosing
-    # `v_term` derails Julia 1.11 inference (the unrolled map infers
-    # `NTuple{N, Any}`, forcing runtime dispatch / allocations and breaking
-    # GPU compilation of callers like `liquid_integrals`).
-    v_term(D) = unrolled_sum(vt -> vt(D), v_terms)
-    return v_term
+    return Chen2022VelocityCurve(ai, bi, ci)
 end
 
 """
