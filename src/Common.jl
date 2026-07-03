@@ -362,6 +362,8 @@ struct Chen2022VelocityCurve{N, FT}
     ai::NTuple{N, FT}
     bi::NTuple{N, FT}
     ci::NTuple{N, FT}
+    # The implicit constructor leaves `FT` unbound for empty coefficient tuples
+    Chen2022VelocityCurve{N, FT}(ai, bi, ci) where {N, FT} = new{N, FT}(ai, bi, ci)
 end
 function Chen2022VelocityCurve(velocity_params::CMP.TerminalVelocityType, ρₐ)
     (ai, bi, ci) = Chen2022_vel_coeffs(velocity_params, ρₐ)
