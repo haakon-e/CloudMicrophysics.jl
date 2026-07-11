@@ -127,6 +127,7 @@ G_{MR} = \frac{M_R}{N_\mathrm{ice} N_{0r}},
 stored as ``\log``.
 The rain channel is normalized by ``N_{0r}`` rather than by ``N_r`` because the ``N_{0,\max}`` clamp of the limited rain PDF binds at realistic loadings, so the rain shape depends on ``L_r`` alone through ``D_{r,\mathrm{mean}}``.
 The ``D_{r,\mathrm{mean}}`` axis spans the interval into which the rain PDF slope is clamped, ``[10^{-4}, 10^{-3}]`` m, so no realizable rain state leaves the grid.
+The ``x_c`` axis spans the SB2006 cloud droplet mean-mass envelope ``[x_{c,\min}, x_{c,\max}]``, taken from the cloud PDF parameters at build time, so no realizable cloud state leaves the grid; an earlier hardcoded ``[10^{-13}, 10^{-10}]`` kg axis clamped the low- and high-mass sweep states and produced a constant out-of-grid error in the variant-A accuracy tables.
 The build fills the moments without the wet-growth partition (no onset location, no Musil limit, no freeze/shed split), which is both faster than the runtime path and exactly the temperature-free part.
 
 ### The Musil freeze capacity
@@ -192,10 +193,12 @@ The collapse is exact: the closed-form rain inner and the cloud inner quadrature
 
 The tabulated quantities are the inner number and mass collision moments per unit liquid-number prefactor, ``H_{NC} = \partial_t N_{c,\mathrm{col}} / N_c`` and so on, stored as ``\log``.
 
-The variant-C method of [`bulk_liquid_ice_collision_sources`](@ref) builds the ice size distribution, the collision rate, and the Musil freeze limit at runtime, then integrates over ice size with a low-order rule.
+The variant-C method of [`bulk_liquid_ice_collision_sources`](@ref) builds the ice size distribution, the collision rate, and the Musil freeze limit at runtime, then integrates over ice size with a low-order rule, by default Gauss-Legendre order 6 (the order is a parameter).
 At each outer node it reads the inner cloud and rain moments from the tables at ``(v_i, r_i, \rho_\mathrm{air}, x_c)`` and ``(v_i, r_i, \rho_\mathrm{air}, D_{r,\mathrm{mean}})``, applies the per-diameter freeze/shed partition, and accumulates the seven sources.
-The wet-growth onset scan uses the same tabulated inner masses, so the onset location adds little cost.
+The ice fall speed ``v_i(D_i)`` is evaluated once per outer node and shared between the two channel lookups and the Musil ventilation factor of the freeze limit, rather than recomputed inside the ventilation factor; the fused form is algebraically identical to the separate evaluation.
+The wet-growth onset is located by an 8-node log-spaced scan with bisection refinement over the same tabulated inner masses, so it adds little cost.
 The rime-volume sources use the representative-density Cober-List closure shared with variant A.
+Sharing the fall speed and reducing the scan resolution roughly halve the per-cell variant-C cost relative to the previous order-8 path that evaluated the ice velocity twice per node, in a same-run comparison, at the same seven-output accuracy.
 
 Because the outer integral and the per-diameter partition are exact, the variant-C error is the table interpolation error for the six collision-moment outputs, temperature independent and with no warm-band bias.
 The rime-volume source ``\partial_t B_\mathrm{rim}`` instead uses the representative-density Cober-List closure shared with variant A, so it carries the same structural, non per-diameter approximation; it is small only where the representative rime density sits on its clamped floor, and departs from the per-diameter value near ``0`` °C and for large drops.
@@ -214,7 +217,7 @@ The bulk integral ``\int M_\mathrm{max}`` can exceed the collected mass ``\int M
 On the evaluation harness the ratio is 78 at 230 K, 5.5 at 263 K, 2.7 at 268 K, and 1.6 at 270 K, dropping below one only above about 271 K, so ``\theta = 1`` selects variant A for essentially the whole mixed-phase range and reaches variant A's warm-band error, not variant-C accuracy.
 Only ``\theta \to \infty`` selects the variant-C path everywhere and recovers variant-C accuracy.
 
-The two branches differ by about two orders of magnitude in cost.
+The two branches differ by more than an order of magnitude in cost.
 On a device kernel a warp's runtime is set by its most expensive lane, so one warm-band cell in a warp forces every lane in that warp through the variant-C path.
 The freeze limit binds in a spatially contiguous warm sub-freezing band, so the divergence is correlated rather than random, which reduces but does not remove it.
 A GPU throughput measurement of the hybrid should therefore report both a uniform and a shuffled state mix, and must not assume the hybrid runs at the variant-A cost in production.
