@@ -848,11 +848,12 @@ lookups and the Musil ventilation via [`max_freeze_rate_from_velocity`](@ref), s
 it is evaluated once per node. The rime-volume sources use the representative-size
 Cober-List density shared with the variant-A method.
 
-`quad` is the outer-integral quadrature rule.
+`quad` is the outer-integral quadrature rule; by default `GaussLegendre(FT, 6)`.
 """
 @inline function bulk_liquid_ice_collision_sources(
     rate_tables::P3LookupTables, inner_tables::P3CollisionInnerTables,
-    state::P3State, logλ, psd_c, psd_r, L_c, N_c, L_r, N_r, aps, tps, vel, ρₐ, T; quad,
+    state::P3State, logλ, psd_c, psd_r, L_c, N_c, L_r, N_r, aps, tps, vel, ρₐ, T;
+    quad = GaussLegendre(eltype(state), 6),
 )
     FT = promote_type(eltype(state), UT.promote_typeof(L_c, N_c, L_r, N_r, ρₐ, T))
     D_shd = FT(1e-3)  # 1 mm  # TODO: Externalize this parameter
@@ -941,7 +942,8 @@ recovers variant-C accuracy.
 """
 @inline function bulk_liquid_ice_collision_sources(
     rate_tables::P3LookupTables, coll_tables::P3CollisionTables, inner_tables::P3CollisionInnerTables,
-    state::P3State, logλ, psd_c, psd_r, L_c, N_c, L_r, N_r, aps, tps, vel, ρₐ, T; quad, θ,
+    state::P3State, logλ, psd_c, psd_r, L_c, N_c, L_r, N_r, aps, tps, vel, ρₐ, T;
+    quad = GaussLegendre(eltype(state), 6), θ,
 )
     FT = promote_type(eltype(state), UT.promote_typeof(L_c, N_c, L_r, N_r, ρₐ, T))
     ϵN = UT.ϵ_numerics_2M_N(FT)
