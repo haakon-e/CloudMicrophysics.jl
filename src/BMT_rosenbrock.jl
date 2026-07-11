@@ -103,7 +103,6 @@ sides `f_p` for the linear post-solve attribution and is not differentiated.
 ) where {WR, ICE <: CMP.P3IceParams}
     FT = eltype(ρ)
     ϵₘ = UT.ϵ_numerics_2M_M(FT)
-    ϵₙ = UT.ϵ_numerics_2M_N(FT)
     # Clamp negative inputs to zero, matching the entry.
     ρ = UT.clamp_to_nonneg(ρ)
     q_tot = UT.clamp_to_nonneg(q_tot)
@@ -202,7 +201,7 @@ sides `f_p` for the linear post-solve attribution and is not differentiated.
     quad = mp.ice.quad
 
     # liquid-ice collision, ice aggregation, ice melting
-    if q_ice > ϵₘ && n_ice > ϵₙ
+    if q_ice > ϵₘ
         coll =
             p3_tables === nothing ?
             CMP3.bulk_liquid_ice_collision_sources(

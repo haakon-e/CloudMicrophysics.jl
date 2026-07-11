@@ -306,11 +306,16 @@ function get_distribution_logλ(state, logλ_guess = nothing, logλ_min = 2, log
     ϵₘ = UT.ϵ_numerics_2M_M(FT)
     ϵₙ = UT.ϵ_numerics_2M_N(FT)
     (; ρn_ice, ρq_ice) = state
-    (ρn_ice < ϵₙ || ρq_ice < ϵₘ) && return log(zero(ρq_ice))
-    target_log_LdN = log(ρq_ice) - log(ρn_ice)
+    lo, hi = FT(logλ_min), FT(logλ_max)
+    # Floor the mass and number inside the logs so the mean-size target is
+    # finite and C0-continuous across onset: below the ϵ thresholds the target
+    # freezes at its limiting value and the solve returns a finite, bounded
+    # logλ. The size distribution still vanishes with ρn_ice, so no spurious
+    # ice appears; the number is relaxed toward a mass-consistent range by
+    # `number_tendency_from_mass_limits`.
+    target_log_LdN = log(max(ρq_ice, ϵₘ)) - log(max(ρn_ice, ϵₙ))
 
     shape_problem(logλ) = logLdivN(state, logλ) - target_log_LdN
-    lo, hi = FT(logλ_min), FT(logλ_max)
     f_lo, f_hi = shape_problem(lo), shape_problem(hi)
     if !isfinite(f_lo) || !isfinite(f_hi) || f_lo * f_hi > 0
         return abs(f_lo) ≤ abs(f_hi) ? lo : hi
@@ -336,7 +341,7 @@ function get_distribution_logλ(state, logλ_guess = nothing, logλ_min = 2, log
         FixedIterations{FT}(),
         maxiters,
     )
-    return sol.root  # logλ
+    return clamp(sol.root, lo, hi)  # logλ, within the search bounds
 end
 
 """

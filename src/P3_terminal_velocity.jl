@@ -84,20 +84,17 @@ function ice_terminal_velocity_number_weighted(
     velocity_params::CMP.Chen2022VelType, ρₐ, state::P3State, logλ;
     p = 1e-6, quad,
 )
-    (; ρn_ice, ρq_ice) = state
+    (; ρn_ice) = state
     v_term = ice_particle_terminal_velocity(velocity_params, ρₐ, state)
     n = DT.size_distribution(state, logλ)
 
-    # ∫n(D) v(D) dD, normalized by the number concentration
+    # ∫n(D) v(D) dD, normalized by the number concentration. The floored
+    # denominator keeps an empty state (ρn_ice → 0, integ → 0) finite and the
+    # mean velocity C0-continuous across ice onset.
     number_weighted_integrand = P3NumberWeightedIntegrand(n, v_term)
     bnds = velocity_integral_bounds(state, logλ, v_term; p)
     integ = integrate(number_weighted_integrand, bnds, quad)
-
-    # A degenerate ice state (ρn_ice or ρq_ice below ϵ) integrates to zero over
-    # zero-width bounds; select zero in place of the degenerate ratio.
-    below_ϵ = (ρn_ice < eps(one(ρn_ice))) | (ρq_ice < eps(one(ρq_ice)))
-    result = integ / ρn_ice  # non-finite for a degenerate state; discarded below
-    return ifelse(below_ϵ, zero(result), result)
+    return integ / max(ρn_ice, eps(one(ρn_ice)))
 end
 
 struct P3MassWeightedIntegrand{N, V, S} <: Function
@@ -128,20 +125,20 @@ function ice_terminal_velocity_mass_weighted(
     velocity_params::CMP.Chen2022VelType, ρₐ, state::P3State, logλ;
     p = 1e-6, quad,
 )
-    (; ρn_ice, ρq_ice) = state
+    (; ρq_ice, ρn_ice) = state
     v_term = ice_particle_terminal_velocity(velocity_params, ρₐ, state)
     n = DT.size_distribution(state, logλ)
 
-    # ∫n(D) m(D) v(D) dD, normalized by the mass concentration
-    mass_weighted_integrand = P3MassWeightedIntegrand(n, v_term, state)
+    # ∫n(D) m(D) v(D) dD, normalized by the mass concentration floored by the
+    # distribution's own represented mass ρn_ice·exp(logLdivN). Where the shape
+    # solve is unclamped the floor sits at (or below) ρq_ice, so the mean is
+    # unchanged; when ρq_ice → 0 with ρn_ice > 0 (logλ clamped) it keeps the
+    # bare mean a bounded fall speed (≤ the largest particle speed) while the
+    # sedimentation flux w·ρq stays conservative and vanishes with ρq_ice.
     bnds = velocity_integral_bounds(state, logλ, v_term; p)
-    integ = integrate(mass_weighted_integrand, bnds, quad)
-
-    # A degenerate ice state (ρn_ice or ρq_ice below ϵ) integrates to zero over
-    # zero-width bounds; select zero in place of the degenerate ratio.
-    below_ϵ = (ρn_ice < eps(one(ρn_ice))) | (ρq_ice < eps(one(ρq_ice)))
-    result = integ / ρq_ice  # non-finite for a degenerate state; discarded below
-    return ifelse(below_ϵ, zero(result), result)
+    integ = integrate(P3MassWeightedIntegrand(n, v_term, state), bnds, quad)
+    represented_mass = ρn_ice * exp(logLdivN(state, logλ))
+    return integ / max(ρq_ice, represented_mass, floatmin(eltype(state)))
 end
 
 """

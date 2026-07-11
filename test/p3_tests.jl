@@ -180,10 +180,14 @@ function test_shape_solver(FT)
         params = CMP.ParametersP3(FT; slope_law)
 
         @testset "Shape parameters - nonlinear solver" begin
-            # -- First, test limiting behavior: `N_ice = L_ice = 0` --
+            # -- First, test limiting behavior: `N_ice = L_ice = 0`. With no ice
+            # the mass/number floors freeze the target at its ϵ-limit, so the
+            # solver returns a finite, bounded logλ (the C0-continuous limit
+            # across onset). --
             state = P3.P3State(params, FT(0), FT(0), FT(0.5), FT(500))
             logλ = P3.get_distribution_logλ(state)
-            @test logλ == -Inf
+            @test isfinite(logλ)
+            @test FT(2) <= logλ <= FT(17)
             # --
 
             # initialize test values:
@@ -350,13 +354,16 @@ function test_bulk_terminal_velocities(FT)
 
     @testset "Mass and number weighted terminal velocities" begin
 
+        # Zero mass with nonzero number: the mean velocity is the finite
+        # smallest-particle limit (C0-continuous across onset).
         state₀ = P3.P3State(params, FT(0), N_ice, FT(0.5), ρ_rim)
         logλ = P3.get_distribution_logλ(state₀)
         vel_n₀ = P3.ice_terminal_velocity_number_weighted(Chen2022, ρ_a, state₀, logλ; quad = P3.GaussLegendre(FT, 12))
         vel_m₀ = P3.ice_terminal_velocity_mass_weighted(Chen2022, ρ_a, state₀, logλ; quad = P3.GaussLegendre(FT, 12))
-        @test iszero(vel_n₀)
-        @test iszero(vel_m₀)
+        @test isfinite(vel_n₀) && vel_n₀ >= 0
+        @test isfinite(vel_m₀) && vel_m₀ >= 0
 
+        # Zero number: no particles, so both mean velocities vanish.
         state₀ = P3.P3State(params, L_ice, FT(0), FT(0.5), ρ_rim)
         logλ = P3.get_distribution_logλ(state₀)
         vel_n₀ = P3.ice_terminal_velocity_number_weighted(Chen2022, ρ_a, state₀, logλ; quad = P3.GaussLegendre(FT, 12))
