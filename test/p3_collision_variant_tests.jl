@@ -18,6 +18,16 @@ include("p3_quadrature_error_study.jl")  # generate_column_states, hail_core_sta
 const VFLOOR = 1e-12
 vrelerr(a, b) = abs(a - b) / max(abs(a), abs(b), VFLOOR)
 
+# Marker adaptor: wraps every backing `Array` it reaches in a `TagArray`, so a
+# round-trip proves `Adapt` traverses the wrapper down to the tables' arrays.
+struct TagArray{T, N} <: AbstractArray{T, N}
+    parent::Array{T, N}
+end
+Base.size(a::TagArray) = size(a.parent)
+Base.getindex(a::TagArray, i::Int...) = getindex(a.parent, i...)
+struct MarkAdaptor end
+Adapt.adapt_storage(::MarkAdaptor, x::Array) = TagArray(x)
+
 function variant_harness(::Type{FT}, params) where {FT}
     out = NamedTuple[]
     for s in vcat(generate_column_states(FT), hail_core_states(FT, STUDY_HAIL_CORES))
@@ -161,9 +171,11 @@ end
         @test leak < 1e-1
     end
 
-    @testset "variant C matches quadrature to interpolation error at all T" begin
-        # Variant C keeps the exact per-diameter partition, so its error is the
-        # table interpolation error and does not grow into the warm band.
+    @testset "variant C: no warm-band bias, within a closure/interpolation envelope" begin
+        # The p95 is temperature independent (no warm-band bias); the max is a
+        # closure/interpolation envelope, set by the F_rim → 1 corner of the
+        # representative rime-density ∂ₜB_rim closure on this CI grid, not pure
+        # interpolation error.
         Ecold = FT[]
         Ewarm = FT[]
         for h in pts
@@ -176,9 +188,6 @@ end
                 push!(Ewarm, vrelerr(getfield(aw, k), getfield(bw, k)))
             end
         end
-        # The 95th percentile is temperature independent (no warm-band bias); the
-        # maximum bounds the F_rim → 1 corner of the representative rime-density
-        # closure, evaluated with the coarse rate-table velocity in this CI grid.
         @test quantile(Ecold, 0.95) < 1.0e-1
         @test quantile(Ewarm, 0.95) < 1.0e-1
         @test maximum(Ewarm) < 6.0e-1
@@ -260,6 +269,18 @@ end
         q2 = P3.lookup(dit.rain_inner, 2.0, 1e-4, 0.9, 3e-4)
         @test q1.log_H_NR ≈ q2.log_H_NR
         @test q1.log_H_MR ≈ q2.log_H_MR
+    end
+
+    @testset "P3IceTables Adapt traverses to backing arrays" begin
+        eng = BMT.P3IceTables(rate_tables, ctables, itables, out_quad, BMT.P3CollisionVariantC())
+        m = Adapt.adapt(MarkAdaptor(), eng)
+        @test m.rate_tables.rates.data isa TagArray
+        @test m.coll_tables.cloud.data isa TagArray
+        @test m.inner_tables.rain_inner.data isa TagArray
+        @test eng.coll_tables.cloud.data isa Array  # the original is untouched
+        # A variant-A-only engine with `nothing` sub-tables adapts to `nothing`.
+        engA0 = BMT.P3IceTables(rate_tables, ctables, nothing, out_quad, BMT.P3CollisionVariantA())
+        @test Adapt.adapt(MarkAdaptor(), engA0).inner_tables === nothing
     end
 
     @testset "BMT table path dispatches the collision variant" begin

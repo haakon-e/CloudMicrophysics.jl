@@ -185,10 +185,7 @@ end
     pts = vcat(collision_harness(FT, params), collision_sweep(FT, params, 150))
 
     @testset "cold state: all 7 outputs match quadrature to interpolation error" begin
-        # At T = 205 K the Musil limit does not bind (f_frz = 1), so every output
-        # is a table interpolation of the quadrature value. The 95th percentile is
-        # the accepted interpolation accuracy; the maximum bounds the F_rim → 1,
-        # low-logλ corner, matching the Phase-1 rate tables.
+        # T = 205 K: f_frz = 1, so every output is a table interpolation of the quadrature value.
         E = FT[]
         for h in pts
             a = tab(h, FT(205))
@@ -202,8 +199,6 @@ end
     end
 
     @testset "∂ₜq_c and ∂ₜN_c are temperature-independent" begin
-        # `∂ₜq_c = -M_C/ρₐ` and `∂ₜN_c = -NCCOL` carry no temperature dependence,
-        # so the table assembly reproduces them across temperatures to round-off.
         for h in pts
             ref = tab(h, FT(230))
             for T in (FT(205), FT(250), FT(263), FT(268), FT(272))
@@ -239,8 +234,6 @@ end
         )
         @test (@inferred src(rate_tables, ctables, h, T)) isa NamedTuple{OUT}
         cap(ct, hh, TT) = P3.bulk_max_freeze_rate(ct, aps, tps, hh.state, hh.logλ, hh.ρₐ, TT)
-        # The freeze-capacity and full assembly inherit the thermodynamics `Lf`/`Lᵥ`
-        # allocation; the table lookups add nothing on top of it.
         lf(tp, TT) = TDI.Lf(tp, TT) + TDI.Lᵥ(tp, TT)
         cap(ctables, h, T)
         lf(tps, T)

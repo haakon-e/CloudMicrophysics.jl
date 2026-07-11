@@ -127,7 +127,7 @@ G_{MR} = \frac{M_R}{N_\mathrm{ice} N_{0r}},
 stored as ``\log``.
 The rain channel is normalized by ``N_{0r}`` rather than by ``N_r`` because the ``N_{0,\max}`` clamp of the limited rain PDF binds at realistic loadings, so the rain shape depends on ``L_r`` alone through ``D_{r,\mathrm{mean}}``.
 The ``D_{r,\mathrm{mean}}`` axis spans the interval into which the rain PDF slope is clamped, ``[10^{-4}, 10^{-3}]`` m, so no realizable rain state leaves the grid.
-The build fills the moments without the wet-growth partition (no onset location, no Musil limit, no freeze/shed split), which is both cheaper than the runtime path and exactly the temperature-free part.
+The build fills the moments without the wet-growth partition (no onset location, no Musil limit, no freeze/shed split), which is both faster than the runtime path and exactly the temperature-free part.
 
 ### The Musil freeze capacity
 
@@ -194,19 +194,30 @@ The tabulated quantities are the inner number and mass collision moments per uni
 
 The variant-C method of [`bulk_liquid_ice_collision_sources`](@ref) builds the ice size distribution, the collision rate, and the Musil freeze limit at runtime, then integrates over ice size with a low-order rule.
 At each outer node it reads the inner cloud and rain moments from the tables at ``(v_i, r_i, \rho_\mathrm{air}, x_c)`` and ``(v_i, r_i, \rho_\mathrm{air}, D_{r,\mathrm{mean}})``, applies the per-diameter freeze/shed partition, and accumulates the seven sources.
-The wet-growth onset scan uses the same tabulated inner masses, so the onset location is cheap.
+The wet-growth onset scan uses the same tabulated inner masses, so the onset location adds little cost.
 The rime-volume sources use the representative-density Cober-List closure shared with variant A.
 
-Because the outer integral and the partition are exact, the variant-C error is the table interpolation error at every temperature, with no warm-band bias.
+Because the outer integral and the per-diameter partition are exact, the variant-C error is the table interpolation error for the six collision-moment outputs, temperature independent and with no warm-band bias.
+The rime-volume source ``\partial_t B_\mathrm{rim}`` instead uses the representative-density Cober-List closure shared with variant A, so it carries the same structural, non per-diameter approximation; it is small only where the representative rime density sits on its clamped floor, and departs from the per-diameter value near ``0`` °C and for large drops.
 Over the error-study harness and sweep, the seven-output error against a GL(128) reference has a 95th percentile of a few times ``10^{-2}`` from the cold band to one degree below freezing, against about ``1.5 \times 10^{-1}`` and rising for variant A.
 The inner tables are small, on the order of a few megabytes, because the ``(v_i, r_i)`` collapse removes three shape axes, and the build is a few seconds.
 
 ## The hybrid switch
 
 The hybrid method forms the bulk freeze ratio ``\int M_\mathrm{max} / \int M_\mathrm{col}`` from the variant-A tables and compares it to a threshold ``\theta``.
-Where the ratio is at least ``\theta`` the bulk partition does not bind, variant A is exact up to its interpolation error, and the cheap variant-A assembly is used; elsewhere the exact variant-C path is used.
+Where the ratio is at least ``\theta`` the lower-cost variant-A assembly is used; elsewhere the exact variant-C path is used.
 The natural value is ``\theta = 1``, the freeze-everything threshold; raising ``\theta`` toward infinity uses variant C everywhere, and lowering it toward zero uses variant A everywhere.
 ``\theta`` is a tunable parameter of the method, not a hardcoded constant.
+
+A bulk ratio of at least ``\theta`` does not imply that the per-diameter freeze fraction is one everywhere.
+The bulk integral ``\int M_\mathrm{max}`` can exceed the collected mass ``\int M_\mathrm{col}`` while a large-drop wet-growth window persists, so at ``\theta = 1`` the variant-A branch is taken across most of the warm sub-freezing band and carries variant A's bulk-partition bias there.
+On the evaluation harness the ratio is 78 at 230 K, 5.5 at 263 K, 2.7 at 268 K, and 1.6 at 270 K, dropping below one only above about 271 K, so ``\theta = 1`` selects variant A for essentially the whole mixed-phase range and reaches variant A's warm-band error, not variant-C accuracy.
+Only ``\theta \to \infty`` selects the variant-C path everywhere and recovers variant-C accuracy.
+
+The two branches differ by about two orders of magnitude in cost.
+On a device kernel a warp's runtime is set by its most expensive lane, so one warm-band cell in a warp forces every lane in that warp through the variant-C path.
+The freeze limit binds in a spatially contiguous warm sub-freezing band, so the divergence is correlated rather than random, which reduces but does not remove it.
+A GPU throughput measurement of the hybrid should therefore report both a uniform and a shuffled state mix, and must not assume the hybrid runs at the variant-A cost in production.
 
 ## API
 

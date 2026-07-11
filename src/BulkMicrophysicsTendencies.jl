@@ -24,6 +24,7 @@ tendencies = bulk_microphysics_tendencies(
 """
 module BulkMicrophysicsTendencies
 
+import Adapt
 import ..Parameters as CMP
 import ..Utilities as UT
 import ..Microphysics0M as CM0
@@ -806,6 +807,11 @@ struct P3IceTables{RT, CT, IT, Q, M}
     quad::Q
     mode::M
 end
+
+Adapt.adapt_structure(to, t::P3IceTables) = P3IceTables(
+    Adapt.adapt(to, t.rate_tables), Adapt.adapt(to, t.coll_tables),
+    Adapt.adapt(to, t.inner_tables), Adapt.adapt(to, t.quad), t.mode,
+)
 
 @inline _table_collision(
     t::P3IceTables{<:Any, <:Any, <:Any, <:Any, P3CollisionVariantA},

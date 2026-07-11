@@ -224,10 +224,9 @@ A = 2π \\frac{K_\\mathrm{therm} ΔT + L_v D_\\mathrm{vapor} Δρ_{v,\\mathrm{sa
 The scalar is shared by the per-diameter [`compute_max_freeze_rate`](@ref) and
 the bulk freeze-capacity reconstruction of [`P3LookupTables`](@ref).
 
-Returns `0` at `Tₐ ≥ T_freeze`. The denominator `L_f - c_{p,l} ΔT` turns
-non-positive at `Tₐ ≲ 220 K` (`ΔT ≳ L_f / c_{p,l} ≈ 53 K`), where colder air is
-further from the dry/wet-growth transition and every colliding droplet freezes;
-`floatmax` is returned there so that `f_frz = 1`.
+Returns `0` at `Tₐ ≥ T_freeze`, and `floatmax` where the denominator
+`L_f - c_{p,l} ΔT` is non-positive (`Tₐ ≲ 220 K`), so that `f_frz` saturates to
+`1`.
 """
 function max_freeze_rate_scalar(aps, tps, ρₐ, Tₐ)
     (; D_vapor, K_therm) = aps
@@ -498,11 +497,19 @@ Computes the bulk collision rate integrands between ice and liquid particles.
 # Returns
 A tuple of 8 integrands, see [`∫liquid_ice_collisions`](@ref) for details.
 """
-@inline function ∫liquid_ice_collisions(n_i, ∂ₜM_max, cloud_integrals, rain_integrals, ice_bounds; quad)
+@inline ∫liquid_ice_collisions(n_i, ∂ₜM_max, cloud_integrals, rain_integrals, ice_bounds; quad) =
+    ∫liquid_ice_collisions(
+        n_i, ∂ₜM_max, Dᵢ -> (cloud_integrals(Dᵢ)..., rain_integrals(Dᵢ)...), ice_bounds; quad,
+    )
+
+# Combined-closure form: `liquid_integrals(Dᵢ)` returns the six cloud and rain
+# inner components `(∂ₜN_c, ∂ₜM_c, ∂ₜB_c, ∂ₜN_r, ∂ₜM_r, ∂ₜB_r)`. The table path
+# uses this form so the per-node ice factors shared by the two channels are
+# formed once.
+@inline function ∫liquid_ice_collisions(n_i, ∂ₜM_max, liquid_integrals, ice_bounds; quad)
     function liquid_ice_collisions_integrands(Dᵢ)
         # Inner integrals over liquid particle diameters
-        ∂ₜN_c_col, ∂ₜM_c_col, ∂ₜB_c_col = cloud_integrals(Dᵢ)
-        ∂ₜN_r_col, ∂ₜM_r_col, ∂ₜB_r_col = rain_integrals(Dᵢ)
+        ∂ₜN_c_col, ∂ₜM_c_col, ∂ₜB_c_col, ∂ₜN_r_col, ∂ₜM_r_col, ∂ₜB_r_col = liquid_integrals(Dᵢ)
 
         # Partition the mass collisions between freezing and shedding
         ∂ₜM_col = ∂ₜM_c_col + ∂ₜM_r_col  # [kg / s]
