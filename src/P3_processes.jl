@@ -195,41 +195,57 @@ balanced by the latent heat of fusion.
 From Eq (A7) in Musil (1970), [Musil1970](@cite).
 """
 function compute_max_freeze_rate(aps, tps, velocity_params, ρₐ, Tₐ, state)
+    A = max_freeze_rate_scalar(aps, tps, ρₐ, Tₐ)
+    v_term = ice_particle_terminal_velocity(velocity_params, ρₐ, state)
+    F_v = CO.ventilation_factor(state.params.vent, aps, v_term)
+    function max_freeze_rate(Dᵢ)
+        # fallback values typed by the promotion of the node and the captured scalar
+        # (mixed plain/Dual under differentiation)
+        FT = UT.promote_typeof(Dᵢ, A)
+        # `A == floatmax` marks the denom ≤ 0 branch (see `max_freeze_rate_scalar`);
+        # the per-diameter rate is `A · Dᵢ · F_v(Dᵢ)` otherwise
+        return ifelse(A == floatmax(FT), floatmax(FT), FT(A * Dᵢ * F_v(Dᵢ)))
+    end
+    return max_freeze_rate
+end
+
+"""
+    max_freeze_rate_scalar(aps, tps, ρₐ, Tₐ)
+
+Compute the temperature- and air-density-dependent scalar `A` of the Musil
+(1970) maximum freezing rate, [Musil1970](@cite) Eq. (A7), which factors as
+`∂ₜM_max(Dᵢ) = A · Dᵢ · F_v(Dᵢ)` with `F_v` the ventilation factor:
+
+```math
+A = 2π \\frac{K_\\mathrm{therm} ΔT + L_v D_\\mathrm{vapor} Δρ_{v,\\mathrm{sat}}}{L_f - c_{p,l} ΔT},
+\\qquad ΔT = T_\\mathrm{freeze} - T_a.
+```
+
+The scalar is shared by the per-diameter [`compute_max_freeze_rate`](@ref) and
+the bulk freeze-capacity reconstruction of [`P3LookupTables`](@ref).
+
+Returns `0` at `Tₐ ≥ T_freeze`. The denominator `L_f - c_{p,l} ΔT` turns
+non-positive at `Tₐ ≲ 220 K` (`ΔT ≳ L_f / c_{p,l} ≈ 53 K`), where colder air is
+further from the dry/wet-growth transition and every colliding droplet freezes;
+`floatmax` is returned there so that `f_frz = 1`.
+"""
+function max_freeze_rate_scalar(aps, tps, ρₐ, Tₐ)
     (; D_vapor, K_therm) = aps
     cp_l = TDI.cp_l(tps)
     T_frz = TDI.T_freeze(tps)
     Lᵥ = TDI.Lᵥ(tps, Tₐ)
     L_f = TDI.Lf(tps, Tₐ)
     Tₛ = T_frz  # the surface of the ice particle is assumed to be at the freezing temperature
-    ΔT = Tₛ - Tₐ  # temperature difference between the surface of the ice particle and the air
+    ΔT = Tₛ - Tₐ
     Δρᵥ_sat =
-        ρₐ * (  # saturation vapor density difference between the surface of the ice particle and the air
+        ρₐ * (
             TDI.p2q(tps, Tₛ, ρₐ, TDI.saturation_vapor_pressure_over_ice(tps, Tₛ)) -
             TDI.p2q(tps, Tₐ, ρₐ, TDI.saturation_vapor_pressure_over_ice(tps, Tₐ))
         )
-    v_term = ice_particle_terminal_velocity(velocity_params, ρₐ, state)
-    F_v = CO.ventilation_factor(state.params.vent, aps, v_term)
-    # Musil (1970) dry-growth formula: the denominator `(L_f - cp_l·ΔT)`
-    # represents the *net* latent heat per unit mass available to freeze a
-    # colliding droplet. At Tₐ ≲ 220 K (ΔT ≳ L_f/cp_l ≈ 53 K with
-    # T-dependent L_f, see Eq. A7 in Musil 1970), the denominator flips
-    # sign, making `max_freeze_rate < 0` — which is unphysical. Cold air
-    # is *further from* the dry/wet-growth transition, not closer to it:
-    # the physical answer is `f_frz → 1` (every colliding droplet
-    # freezes). We enforce that by returning `floatmax(FT)` when the
-    # denominator is non-positive, so `min(∂ₜM_col, ∂ₜM_max) = ∂ₜM_col` and
-    # `f_frz = 1`.
     denom = L_f - cp_l * ΔT
-    function max_freeze_rate(Dᵢ)
-        # fallback values typed by the promotion of the node and the captured state
-        # (mixed plain/Dual under differentiation)
-        FT = UT.promote_typeof(Dᵢ, ΔT, Δρᵥ_sat, denom)
-        # `rate` is non-finite when `denom ≤ 0`; the selection below discards it
-        rate = 2 * (π * Dᵢ) * F_v(Dᵢ) * (K_therm * ΔT + Lᵥ * D_vapor * Δρᵥ_sat) / denom
-        # zero above the freezing temperature; floatmax when denom ≤ 0 (see above)
-        return ifelse(Tₐ ≥ T_frz, zero(FT), ifelse(denom > 0, FT(rate), floatmax(FT)))
-    end
-    return max_freeze_rate
+    A = 2 * π * (K_therm * ΔT + Lᵥ * D_vapor * Δρᵥ_sat) / denom
+    FT = UT.promote_typeof(ρₐ, Tₐ, ΔT, Δρᵥ_sat, denom)
+    return ifelse(Tₐ ≥ T_frz, zero(FT), ifelse(denom > 0, FT(A), floatmax(FT)))
 end
 
 """

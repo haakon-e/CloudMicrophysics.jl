@@ -276,6 +276,206 @@ end
 # Rate-table coordinates for a `state` at slope `logλ` and air density `ρₐ`.
 @inline _rate_coords(state::P3State, logλ, ρₐ) = (logλ, state.F_rim, state.ρ_rim, ρₐ)
 
+# ---------------------------------------------------------------------------- #
+# Phase-2 liquid-ice collision tables
+# ---------------------------------------------------------------------------- #
+
+# Cloud and rain unpartitioned collision moments, normalized to unit ice number
+# and unit liquid-number prefactor: `G_NC = NCCOL / (N_ice N_c)`,
+# `G_MC = M_C / (N_ice N_c)`, `G_NR = NRCOL / (N_ice N₀r)`,
+# `G_MR = M_R / (N_ice N₀r)`. Stored as `log`.
+const COLLISION_CLOUD_NAMES = (:log_G_NC, :log_G_MC)
+const COLLISION_RAIN_NAMES = (:log_G_NR, :log_G_MR)
+# Musil ventilation moments of the unit-number ice PSD: `V_a = ∫ n̂ D dD`
+# (air-density independent) and `V_b = ∫ n̂ D^{3/2} √v_i dD`. Stored as `log`.
+const MUSIL_A_NAMES = (:log_V_a,)
+const MUSIL_B_NAMES = (:log_V_b,)
+
+"""
+    P3CollisionTables{C, R, MA, MB}
+
+Container for the Phase-2 liquid-ice collision tables:
+- `cloud`: 5D [`RateTable`](@ref) on `(logλ, F_rim, ρ_rim, log ρ_air, log x_c)`
+  holding `log_G_NC`, `log_G_MC`;
+- `rain`: 5D `RateTable` on `(logλ, F_rim, ρ_rim, log ρ_air, log Dr_mean)`
+  holding `log_G_NR`, `log_G_MR`;
+- `musil_a`: 3D `RateTable` on `(logλ, F_rim, ρ_rim)` holding `log_V_a`;
+- `musil_b`: 4D `RateTable` on `(logλ, F_rim, ρ_rim, log ρ_air)` holding `log_V_b`.
+
+Build with [`build_p3_collision_tables`](@ref); assemble the bulk sources with the
+table method of [`bulk_liquid_ice_collision_sources`](@ref).
+"""
+struct P3CollisionTables{C, R, MA, MB}
+    cloud::C
+    rain::R
+    musil_a::MA
+    musil_b::MB
+end
+
+Adapt.adapt_structure(to, t::P3CollisionTables) = P3CollisionTables(
+    Adapt.adapt(to, t.cloud), Adapt.adapt(to, t.rain),
+    Adapt.adapt(to, t.musil_a), Adapt.adapt(to, t.musil_b),
+)
+
+"""
+    P3CollisionGrid{FT}
+
+Grid resolution and bounds for [`build_p3_collision_tables`](@ref). The `F_rim`
+upper bound (`1 - eps(FT)`) and the `ρ_rim` upper bound (`0.8 ρ_l`) are derived
+from the P3 parameters at build time, matching [`P3TableGrid`](@ref). The shared
+shape axes `(logλ, F_rim, ρ_rim, ρ_air)` reuse the [`P3TableGrid`](@ref) ranges;
+the two 5D tables add a `log x_c` (cloud mean mass) axis and a `log Dr_mean`
+(rain mean diameter) axis. The `Dr_mean` range is the interval into which the
+limited rain PDF slope is clamped, so no realizable rain state leaves it.
+"""
+Base.@kwdef struct P3CollisionGrid{FT}
+    logλ_lo::FT = 2.0
+    logλ_hi::FT = 17.0
+    n_logλ::Int = 40
+    n_F_rim::Int = 12
+    ρ_rim_lo::FT = 100.0
+    n_ρ_rim::Int = 10
+    ρ_air_lo::FT = 0.05
+    ρ_air_hi::FT = 1.5
+    n_ρ_air::Int = 6
+    x_c_lo::FT = 1e-13
+    x_c_hi::FT = 1e-10
+    n_x_c::Int = 16
+    Dr_lo::FT = 1e-4
+    Dr_hi::FT = 1e-3
+    n_Dr::Int = 16
+    build_order::Int = 16
+    bounds_tail::FT = 1e-5
+end
+
+# Cloud inner collision moments `(∂ₜN_c_col, ∂ₜM_c_col)` per unit cloud number,
+# normalized so `NCCOL = N_ice N_c G_NC`. The ice PSD `n_i` is unit-number and the
+# cloud PSD is built at unit number with `L_c = x_c`.
+@inline function _cloud_unit_moments(state, logλ, n_i, ∂ₜV, ice_bounds, psd_c, ρₐ, x_c, m_liq, p; quad)
+    FT = eltype(state)
+    q_c = x_c / ρₐ
+    n_c = DT.size_distribution(psd_c, q_c, ρₐ, one(FT))
+    bounds_c = CM2.get_size_distribution_bounds(psd_c, q_c, ρₐ, one(FT), p)
+    ρ′_unit = (_Dᵢ, _Dₗ) -> one(FT)
+    cloud = get_liquid_integrals(n_c, ∂ₜV, m_liq, ρ′_unit, bounds_c; quad)
+    G_NC = integrate(Dᵢ -> n_i(Dᵢ) * cloud(Dᵢ)[1], ice_bounds, quad)
+    G_MC = integrate(Dᵢ -> n_i(Dᵢ) * cloud(Dᵢ)[2], ice_bounds, quad)
+    return (G_NC, G_MC)
+end
+
+# Rain inner collision moments `(∂ₜN_r_col, ∂ₜM_r_col)` per unit `N₀r`, normalized
+# so `NRCOL = N_ice N₀r G_NR`. The rain slope is `λr = 1 / Dr_mean`.
+@inline function _rain_unit_moments(state, n_i, ∂ₜV, ice_bounds, psd_r, Dr_mean, p; quad)
+    FT = eltype(state)
+    (; v_i, v_l) = ∂ₜV
+    ρw = psd_r.ρw
+    ai, bi, ci = SA.SVector(v_l.ai), SA.SVector(v_l.bi), SA.SVector(v_l.ci)
+    D_min = DT.exponential_quantile(Dr_mean, p)
+    D_max = DT.exponential_quantile(Dr_mean, one(FT) - p)
+    function inner(Dᵢ)
+        v = v_i(Dᵢ)
+        rᵢ = sqrt(ice_area(state, Dᵢ) / FT(π))
+        Dstar = crossover_diameter(v, v_l, D_min, D_max)
+        return closed_rain_inner_NM(v, Dstar, rᵢ, ρw, ai, bi, ci, D_min, D_max, one(FT), Dr_mean)
+    end
+    G_NR = integrate(Dᵢ -> n_i(Dᵢ) * inner(Dᵢ)[1], ice_bounds, quad)
+    G_MR = integrate(Dᵢ -> n_i(Dᵢ) * inner(Dᵢ)[2], ice_bounds, quad)
+    return (G_NR, G_MR)
+end
+
+# Musil ventilation moments of the unit-number ice PSD over `ice_bounds`.
+@inline function _musil_unit_moments(n_i, v_term, ice_bounds; quad)
+    V_a = integrate(D -> n_i(D) * D, ice_bounds, quad)
+    V_b = integrate(D -> n_i(D) * D^(3 // 2) * sqrt(v_term(D)), ice_bounds, quad)
+    return (V_a, V_b)
+end
+
+"""
+    build_p3_collision_tables(params, velocity_params, aps, psd_c, psd_r; grid, quad)
+
+Fill the Phase-2 liquid-ice collision tables by evaluating the unpartitioned
+collision integrals and the Musil ventilation moments at every grid node, and
+return a [`P3CollisionTables`](@ref). The integrals are built without the
+wet-growth partition (temperature-free and bilinear in the liquid-number
+prefactors); the temperature-dependent partition is applied at the use site by
+the table method of [`bulk_liquid_ice_collision_sources`](@ref).
+
+# Arguments
+- `params`: [`CMP.ParametersP3`](@ref).
+- `velocity_params`: [`CMP.Chen2022VelType`](@ref).
+- `aps`: [`CMP.AirProperties`](@ref).
+- `psd_c`: [`CMP.CloudParticlePDF_SB2006`](@ref).
+- `psd_r`: [`CMP.RainParticlePDF_SB2006`](@ref).
+
+# Keyword Arguments
+- `grid`: a [`P3CollisionGrid`](@ref). By default, `P3CollisionGrid{FT}()`.
+- `quad`: the build quadrature rule. By default, `GaussLegendre(FT, grid.build_order)`.
+"""
+function build_p3_collision_tables(
+    params::CMP.ParametersP3, velocity_params, aps, psd_c, psd_r;
+    grid::P3CollisionGrid = P3CollisionGrid{typeof(params.ρ_l)}(),
+    quad = GaussLegendre(typeof(params.ρ_l), grid.build_order),
+)
+    FT = typeof(params.ρ_l)
+    p = grid.bounds_tail
+    F_rim_hi = one(FT) - eps(FT)
+    ρ_rim_hi = FT(0.8) * params.ρ_l
+    ρw = psd_c.ρw
+    @assert ρw == psd_r.ρw "cloud and rain must share the liquid water density"
+    m_liq(Dₗ) = ρw * CO.volume_sphere_D(Dₗ)
+
+    ax_λ = LinAxis(; lo = grid.logλ_lo, hi = grid.logλ_hi, n = grid.n_logλ)
+    ax_F = LinAxis(; lo = zero(FT), hi = F_rim_hi, n = grid.n_F_rim)
+    ax_r = LinAxis(; lo = grid.ρ_rim_lo, hi = ρ_rim_hi, n = grid.n_ρ_rim)
+    ax_a = LogAxis(; lo = grid.ρ_air_lo, hi = grid.ρ_air_hi, n = grid.n_ρ_air)
+    ax_xc = LogAxis(; lo = grid.x_c_lo, hi = grid.x_c_hi, n = grid.n_x_c)
+    ax_Dr = LogAxis(; lo = grid.Dr_lo, hi = grid.Dr_hi, n = grid.n_Dr)
+
+    nλ, nF, nr, na = grid.n_logλ, grid.n_F_rim, grid.n_ρ_rim, grid.n_ρ_air
+    nxc, nDr = grid.n_x_c, grid.n_Dr
+    data_c = Array{FT}(undef, length(COLLISION_CLOUD_NAMES), nλ, nF, nr, na, nxc)
+    data_R = Array{FT}(undef, length(COLLISION_RAIN_NAMES), nλ, nF, nr, na, nDr)
+    data_ma = Array{FT}(undef, length(MUSIL_A_NAMES), nλ, nF, nr)
+    data_mb = Array{FT}(undef, length(MUSIL_B_NAMES), nλ, nF, nr, na)
+
+    Threads.@threads for I in CartesianIndices((nλ, nF, nr))
+        i, j, k = Tuple(I)
+        logλ = node_coord(ax_λ, i)
+        F_rim = node_coord(ax_F, j)
+        ρ_rim = node_coord(ax_r, k)
+        x_ice = exp(logLdivN(P3State(params, one(FT), one(FT), F_rim, ρ_rim), logλ))
+        state = P3State(params, x_ice, one(FT), F_rim, ρ_rim)
+        n_i = DT.size_distribution(state, logλ)
+        for l in 1:na
+            ρₐ = node_coord(ax_a, l)
+            ∂ₜV = volumetric_collision_rate_integrand(velocity_params, ρₐ, state)
+            ice_bounds = velocity_integral_bounds(state, logλ, ∂ₜV.v_i; p)
+            V_a, V_b = _musil_unit_moments(n_i, ∂ₜV.v_i, ice_bounds; quad)
+            # `V_a` and `ice_bounds` are air-density independent; record `V_a` once
+            l == 1 && (@inbounds data_ma[1, i, j, k] = log(V_a))
+            @inbounds data_mb[1, i, j, k, l] = log(V_b)
+            for m in 1:nxc
+                x_c = node_coord(ax_xc, m)
+                G_NC, G_MC = _cloud_unit_moments(state, logλ, n_i, ∂ₜV, ice_bounds, psd_c, ρₐ, x_c, m_liq, p; quad)
+                @inbounds data_c[1, i, j, k, l, m] = log(G_NC)
+                @inbounds data_c[2, i, j, k, l, m] = log(G_MC)
+            end
+            for m in 1:nDr
+                Dr = node_coord(ax_Dr, m)
+                G_NR, G_MR = _rain_unit_moments(state, n_i, ∂ₜV, ice_bounds, psd_r, Dr, p; quad)
+                @inbounds data_R[1, i, j, k, l, m] = log(G_NR)
+                @inbounds data_R[2, i, j, k, l, m] = log(G_MR)
+            end
+        end
+    end
+
+    cloud = RateTable{COLLISION_CLOUD_NAMES}((ax_λ, ax_F, ax_r, ax_a, ax_xc), data_c)
+    rain = RateTable{COLLISION_RAIN_NAMES}((ax_λ, ax_F, ax_r, ax_a, ax_Dr), data_R)
+    musil_a = RateTable{MUSIL_A_NAMES}((ax_λ, ax_F, ax_r), data_ma)
+    musil_b = RateTable{MUSIL_B_NAMES}((ax_λ, ax_F, ax_r, ax_a), data_mb)
+    return P3CollisionTables(cloud, rain, musil_a, musil_b)
+end
+
 """
     ice_self_collection(tables::P3LookupTables, state, logλ, ρₐ)
 
