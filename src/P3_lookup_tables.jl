@@ -985,10 +985,8 @@ Table-backed number-weighted mean ice terminal velocity; see the quadrature
 method [`ice_terminal_velocity_number_weighted`](@ref).
 """
 @inline function ice_terminal_velocity_number_weighted(tables::P3LookupTables, state::P3State, logλ, ρₐ)
-    FT = eltype(state)
     q = lookup(tables.rates, _rate_coords(state, logλ, ρₐ)...)
-    below_ϵ = (state.ρn_ice < UT.ϵ_numerics_2M_N(FT)) | (state.ρq_ice < UT.ϵ_numerics_2M_M(FT))
-    return ifelse(below_ϵ, zero(q.v_number), q.v_number)
+    return q.v_number
 end
 
 """
@@ -998,10 +996,8 @@ Table-backed mass-weighted mean ice terminal velocity; see the quadrature method
 [`ice_terminal_velocity_mass_weighted`](@ref).
 """
 @inline function ice_terminal_velocity_mass_weighted(tables::P3LookupTables, state::P3State, logλ, ρₐ)
-    FT = eltype(state)
     q = lookup(tables.rates, _rate_coords(state, logλ, ρₐ)...)
-    below_ϵ = (state.ρn_ice < UT.ϵ_numerics_2M_N(FT)) | (state.ρq_ice < UT.ϵ_numerics_2M_M(FT))
-    return ifelse(below_ϵ, zero(q.v_mass), q.v_mass)
+    return q.v_mass
 end
 
 """
@@ -1033,13 +1029,12 @@ end
     get_distribution_logλ(tables::P3LookupTables, state)
 
 Table-backed slope parameter `logλ`; see the iterative solver
-[`get_distribution_logλ`](@ref). A degenerate ice state returns `log(0)`.
+[`get_distribution_logλ`](@ref). The mean mass is floored by the `ϵ` numeric
+thresholds, so `logλ` stays finite and continuous across ice onset.
 """
 @inline function get_distribution_logλ(tables::P3LookupTables, state::P3State)
     FT = eltype(state)
     (; ρn_ice, ρq_ice) = state
-    (ρn_ice < UT.ϵ_numerics_2M_N(FT) || ρq_ice < UT.ϵ_numerics_2M_M(FT)) &&
-        return log(zero(ρq_ice))
-    q = lookup(tables.shape, ρq_ice / ρn_ice, state.F_rim, state.ρ_rim)
-    return q.logλ
+    x = max(ρq_ice, UT.ϵ_numerics_2M_M(FT)) / max(ρn_ice, UT.ϵ_numerics_2M_N(FT))
+    return lookup(tables.shape, x, state.F_rim, state.ρ_rim).logλ
 end
