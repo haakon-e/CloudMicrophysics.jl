@@ -176,7 +176,37 @@ The five partition-dependent outputs (``\partial_t q_r``, ``\partial_t N_r``, ``
 This delta is a property of the bulk closure and is bounded below by no grid refinement; it is reported here so that its acceptability is a modeling decision.
 The two softest parts of the closure are the wet fraction, which the bulk mean reads near zero while the per-size fraction reaches 0.1 to 0.5, and the representative-size rime density near ``0`` °C where the Cober-List index leaves its floor; both are quantified in the evaluation study.
 
-The variant that keeps the exact per-diameter partition while sourcing the inner moments from tables, and the runtime selector between the two, are added in a later step.
+## Variant C: inner-component tables and the exact outer path
+
+Variant A tabulates the fully integrated collision moments and replaces the per-diameter freeze/shed partition with one bulk fraction, which introduces the warm-band bias above.
+Variant C instead tabulates only the inner collision moments and keeps the outer integral over ice size, so the per-diameter partition is retained exactly.
+
+The inner cloud and rain collision integrals depend on the ice state only through the ice fall speed ``v_i(D_i)`` and the effective radius ``r_i(D_i) = \sqrt{a_i(D_i)/\pi}`` at the outer ice diameter.
+The collision cross-section is ``\pi (r_i + D_l/2)^2`` and the collision rate carries ``|v_i - v_l|``, so the shape coordinates ``(\log\lambda, F_\mathrm{rim}, \rho_\mathrm{rim})`` of the variant-A tables collapse to the two coordinates ``(v_i, r_i)``.
+The collapse is exact: the closed-form rain inner and the cloud inner quadrature take no other state-dependent argument, so the leakage is at machine precision.
+
+| Table | Prefactor | Coordinates | Quantities |
+|:------|:----------|:------------|:-----------|
+| cloud inner | ``N_c`` | ``v_i,\ r_i,\ \log\rho_\mathrm{air},\ \log x_c`` | ``H_{NC}, H_{MC}`` |
+| rain inner | ``N_{0r}`` | ``v_i,\ r_i,\ \log\rho_\mathrm{air},\ \log D_{r,\mathrm{mean}}`` | ``H_{NR}, H_{MR}`` |
+
+The tabulated quantities are the inner number and mass collision moments per unit liquid-number prefactor, ``H_{NC} = \partial_t N_{c,\mathrm{col}} / N_c`` and so on, stored as ``\log``.
+
+The variant-C method of [`bulk_liquid_ice_collision_sources`](@ref) builds the ice size distribution, the collision rate, and the Musil freeze limit at runtime, then integrates over ice size with a low-order rule.
+At each outer node it reads the inner cloud and rain moments from the tables at ``(v_i, r_i, \rho_\mathrm{air}, x_c)`` and ``(v_i, r_i, \rho_\mathrm{air}, D_{r,\mathrm{mean}})``, applies the per-diameter freeze/shed partition, and accumulates the seven sources.
+The wet-growth onset scan uses the same tabulated inner masses, so the onset location is cheap.
+The rime-volume sources use the representative-density Cober-List closure shared with variant A.
+
+Because the outer integral and the partition are exact, the variant-C error is the table interpolation error at every temperature, with no warm-band bias.
+Over the error-study harness and sweep, the seven-output error against a GL(128) reference has a 95th percentile of a few times ``10^{-2}`` from the cold band to one degree below freezing, against about ``1.5 \times 10^{-1}`` and rising for variant A.
+The inner tables are small, on the order of a few megabytes, because the ``(v_i, r_i)`` collapse removes three shape axes, and the build is a few seconds.
+
+## The hybrid switch
+
+The hybrid method forms the bulk freeze ratio ``\int M_\mathrm{max} / \int M_\mathrm{col}`` from the variant-A tables and compares it to a threshold ``\theta``.
+Where the ratio is at least ``\theta`` the bulk partition does not bind, variant A is exact up to its interpolation error, and the cheap variant-A assembly is used; elsewhere the exact variant-C path is used.
+The natural value is ``\theta = 1``, the freeze-everything threshold; raising ``\theta`` toward infinity uses variant C everywhere, and lowering it toward zero uses variant A everywhere.
+``\theta`` is a tunable parameter of the method, not a hardcoded constant.
 
 ## API
 
@@ -193,4 +223,7 @@ P3Scheme.build_p3_collision_tables
 P3Scheme.P3CollisionTables
 P3Scheme.P3CollisionGrid
 P3Scheme.bulk_max_freeze_rate
+P3Scheme.build_p3_collision_inner_tables
+P3Scheme.P3CollisionInnerTables
+P3Scheme.P3CollisionInnerGrid
 ```
