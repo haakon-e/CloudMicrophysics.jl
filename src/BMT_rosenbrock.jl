@@ -31,11 +31,13 @@ without timestep-dependent clipping.
 """
 @inline function _instantaneous_2mp3_tendency(mp, tps,
     ρ, T, q_tot,
-    q_lcl, n_lcl, q_rai, n_rai, q_ice, n_ice, q_rim, b_rim, logλ,
+    q_lcl, n_lcl, q_rai, n_rai, q_ice, n_ice, q_rim, b_rim, logλ;
+    p3_tables = nothing,
 )
     full = bulk_microphysics_tendencies(Microphysics2Moment(), mp, tps,
         ρ, T, q_tot,
-        q_lcl, n_lcl, q_rai, n_rai, q_ice, n_ice, q_rim, b_rim, logλ,
+        q_lcl, n_lcl, q_rai, n_rai, q_ice, n_ice, q_rim, b_rim, logλ;
+        p3_tables,
     )
     return (; full.dq_lcl_dt, full.dn_lcl_dt, full.dq_rai_dt, full.dn_rai_dt,
         full.dq_ice_dt, full.dn_ice_dt, full.dq_rim_dt, full.db_rim_dt)
@@ -48,19 +50,23 @@ Callable bundling the frozen per-substep context; applying it to the species
 vector evaluates [`_instantaneous_2mp3_tendency`](@ref). `q_tot` is promoted to
 the state's element type at the call; `logλ`, `T`, and `ρ` stay plain.
 """
-struct Instantaneous2MP3Tendency{P, H, F}
+struct Instantaneous2MP3Tendency{P, H, F, T}
     mp::P
     tps::H
     ρ::F
     T::F
     q_tot::F
     logλ::F
+    p3_tables::T
 end
+Instantaneous2MP3Tendency(mp, tps, ρ, T, q_tot, logλ) =
+    Instantaneous2MP3Tendency(mp, tps, ρ, T, q_tot, logλ, nothing)
 @inline function (g::Instantaneous2MP3Tendency)(x::SA.StaticVector{8})
     (q_lcl, n_lcl, q_rai, n_rai, q_ice, n_ice, q_rim, b_rim) = x
     tend = _instantaneous_2mp3_tendency(g.mp, g.tps,
         g.ρ, g.T, eltype(x)(g.q_tot),
-        q_lcl, n_lcl, q_rai, n_rai, q_ice, n_ice, q_rim, b_rim, g.logλ,
+        q_lcl, n_lcl, q_rai, n_rai, q_ice, n_ice, q_rim, b_rim, g.logλ;
+        p3_tables = g.p3_tables,
     )
     return MicroState2MP3(values(tend)...)
 end
@@ -92,7 +98,8 @@ sides `f_p` for the linear post-solve attribution and is not differentiated.
 """
 @inline function _per_process_2mp3(mp::CMP.Microphysics2MParams{WR, ICE}, tps,
     ρ, T, q_tot,
-    q_lcl, n_lcl, q_rai, n_rai, q_ice, n_ice, q_rim, b_rim, logλ,
+    q_lcl, n_lcl, q_rai, n_rai, q_ice, n_ice, q_rim, b_rim, logλ;
+    p3_tables = nothing,
 ) where {WR, ICE <: CMP.P3IceParams}
     FT = eltype(ρ)
     ϵₘ = UT.ϵ_numerics_2M_M(FT)
@@ -196,23 +203,31 @@ sides `f_p` for the linear post-solve attribution and is not differentiated.
 
     # liquid-ice collision, ice aggregation, ice melting
     if q_ice > ϵₘ && n_ice > ϵₙ
-        coll = CMP3.bulk_liquid_ice_collision_sources(
-            state, logλ, pdf_c, pdf_r, L_lcl, N_lcl, L_rai, N_rai, aps, tps, vel, ρ, T;
-            quad,
-        )
+        coll =
+            p3_tables === nothing ?
+            CMP3.bulk_liquid_ice_collision_sources(
+                state, logλ, pdf_c, pdf_r, L_lcl, N_lcl, L_rai, N_rai, aps, tps, vel, ρ, T; quad,
+            ) :
+            _table_collision(
+                p3_tables, state, logλ, pdf_c, pdf_r, L_lcl, N_lcl, L_rai, N_rai, aps, tps, vel, ρ, T,
+            )
         liquid_ice_collision = MicroState2MP3(
             coll.∂ₜq_c, coll.∂ₜN_c / ρ, coll.∂ₜq_r, coll.∂ₜN_r / ρ,
             coll.∂ₜL_ice / ρ, o, coll.∂ₜL_rim / ρ, coll.∂ₜB_rim / ρ,
         )
 
-        S_ice_agg = CMP3.ice_self_collection(state, logλ, vel, ρ; quad)
+        S_ice_agg =
+            p3_tables === nothing ?
+            CMP3.ice_self_collection(state, logλ, vel, ρ; quad) :
+            CMP3.ice_self_collection(p3_tables.rate_tables, state, logλ, ρ)
         ice_aggregation = MicroState2MP3(o, o, o, o, o, -S_ice_agg.dNdt / ρ, o, o)
 
         T_freeze = TDI.TD.Parameters.T_freeze(tps)
-        melt = ifelse(T > T_freeze,
-            CMP3.ice_melt(vel, aps, tps, T, ρ, state, logλ; quad),
-            (; dNdt = zero(ρ), dLdt = zero(ρ)),
-        )
+        melt_fired =
+            p3_tables === nothing ?
+            CMP3.ice_melt(vel, aps, tps, T, ρ, state, logλ; quad) :
+            CMP3.ice_melt(p3_tables.rate_tables, aps, tps, T, ρ, state, logλ)
+        melt = ifelse(T > T_freeze, melt_fired, (; dNdt = zero(ρ), dLdt = zero(ρ)))
         ∂ₜq_ice_melt = melt.dLdt / ρ
         ∂ₜn_ice_melt = melt.dNdt / ρ
         ∂ₜq_rim_melt = -∂ₜq_ice_melt * state.F_rim
@@ -291,19 +306,23 @@ the species vector returns a `NamedTuple` of per-process tendency contributions
 only their sum. Evaluated at the primal state only, it supplies the right-hand
 sides `f_p` for the linear post-solve attribution.
 """
-struct Verbose2MP3Tendency{P, H, F}
+struct Verbose2MP3Tendency{P, H, F, T}
     mp::P
     tps::H
     ρ::F
     T::F
     q_tot::F
     logλ::F
+    p3_tables::T
 end
+Verbose2MP3Tendency(mp, tps, ρ, T, q_tot, logλ) =
+    Verbose2MP3Tendency(mp, tps, ρ, T, q_tot, logλ, nothing)
 @inline function (g::Verbose2MP3Tendency)(x::SA.StaticVector{8, FT}) where {FT}
     (q_lcl, n_lcl, q_rai, n_rai, q_ice, n_ice, q_rim, b_rim) = x
     return _per_process_2mp3(g.mp, g.tps,
         g.ρ, g.T, FT(g.q_tot),
-        q_lcl, n_lcl, q_rai, n_rai, q_ice, n_ice, q_rim, b_rim, g.logλ,
+        q_lcl, n_lcl, q_rai, n_rai, q_ice, n_ice, q_rim, b_rim, g.logλ;
+        p3_tables = g.p3_tables,
     )
 end
 
@@ -384,7 +403,7 @@ Jacobian `B = P J P`, solve it ([`_rosenbrock_solve`](@ref)), and return
     return max.(x .+ Δx, 0)
 end
 
-bulk_microphysics_tendencies(::RosenbrockAverage, ::Microphysics2Moment, args...) = throw(
+bulk_microphysics_tendencies(::RosenbrockAverage, ::Microphysics2Moment, args...; kwargs...) = throw(
     ArgumentError(
         "RosenbrockAverage on the 2M+P3 model supports only ExactJacobian or ManualJacobian; use rosenbrock_exact() or rosenbrock_manual()",
     ),
@@ -392,7 +411,7 @@ bulk_microphysics_tendencies(::RosenbrockAverage, ::Microphysics2Moment, args...
 
 bulk_microphysics_tendencies(
     ::RosenbrockAverage, ::Microphysics2Moment,
-    mp::CMP.Microphysics2MParams{WR, Nothing}, args...,
+    mp::CMP.Microphysics2MParams{WR, Nothing}, args...; kwargs...,
 ) where {WR} = throw(
     ArgumentError(
         "RosenbrockAverage on Microphysics2Moment requires P3 ice parameters (with_ice = true)",
@@ -422,7 +441,8 @@ fields as the `Instantaneous` entry (without the activation diagnostic).
     mp::CMP.Microphysics2MParams{WR, ICE}, tps,
     ρ, T, q_tot,
     q_lcl, n_lcl, q_rai, n_rai, q_ice, n_ice, q_rim, b_rim, logλ,
-    Δt, nsub = 1,
+    Δt, nsub = 1;
+    p3_tables = nothing,
 ) where {WR, ICE <: CMP.P3IceParams}
     FT = typeof(q_tot)
     nsub_eff = max(Int(nsub), 1)
@@ -435,7 +455,7 @@ fields as the `Instantaneous` entry (without the activation diagnostic).
     x₀ = x
     Tsub = T
     for _ in 1:nsub_eff
-        g = Instantaneous2MP3Tendency(mp, tps, ρ, Tsub, q_tot, logλ)
+        g = Instantaneous2MP3Tendency(mp, tps, ρ, Tsub, q_tot, logλ, p3_tables)
         x_prev = x
         if all(isfinite, x)
             f, J_raw = _tendency_and_jacobian(mode.jacobian, g, x)
@@ -603,7 +623,8 @@ The entries are tiered:
 
     # per-process primal rates (Tier-2 donor coefficients reuse these)
     pp = _per_process_2mp3(mp, tps, ρ, T, q_tot,
-        q_lcl, n_lcl, q_rai, n_rai, q_ice, n_ice, q_rim, b_rim, logλ)
+        q_lcl, n_lcl, q_rai, n_rai, q_ice, n_ice, q_rim, b_rim, logλ;
+        p3_tables = g.p3_tables)
 
     # --- shared thermodynamic constants (T, ρ, q_tot frozen in the substep) ---
     Rᵥ = TDI.Rᵥ(tps)
@@ -1352,7 +1373,7 @@ function _per_process_zero_accumulator(g_verbose, x::SA.StaticVector)
     return map(_ -> zero(x), g_verbose(x))
 end
 
-bulk_microphysics_tendencies(::Verbose{<:RosenbrockAverage}, ::Microphysics2Moment, args...) =
+bulk_microphysics_tendencies(::Verbose{<:RosenbrockAverage}, ::Microphysics2Moment, args...; kwargs...) =
     throw(
         ArgumentError(
             "Verbose on the 2M+P3 model supports only ExactJacobian; use Verbose(rosenbrock_exact())",
@@ -1390,7 +1411,8 @@ This is a diagnostic path, separate from the non-verbose entry.
     mp::CMP.Microphysics2MParams{WR, ICE}, tps,
     ρ, T, q_tot,
     q_lcl, n_lcl, q_rai, n_rai, q_ice, n_ice, q_rim, b_rim, logλ,
-    Δt, nsub = 1,
+    Δt, nsub = 1;
+    p3_tables = nothing,
 ) where {WR, ICE <: CMP.P3IceParams}
     FT = typeof(q_tot)
     mode = v.mode
@@ -1401,11 +1423,13 @@ This is a diagnostic path, separate from the non-verbose entry.
     x = MicroState2MP3{FT}(q_lcl, n_lcl, q_rai, n_rai, q_ice, n_ice, q_rim, b_rim)
     x₀ = x
     Tsub = T
-    Δxp_sum = _per_process_zero_accumulator(Verbose2MP3Tendency(mp, tps, ρ, Tsub, q_tot, logλ), x)
+    Δxp_sum = _per_process_zero_accumulator(
+        Verbose2MP3Tendency(mp, tps, ρ, Tsub, q_tot, logλ, p3_tables), x,
+    )
     Δx_clamp_sum = zero(x)
     for _ in 1:nsub_eff
-        g = Instantaneous2MP3Tendency(mp, tps, ρ, Tsub, q_tot, logλ)
-        gv = Verbose2MP3Tendency(mp, tps, ρ, Tsub, q_tot, logλ)
+        g = Instantaneous2MP3Tendency(mp, tps, ρ, Tsub, q_tot, logλ, p3_tables)
+        gv = Verbose2MP3Tendency(mp, tps, ρ, Tsub, q_tot, logλ, p3_tables)
         # Match the wrapped mode: differentiate only at a finite state; a
         # non-finite Jacobian routes the substep to the Euler fallback.
         J = if all(isfinite, x)
