@@ -504,6 +504,56 @@ branch, so a bulk `f_frz = min(1, ∫M_max / ∫M_col)` saturates to `1`.
     return A * state.ρn_ice * (aᵥ * V_a + bᵥ * cbrt_Sc / sqrt(ν_air) * V_b)
 end
 
+# Representative-size Cober-List rime-volume sources `(BCCOL, BRCOL)` from the
+# freeze masses `QCFRZ`, `QRFRZ` and a mass-weighted ice velocity from the
+# Phase-1 velocity table, at the cloud mass-mean size `D̄c = M₄/M₃` and the rain
+# representative size `D̄r = 4 Dr_mean`.
+@inline function _representative_rime_volume_sources(
+    rate_tables::P3LookupTables, state::P3State, logλ, psd_c, L_c, N_c, vel, ρₐ, T, Dr_mean, QCFRZ, QRFRZ,
+)
+    FT = eltype(state)
+    (; T_freeze, ρ_rim_local) = state.params
+    v̄ᵢ = ice_terminal_velocity_mass_weighted(rate_tables, state, logλ, ρₐ)
+    v_l = CO.particle_terminal_velocity(vel.rain, ρₐ)
+    T°C = T - T_freeze
+    μm = FT(1e6)
+    (; λc, νcD, μcD) = CM2.pdf_cloud_parameters(psd_c, L_c / ρₐ, ρₐ, N_c)
+    M₃ = DT.generalized_gamma_Mⁿ(νcD, μcD, λc, N_c, 3)
+    M₄ = DT.generalized_gamma_Mⁿ(νcD, μcD, λc, N_c, 4)
+    D̄c = M₄ / M₃
+    D̄r = 4 * Dr_mean
+    Rᵢc = D̄c * μm * abs(v̄ᵢ - v_l(D̄c)) / (2 * T°C)
+    Rᵢr = D̄r * μm * abs(v̄ᵢ - v_l(D̄r)) / (2 * T°C)
+    return (QCFRZ / ρ_rim_local(Rᵢc), QRFRZ / ρ_rim_local(Rᵢr))
+end
+
+# Assemble the seven bulk collision sources from the partitioned channel rates,
+# the rime-volume sources, and the wet fraction `f_wet`. Shared by the variant-A,
+# variant-C, and hybrid table paths and identical to the quadrature assembly.
+@inline function _assemble_collision_sources(
+    state::P3State, ρₐ, m_liq_D_shd, QCFRZ, QCSHD, NCCOL, QRFRZ, QRSHD, NRCOL, BCCOL, BRCOL, f_wet,
+)
+    FT = eltype(state)
+    (; τ_wet, ρ_i) = state.params
+    (; ρq_ice, F_rim, ρ_rim) = state
+    NRSHD = QRSHD / m_liq_D_shd
+    B_rim = ifelse(iszero(ρ_rim), zero(FT), (ρq_ice * F_rim) / ρ_rim)
+    QIWET = f_wet * ρq_ice * (one(FT) - F_rim) / τ_wet
+    BIWET = f_wet * (ρq_ice / ρ_i - B_rim) / τ_wet
+
+    ∂ₜq_c = (-QCFRZ - QCSHD) / ρₐ
+    ∂ₜq_r = (-QRFRZ + QCSHD) / ρₐ
+    ∂ₜN_c = -NCCOL
+    ∂ₜN_r = -NRCOL + NRSHD
+    ∂ₜL_rim = QCFRZ + QRFRZ + QIWET
+    ∂ₜL_ice = QCFRZ + QRFRZ
+    ∂ₜB_rim = BCCOL + BRCOL + BIWET
+
+    return @NamedTuple{∂ₜq_c::FT, ∂ₜq_r::FT, ∂ₜN_c::FT, ∂ₜN_r::FT, ∂ₜL_rim::FT, ∂ₜL_ice::FT, ∂ₜB_rim::FT}((
+        ∂ₜq_c, ∂ₜq_r, ∂ₜN_c, ∂ₜN_r, ∂ₜL_rim, ∂ₜL_ice, ∂ₜB_rim,
+    ))
+end
+
 """
     bulk_liquid_ice_collision_sources(
         rate_tables::P3LookupTables, coll_tables::P3CollisionTables,
@@ -528,7 +578,6 @@ of the quadrature method to the table interpolation error.
     state::P3State, logλ, psd_c, psd_r, L_c, N_c, L_r, N_r, aps, tps, vel, ρₐ, T,
 )
     FT = promote_type(eltype(state), UT.promote_typeof(L_c, N_c, L_r, N_r, ρₐ, T))
-    (; τ_wet, ρ_i, T_freeze, ρ_rim_local) = state.params
     D_shd = FT(1e-3)  # 1 mm
     ρw = psd_c.ρw
     @assert ρw == psd_r.ρw "cloud and rain must share the liquid water density"
@@ -562,41 +611,326 @@ of the quadrature method to the table interpolation error.
     QCSHD = (one(FT) - f_frz) * M_C
     QRFRZ = f_frz * M_R
     QRSHD = (one(FT) - f_frz) * M_R
-    NRSHD = QRSHD / m_liq(D_shd)
 
-    # Representative-size Cober-List rime density; mass-weighted ice velocity from
-    # the Phase-1 velocity table, cloud mass-mean size D̄c = M₄/M₃, rain D̄r = 4 Dr_mean
-    v̄ᵢ = ice_terminal_velocity_mass_weighted(rate_tables, state, logλ, ρₐ)
-    v_l = CO.particle_terminal_velocity(vel.rain, ρₐ)
-    T°C = T - T_freeze
-    μm = FT(1e6)
-    (; λc, νcD, μcD) = CM2.pdf_cloud_parameters(psd_c, L_c / ρₐ, ρₐ, N_c)
-    M₃ = DT.generalized_gamma_Mⁿ(νcD, μcD, λc, N_c, 3)
-    M₄ = DT.generalized_gamma_Mⁿ(νcD, μcD, λc, N_c, 4)
-    D̄c = M₄ / M₃
-    D̄r = 4 * Dr_mean
-    Rᵢc = D̄c * μm * abs(v̄ᵢ - v_l(D̄c)) / (2 * T°C)
-    Rᵢr = D̄r * μm * abs(v̄ᵢ - v_l(D̄r)) / (2 * T°C)
-    BCCOL = QCFRZ / ρ_rim_local(Rᵢc)
-    BRCOL = QRFRZ / ρ_rim_local(Rᵢr)
+    BCCOL, BRCOL = _representative_rime_volume_sources(
+        rate_tables, state, logλ, psd_c, L_c, N_c, vel, ρₐ, T, Dr_mean, QCFRZ, QRFRZ,
+    )
+    return _assemble_collision_sources(
+        state, ρₐ, m_liq(D_shd), QCFRZ, QCSHD, NCCOL, QRFRZ, QRSHD, NRCOL, BCCOL, BRCOL, f_wet,
+    )
+end
 
-    # Wet densification of rime
-    (; ρq_ice, F_rim, ρ_rim) = state
-    B_rim = ifelse(iszero(ρ_rim), zero(FT), (ρq_ice * F_rim) / ρ_rim)
-    QIWET = f_wet * ρq_ice * (one(FT) - F_rim) / τ_wet
-    BIWET = f_wet * (ρq_ice / ρ_i - B_rim) / τ_wet
+# ---------------------------------------------------------------------------- #
+# Phase-2 variant C: inner-component tables and the exact outer path
+# ---------------------------------------------------------------------------- #
 
-    ∂ₜq_c = (-QCFRZ - QCSHD) / ρₐ
-    ∂ₜq_r = (-QRFRZ + QCSHD) / ρₐ
-    ∂ₜN_c = -NCCOL
-    ∂ₜN_r = -NRCOL + NRSHD
-    ∂ₜL_rim = QCFRZ + QRFRZ + QIWET
-    ∂ₜL_ice = QCFRZ + QRFRZ
-    ∂ₜB_rim = BCCOL + BRCOL + BIWET
+# Inner cloud and rain collision moments per unit liquid-number prefactor, keyed
+# by the ice fall speed `v_i` and effective radius `r_i` at one outer ice size.
+# The inner integrals depend on the ice state only through `(v_i, r_i)`, so the
+# `(logλ, F_rim, ρ_rim)` shape axes of the variant-A tables collapse to two axes.
+# `H_NC = ∂ₜN_c_col / N_c`, `H_MC = ∂ₜM_c_col / N_c`, `H_NR = ∂ₜN_r_col / N₀r`,
+# `H_MR = ∂ₜM_r_col / N₀r`. Stored as `log`.
+const COLLISION_INNER_CLOUD_NAMES = (:log_H_NC, :log_H_MC)
+const COLLISION_INNER_RAIN_NAMES = (:log_H_NR, :log_H_MR)
 
-    return @NamedTuple{∂ₜq_c::FT, ∂ₜq_r::FT, ∂ₜN_c::FT, ∂ₜN_r::FT, ∂ₜL_rim::FT, ∂ₜL_ice::FT, ∂ₜB_rim::FT}((
-        ∂ₜq_c, ∂ₜq_r, ∂ₜN_c, ∂ₜN_r, ∂ₜL_rim, ∂ₜL_ice, ∂ₜB_rim,
-    ))
+"""
+    P3CollisionInnerTables{IC, IR}
+
+Container for the Phase-2 variant-C inner collision tables:
+- `cloud_inner`: 4D [`RateTable`](@ref) on `(v_i, r_i, log ρ_air, log x_c)`
+  holding `log_H_NC`, `log_H_MC` per unit cloud number;
+- `rain_inner`: 4D `RateTable` on `(v_i, r_i, log ρ_air, log Dr_mean)` holding
+  `log_H_NR`, `log_H_MR` per unit `N₀r`.
+
+Build with [`build_p3_collision_inner_tables`](@ref); assemble the sources with the
+variant-C or hybrid method of [`bulk_liquid_ice_collision_sources`](@ref).
+"""
+struct P3CollisionInnerTables{IC, IR}
+    cloud_inner::IC
+    rain_inner::IR
+end
+
+Adapt.adapt_structure(to, t::P3CollisionInnerTables) =
+    P3CollisionInnerTables(Adapt.adapt(to, t.cloud_inner), Adapt.adapt(to, t.rain_inner))
+
+"""
+    P3CollisionInnerGrid{FT}
+
+Grid resolution and bounds for [`build_p3_collision_inner_tables`](@ref). The
+`(v_i, r_i)` axes span the ice fall speed and effective radius over the harness
+and sweep states; the `x_c` and `Dr_mean` axes match [`P3CollisionGrid`](@ref).
+"""
+Base.@kwdef struct P3CollisionInnerGrid{FT}
+    v_i_lo::FT = 1e-6
+    v_i_hi::FT = 40.0
+    n_v_i::Int = 32
+    r_i_lo::FT = 1e-9
+    r_i_hi::FT = 0.15
+    n_r_i::Int = 32
+    ρ_air_lo::FT = 0.05
+    ρ_air_hi::FT = 1.5
+    n_ρ_air::Int = 6
+    x_c_lo::FT = 1e-13
+    x_c_hi::FT = 1e-10
+    n_x_c::Int = 16
+    Dr_lo::FT = 1e-4
+    Dr_hi::FT = 1e-3
+    n_Dr::Int = 16
+    build_order::Int = 16
+    bounds_tail::FT = 1e-5
+    # Representative cloud number for the cloud inner-moment build; keeps `q_c`
+    # in the physical range so the cloud PDF mass floor is not reached in Float32.
+    N_c_ref::FT = 1e8
+end
+
+# Rain inner moments `(H_NR, H_MR)` per unit `N₀r` at fall speed `v_i` and radius
+# `r_i`, from the closed-form incomplete-gamma rain integral.
+@inline function _rain_inner_moment(v_i_val, r_i, velocity_params, ρw, ρₐ, Dr_mean, p)
+    FT = typeof(v_i_val)
+    v_l = CO.particle_terminal_velocity(velocity_params.rain, ρₐ)
+    ai, bi, ci = SA.SVector(v_l.ai), SA.SVector(v_l.bi), SA.SVector(v_l.ci)
+    D_min = DT.exponential_quantile(Dr_mean, p)
+    D_max = DT.exponential_quantile(Dr_mean, one(FT) - p)
+    Dstar = crossover_diameter(v_i_val, v_l, D_min, D_max)
+    return closed_rain_inner_NM(v_i_val, Dstar, r_i, ρw, ai, bi, ci, D_min, D_max, one(FT), Dr_mean)
+end
+
+# Cloud inner moments `(H_NC, H_MC)` per unit cloud number at fall speed `v_i` and
+# radius `r_i`, from the quadrature over the cloud size distribution at mean mass
+# `x_c` and the representative number `N_c_ref` (the moments are linear in it).
+@inline function _cloud_inner_moment(v_i_val, r_i, velocity_params, psd_c, m_liq, ρₐ, x_c, N_c_ref, p; quad)
+    v_l = CO.particle_terminal_velocity(velocity_params.rain, ρₐ)
+    q_c = x_c * N_c_ref / ρₐ
+    n_c = DT.size_distribution(psd_c, q_c, ρₐ, N_c_ref)
+    bounds_c = CM2.get_size_distribution_bounds(psd_c, q_c, ρₐ, N_c_ref, p)
+    coeffs = collision_cross_section_ice_liquid_coeffs(r_i)
+    D_min, D_max = bounds_c[1], bounds_c[end]
+    Dstar = crossover_diameter(v_i_val, v_l, D_min, D_max)
+    bnds = (D_min, clamp(Dstar, D_min, D_max), D_max)
+    integrand = D -> begin
+        K = evalpoly(D, coeffs)
+        ∂ₜN = K * abs(v_i_val - v_l(D)) * n_c(D)
+        SA.SVector(∂ₜN, ∂ₜN * m_liq(D))
+    end
+    r = integrate(integrand, bnds, quad)
+    return (r[1] / N_c_ref, r[2] / N_c_ref)
+end
+
+"""
+    build_p3_collision_inner_tables(params, velocity_params, aps, psd_c, psd_r; grid, quad)
+
+Fill the Phase-2 variant-C inner collision tables by evaluating the cloud and rain
+inner collision moments on the `(v_i, r_i, ρ_air, x_c)` and `(v_i, r_i, ρ_air, Dr_mean)`
+grids, and return a [`P3CollisionInnerTables`](@ref). The inner moments depend on
+the ice state only through the fall speed `v_i` and effective radius `r_i`, so the
+outer path (the variant-C and hybrid methods of [`bulk_liquid_ice_collision_sources`](@ref))
+keeps the exact per-diameter freeze/shed partition while sourcing every inner
+integral from these tables.
+
+# Arguments
+- `params`: [`CMP.ParametersP3`](@ref).
+- `velocity_params`: [`CMP.Chen2022VelType`](@ref).
+- `aps`: [`CMP.AirProperties`](@ref).
+- `psd_c`: [`CMP.CloudParticlePDF_SB2006`](@ref).
+- `psd_r`: [`CMP.RainParticlePDF_SB2006`](@ref).
+
+# Keyword Arguments
+- `grid`: a [`P3CollisionInnerGrid`](@ref). By default, `P3CollisionInnerGrid{FT}()`.
+- `quad`: the build quadrature rule. By default, `GaussLegendre(FT, grid.build_order)`.
+"""
+function build_p3_collision_inner_tables(
+    params::CMP.ParametersP3, velocity_params, aps, psd_c, psd_r;
+    grid::P3CollisionInnerGrid = P3CollisionInnerGrid{typeof(params.ρ_l)}(),
+    quad = GaussLegendre(typeof(params.ρ_l), grid.build_order),
+)
+    FT = typeof(params.ρ_l)
+    p = grid.bounds_tail
+    ρw = psd_c.ρw
+    @assert ρw == psd_r.ρw "cloud and rain must share the liquid water density"
+    m_liq(Dₗ) = ρw * CO.volume_sphere_D(Dₗ)
+
+    ax_v = LogAxis(; lo = grid.v_i_lo, hi = grid.v_i_hi, n = grid.n_v_i)
+    ax_r = LogAxis(; lo = grid.r_i_lo, hi = grid.r_i_hi, n = grid.n_r_i)
+    ax_a = LogAxis(; lo = grid.ρ_air_lo, hi = grid.ρ_air_hi, n = grid.n_ρ_air)
+    ax_xc = LogAxis(; lo = grid.x_c_lo, hi = grid.x_c_hi, n = grid.n_x_c)
+    ax_Dr = LogAxis(; lo = grid.Dr_lo, hi = grid.Dr_hi, n = grid.n_Dr)
+
+    nv, nr, na, nxc, nDr = grid.n_v_i, grid.n_r_i, grid.n_ρ_air, grid.n_x_c, grid.n_Dr
+    data_c = Array{FT}(undef, length(COLLISION_INNER_CLOUD_NAMES), nv, nr, na, nxc)
+    data_R = Array{FT}(undef, length(COLLISION_INNER_RAIN_NAMES), nv, nr, na, nDr)
+
+    Threads.@threads for I in CartesianIndices((nv, nr, na))
+        i, j, l = Tuple(I)
+        v_i_val = node_coord(ax_v, i)
+        r_i = node_coord(ax_r, j)
+        ρₐ = node_coord(ax_a, l)
+        for m in 1:nxc
+            x_c = node_coord(ax_xc, m)
+            H_NC, H_MC =
+                _cloud_inner_moment(v_i_val, r_i, velocity_params, psd_c, m_liq, ρₐ, x_c, grid.N_c_ref, p; quad)
+            @inbounds data_c[1, i, j, l, m] = log(H_NC)
+            @inbounds data_c[2, i, j, l, m] = log(H_MC)
+        end
+        for m in 1:nDr
+            Dr = node_coord(ax_Dr, m)
+            H_NR, H_MR = _rain_inner_moment(v_i_val, r_i, velocity_params, ρw, ρₐ, Dr, p)
+            @inbounds data_R[1, i, j, l, m] = log(H_NR)
+            @inbounds data_R[2, i, j, l, m] = log(H_MR)
+        end
+    end
+
+    cloud_inner = RateTable{COLLISION_INNER_CLOUD_NAMES}((ax_v, ax_r, ax_a, ax_xc), data_c)
+    rain_inner = RateTable{COLLISION_INNER_RAIN_NAMES}((ax_v, ax_r, ax_a, ax_Dr), data_R)
+    return P3CollisionInnerTables(cloud_inner, rain_inner)
+end
+
+# Locate up to two crossings of `excess(D)` on `[D_lo, D_hi]` by a log-spaced scan
+# with fixed-iteration bisection refinement; `D_lo` stands in for an absent
+# crossing. Matches the scan of [`wet_growth_onset_diameter`](@ref) with a
+# table-sourced excess-mass closure.
+@inline function _scan_two_crossings(excess::F, D_lo::FT, D_hi::FT) where {F, FT}
+    llo, lhi = log(D_lo), log(D_hi)
+    n_scan = 16
+    Δl = (lhi - llo) / n_scan
+    maxiters = FT === Float32 ? 8 : 10
+    tol = FixedIterations{FT}()
+    refine(l₁, l₂) = exp(RS.find_zero(
+        l -> excess(exp(l)), RS.BrentsMethod(l₁, l₂), RS.CompactSolution(), tol, maxiters,
+    ).root)
+    onset₁ = D_lo
+    onset₂ = D_lo
+    l_prev = llo
+    g_prev = excess(D_lo)
+    for i in 1:n_scan
+        l = llo + i * Δl
+        g = excess(exp(l))
+        if g * g_prev < 0
+            root = refine(l_prev, l)
+            if onset₁ == D_lo
+                onset₁ = root
+            elseif onset₂ == D_lo
+                onset₂ = root
+            end
+        end
+        l_prev = l
+        g_prev = g
+    end
+    return onset₁, onset₂
+end
+
+"""
+    bulk_liquid_ice_collision_sources(
+        rate_tables::P3LookupTables, inner_tables::P3CollisionInnerTables,
+        state, logλ, psd_c, psd_r, L_c, N_c, L_r, N_r, aps, tps, vel, ρₐ, T; quad,
+    )
+
+Table-backed liquid-ice collision sources (variant C); see the quadrature method
+[`bulk_liquid_ice_collision_sources`](@ref). The outer integral over ice size and
+the per-diameter freeze/shed partition are kept exactly; the inner cloud and rain
+collision moments are read from `inner_tables` at the fall speed and effective
+radius of each outer node, and the wet-growth onset scan uses the same tabulated
+inner masses. The rime-volume sources use the representative-size Cober-List
+density shared with the variant-A method.
+
+`quad` is the outer-integral quadrature rule.
+"""
+@inline function bulk_liquid_ice_collision_sources(
+    rate_tables::P3LookupTables, inner_tables::P3CollisionInnerTables,
+    state::P3State, logλ, psd_c, psd_r, L_c, N_c, L_r, N_r, aps, tps, vel, ρₐ, T; quad,
+)
+    FT = promote_type(eltype(state), UT.promote_typeof(L_c, N_c, L_r, N_r, ρₐ, T))
+    D_shd = FT(1e-3)  # 1 mm
+    ρw = psd_c.ρw
+    @assert ρw == psd_r.ρw "cloud and rain must share the liquid water density"
+    m_liq(Dₗ) = ρw * CO.volume_sphere_D(Dₗ)
+    ϵN = UT.ϵ_numerics_2M_N(FT)
+    ϵM = UT.ϵ_numerics_2M_M(FT)
+    p = FT(1e-5)
+
+    n_i = DT.size_distribution(state, logλ)
+    ∂ₜV = volumetric_collision_rate_integrand(vel, ρₐ, state)
+    v_i = ∂ₜV.v_i
+    ∂ₜM_max = compute_max_freeze_rate(aps, tps, vel, ρₐ, T, state)
+    ice_bounds0 = velocity_integral_bounds(state, logλ, v_i; p)
+
+    cloud_below = (N_c < ϵN) | (L_c < ϵM)
+    x_c = L_c / max(N_c, ϵN)
+    (; N₀r, Dr_mean) = CM2.pdf_rain_parameters(psd_r, L_r / ρₐ, ρₐ, N_r)
+
+    # Table-backed inner moments at each outer ice size; the rime-volume inner
+    # (third component) is zero, since the volume source is added below with the
+    # representative-density closure.
+    ice_r(Dᵢ) = sqrt(ice_area(state, Dᵢ) / FT(π))
+    function cloud_inner(Dᵢ)
+        q = lookup(inner_tables.cloud_inner, v_i(Dᵢ), ice_r(Dᵢ), ρₐ, x_c)
+        nc = ifelse(cloud_below, zero(FT), N_c)
+        return (nc * exp(q.log_H_NC), nc * exp(q.log_H_MC), zero(FT))
+    end
+    function rain_inner(Dᵢ)
+        q = lookup(inner_tables.rain_inner, v_i(Dᵢ), ice_r(Dᵢ), ρₐ, Dr_mean)
+        return (N₀r * exp(q.log_H_NR), N₀r * exp(q.log_H_MR), zero(FT))
+    end
+
+    # Wet-growth onset: the freeze/shed branch changes where the collected mass
+    # crosses the freeze limit, so insert the crossings as subinterval boundaries.
+    excess(Dᵢ) = cloud_inner(Dᵢ)[2] + rain_inner(Dᵢ)[2] - ∂ₜM_max(Dᵢ)
+    D_lo, D_hi = first(ice_bounds0), last(ice_bounds0)
+    D_wet₁, D_wet₂ = _scan_two_crossings(excess, FT(D_lo), FT(D_hi))
+    ice_bounds = Tuple(SA.sort(SA.SVector(
+        ice_bounds0..., clamp(D_wet₁, D_lo, D_hi), clamp(D_wet₂, D_lo, D_hi),
+    )))
+
+    rates = ∫liquid_ice_collisions(n_i, ∂ₜM_max, cloud_inner, rain_inner, ice_bounds; quad)
+    (QCFRZ, QCSHD, NCCOL, QRFRZ, QRSHD, NRCOL, ∫M_col, _, _, ∫𝟙_wet_M_col) = rates
+    f_wet = iszero(∫M_col) ? zero(∫M_col) : ∫𝟙_wet_M_col / ∫M_col
+
+    BCCOL, BRCOL = _representative_rime_volume_sources(
+        rate_tables, state, logλ, psd_c, L_c, N_c, vel, ρₐ, T, Dr_mean, QCFRZ, QRFRZ,
+    )
+    return _assemble_collision_sources(
+        state, ρₐ, m_liq(D_shd), QCFRZ, QCSHD, NCCOL, QRFRZ, QRSHD, NRCOL, BCCOL, BRCOL, f_wet,
+    )
+end
+
+"""
+    bulk_liquid_ice_collision_sources(
+        rate_tables::P3LookupTables, coll_tables::P3CollisionTables,
+        inner_tables::P3CollisionInnerTables,
+        state, logλ, psd_c, psd_r, L_c, N_c, L_r, N_r, aps, tps, vel, ρₐ, T; quad, θ,
+    )
+
+Hybrid table-backed liquid-ice collision sources. Form the bulk freeze ratio
+`∫M_max / ∫M_col` from the variant-A tables; when it is at least `θ` the bulk
+partition does not bind and the cheap variant-A assembly is exact, so use it;
+otherwise use the exact per-diameter variant-C path. `θ` is a tunable parameter
+(the natural value is `1`, the freeze-everything threshold).
+"""
+@inline function bulk_liquid_ice_collision_sources(
+    rate_tables::P3LookupTables, coll_tables::P3CollisionTables, inner_tables::P3CollisionInnerTables,
+    state::P3State, logλ, psd_c, psd_r, L_c, N_c, L_r, N_r, aps, tps, vel, ρₐ, T; quad, θ,
+)
+    FT = promote_type(eltype(state), UT.promote_typeof(L_c, N_c, L_r, N_r, ρₐ, T))
+    ϵN = UT.ϵ_numerics_2M_N(FT)
+    ϵM = UT.ϵ_numerics_2M_M(FT)
+    N_ice = state.ρn_ice
+    cloud_below = (N_c < ϵN) | (L_c < ϵM)
+    qc = lookup(coll_tables.cloud, logλ, state.F_rim, state.ρ_rim, ρₐ, L_c / max(N_c, ϵN))
+    M_C = ifelse(cloud_below, zero(FT), N_ice * N_c * exp(qc.log_G_MC))
+    (; N₀r, Dr_mean) = CM2.pdf_rain_parameters(psd_r, L_r / ρₐ, ρₐ, N_r)
+    qr = lookup(coll_tables.rain, logλ, state.F_rim, state.ρ_rim, ρₐ, Dr_mean)
+    M_R = N_ice * N₀r * exp(qr.log_G_MR)
+    ∫M_col = M_C + M_R
+    ∫M_max = bulk_max_freeze_rate(coll_tables, aps, tps, state, logλ, ρₐ, T)
+    ratio = ifelse(∫M_col > 0, ∫M_max / ∫M_col, FT(Inf))
+    if ratio >= θ
+        return bulk_liquid_ice_collision_sources(
+            rate_tables, coll_tables, state, logλ, psd_c, psd_r, L_c, N_c, L_r, N_r, aps, tps, vel, ρₐ, T,
+        )
+    else
+        return bulk_liquid_ice_collision_sources(
+            rate_tables, inner_tables, state, logλ, psd_c, psd_r, L_c, N_c, L_r, N_r, aps, tps, vel, ρₐ, T; quad,
+        )
+    end
 end
 
 """
