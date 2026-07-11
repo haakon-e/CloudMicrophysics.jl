@@ -152,10 +152,12 @@ end
         @test maxerr < 1e-9
     end
 
-    @testset "no clamping for harness states" begin
+    @testset "no clamping for harness and sweep states" begin
+        # The `x_c` axis is derived from the cloud-PDF mean-mass envelope
+        # `[xc_min, xc_max]`, so the full sweep-state range stays on the grid.
         axλ, axF, axr, axa, axxc = ctables.cloud.axes
         axDr = ctables.rain.axes[5]
-        for h in collision_harness(FT, params)
+        for h in vcat(collision_harness(FT, params), collision_sweep(FT, params, 200))
             @test P3.node_coord(axλ, 1) <= h.logλ <= P3.node_coord(axλ, axλ.n)
             @test 0 <= h.state.F_rim <= P3.node_coord(axF, axF.n)
             @test P3.node_coord(axa, 1) <= h.ρₐ <= P3.node_coord(axa, axa.n)

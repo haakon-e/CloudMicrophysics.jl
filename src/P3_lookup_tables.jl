@@ -327,9 +327,9 @@ shape axes `(logλ, F_rim, ρ_rim, ρ_air)` reuse the [`P3TableGrid`](@ref) rang
 the two 5D tables add a `log x_c` (cloud mean mass) axis and a `log Dr_mean`
 (rain mean diameter) axis. The `Dr_mean` range is the interval into which the
 limited rain PDF slope is clamped, so no realizable rain state leaves it. The
-`x_c` range `[1e-13, 1e-10]` kg covers the cloud mean-mass envelope of the
-harness and sweep states; a drizzle-heavy cloud mean mass above `1e-10` kg
-clamps to the upper node and extrapolates flat.
+`x_c` axis spans the cloud droplet mean-mass envelope `[xc_min, xc_max]` of the
+SB2006 cloud PDF, derived from `psd_c` at build time, so no realizable cloud
+state leaves the grid.
 """
 Base.@kwdef struct P3CollisionGrid{FT}
     logλ_lo::FT = 2.0
@@ -341,8 +341,6 @@ Base.@kwdef struct P3CollisionGrid{FT}
     ρ_air_lo::FT = 0.05
     ρ_air_hi::FT = 1.5
     n_ρ_air::Int = 6
-    x_c_lo::FT = 1e-13
-    x_c_hi::FT = 1e-10
     n_x_c::Int = 16
     Dr_lo::FT = 1e-4
     Dr_hi::FT = 1e-3
@@ -433,7 +431,7 @@ function build_p3_collision_tables(
     ax_F = LinAxis(; lo = zero(FT), hi = F_rim_hi, n = grid.n_F_rim)
     ax_r = LinAxis(; lo = grid.ρ_rim_lo, hi = ρ_rim_hi, n = grid.n_ρ_rim)
     ax_a = LogAxis(; lo = grid.ρ_air_lo, hi = grid.ρ_air_hi, n = grid.n_ρ_air)
-    ax_xc = LogAxis(; lo = grid.x_c_lo, hi = grid.x_c_hi, n = grid.n_x_c)
+    ax_xc = LogAxis(; lo = psd_c.xc_min, hi = psd_c.xc_max, n = grid.n_x_c)
     ax_Dr = LogAxis(; lo = grid.Dr_lo, hi = grid.Dr_hi, n = grid.n_Dr)
 
     nλ, nF, nr, na = grid.n_logλ, grid.n_F_rim, grid.n_ρ_rim, grid.n_ρ_air
@@ -673,7 +671,9 @@ Adapt.adapt_structure(to, t::P3CollisionInnerTables) =
 
 Grid resolution and bounds for [`build_p3_collision_inner_tables`](@ref). The
 `(v_i, r_i)` axes span the ice fall speed and effective radius over the harness
-and sweep states; the `x_c` and `Dr_mean` axes match [`P3CollisionGrid`](@ref).
+and sweep states; the `x_c` axis spans the cloud droplet mean-mass envelope
+`[xc_min, xc_max]` of the SB2006 cloud PDF, derived from `psd_c` at build time,
+and the `Dr_mean` axis matches [`P3CollisionGrid`](@ref).
 """
 Base.@kwdef struct P3CollisionInnerGrid{FT}
     v_i_lo::FT = 1e-6
@@ -685,8 +685,6 @@ Base.@kwdef struct P3CollisionInnerGrid{FT}
     ρ_air_lo::FT = 0.05
     ρ_air_hi::FT = 1.5
     n_ρ_air::Int = 6
-    x_c_lo::FT = 1e-13
-    x_c_hi::FT = 1e-10
     n_x_c::Int = 16
     Dr_lo::FT = 1e-4
     Dr_hi::FT = 1e-3
@@ -766,7 +764,7 @@ function build_p3_collision_inner_tables(
     ax_v = LogAxis(; lo = grid.v_i_lo, hi = grid.v_i_hi, n = grid.n_v_i)
     ax_r = LogAxis(; lo = grid.r_i_lo, hi = grid.r_i_hi, n = grid.n_r_i)
     ax_a = LogAxis(; lo = grid.ρ_air_lo, hi = grid.ρ_air_hi, n = grid.n_ρ_air)
-    ax_xc = LogAxis(; lo = grid.x_c_lo, hi = grid.x_c_hi, n = grid.n_x_c)
+    ax_xc = LogAxis(; lo = psd_c.xc_min, hi = psd_c.xc_max, n = grid.n_x_c)
     ax_Dr = LogAxis(; lo = grid.Dr_lo, hi = grid.Dr_hi, n = grid.n_Dr)
 
     nv, nr, na, nxc, nDr = grid.n_v_i, grid.n_r_i, grid.n_ρ_air, grid.n_x_c, grid.n_Dr
