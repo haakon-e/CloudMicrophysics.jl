@@ -252,6 +252,7 @@ P3Scheme.VolumetricCollisionRate
 P3Scheme.volumetric_collision_rate_integrand
 P3Scheme.compute_max_freeze_rate
 P3Scheme.max_freeze_rate_scalar
+P3Scheme.max_freeze_rate_from_velocity
 P3Scheme.compute_local_rime_density
 P3Scheme.get_liquid_integrals
 P3Scheme.crossing_integral_bounds

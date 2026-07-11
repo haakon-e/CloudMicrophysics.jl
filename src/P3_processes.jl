@@ -248,6 +248,29 @@ function max_freeze_rate_scalar(aps, tps, ρₐ, Tₐ)
 end
 
 """
+    max_freeze_rate_from_velocity(aps, tps, vent, ρₐ, Tₐ)
+
+Return a closure `∂ₜM_max(Dᵢ, v_i_val)` for the Musil (1970) maximum freezing
+rate `A · Dᵢ · F_v` that takes the ice fall speed `v_i_val = v_term(Dᵢ)` as an
+argument, so the ice velocity is evaluated once per outer node and shared with
+the collision integrand rather than recomputed inside the ventilation factor.
+Equivalent to [`compute_max_freeze_rate`](@ref) evaluated at `v_i_val`, with the
+same `A == floatmax` deep-cold freeze-everything branch of
+[`max_freeze_rate_scalar`](@ref).
+"""
+@inline function max_freeze_rate_from_velocity(aps, tps, vent, ρₐ, Tₐ)
+    (; aᵥ, bᵥ) = vent
+    (; ν_air, D_vapor) = aps
+    A = max_freeze_rate_scalar(aps, tps, ρₐ, Tₐ)
+    cbrt_Sc = cbrt(ν_air / D_vapor)
+    return function (Dᵢ, v_i_val)
+        FT = UT.promote_typeof(Dᵢ, A, v_i_val)
+        F_v = aᵥ + bᵥ * cbrt_Sc * sqrt(Dᵢ * v_i_val / ν_air)
+        return ifelse(A == floatmax(FT), floatmax(FT), FT(A * Dᵢ * F_v))
+    end
+end
+
+"""
     compute_local_rime_density(velocity_params, ρₐ, T, state)
 
 Provides a function `ρ′_rim(Dᵢ, Dₗ)` that computes the local rime density [kg/m³]
@@ -502,37 +525,42 @@ A tuple of 8 integrands, see [`∫liquid_ice_collisions`](@ref) for details.
         n_i, ∂ₜM_max, Dᵢ -> (cloud_integrals(Dᵢ)..., rain_integrals(Dᵢ)...), ice_bounds; quad,
     )
 
+# Partition one outer node's inner cloud and rain collision components
+# `(∂ₜN_c, ∂ₜM_c, ∂ₜB_c, ∂ₜN_r, ∂ₜM_r, ∂ₜB_r)` into the ten collision integrands,
+# splitting the collected mass between freezing and shedding at the per-diameter
+# Musil limit `∂ₜM_max_val`. Shared by the quadrature outer path and the
+# table-backed variant-C integrand.
+@inline function _partition_collision_node(
+    n, ∂ₜN_c_col, ∂ₜM_c_col, ∂ₜB_c_col, ∂ₜN_r_col, ∂ₜM_r_col, ∂ₜB_r_col, ∂ₜM_max_val,
+)
+    ∂ₜM_col = ∂ₜM_c_col + ∂ₜM_r_col  # [kg / s]
+    ∂ₜM_frz = min(∂ₜM_col, ∂ₜM_max_val)
+    f_frz = iszero(∂ₜM_col) ? zero(∂ₜM_frz) : ∂ₜM_frz / ∂ₜM_col
+    𝟙_wet = ∂ₜM_col > ∂ₜM_frz  # Used for wet densification
+    # Integrating over `Dᵢ` gives another unit of `[m]`, so `[X / s / m]` --> `[X / s]`
+    # ∂ₜX = ∫ ∂ₜX(Dᵢ) nᵢ(Dᵢ) dDᵢ
+    return SA.SVector(
+        n * ∂ₜM_c_col * f_frz,        # QCFRZ
+        n * ∂ₜM_c_col * (1 - f_frz),  # QCSHD
+        n * ∂ₜN_c_col,                # NCCOL
+        n * ∂ₜM_r_col * f_frz,        # QRFRZ
+        n * ∂ₜM_r_col * (1 - f_frz),  # QRSHD
+        n * ∂ₜN_r_col,                # NRCOL
+        n * ∂ₜM_col,                  # ∫M_col,      total collision rate
+        n * ∂ₜB_c_col * f_frz,        # BCCOL,       ∂ₜB_rim source
+        n * ∂ₜB_r_col * f_frz,        # BRCOL,       ∂ₜB_rim source
+        n * 𝟙_wet * ∂ₜM_col,          # ∫𝟙_wet_M_col, wet growth indicator
+    )
+end
+
 # Combined-closure form: `liquid_integrals(Dᵢ)` returns the six cloud and rain
 # inner components `(∂ₜN_c, ∂ₜM_c, ∂ₜB_c, ∂ₜN_r, ∂ₜM_r, ∂ₜB_r)`. The table path
 # uses this form so the per-node ice factors shared by the two channels are
 # formed once.
 @inline function ∫liquid_ice_collisions(n_i, ∂ₜM_max, liquid_integrals, ice_bounds; quad)
     function liquid_ice_collisions_integrands(Dᵢ)
-        # Inner integrals over liquid particle diameters
-        ∂ₜN_c_col, ∂ₜM_c_col, ∂ₜB_c_col, ∂ₜN_r_col, ∂ₜM_r_col, ∂ₜB_r_col = liquid_integrals(Dᵢ)
-
-        # Partition the mass collisions between freezing and shedding
-        ∂ₜM_col = ∂ₜM_c_col + ∂ₜM_r_col  # [kg / s]
-
-        ∂ₜM_frz = min(∂ₜM_col, ∂ₜM_max(Dᵢ))
-        f_frz = iszero(∂ₜM_col) ? zero(∂ₜM_frz) : ∂ₜM_frz / ∂ₜM_col
-        𝟙_wet = ∂ₜM_col > ∂ₜM_frz  # Used for wet densification
-
-        n = n_i(Dᵢ)
-        # Integrating over `Dᵢ` gives another unit of `[m]`, so `[X / s / m]` --> `[X / s]`
-        # ∂ₜX = ∫ ∂ₜX(Dᵢ) nᵢ(Dᵢ) dDᵢ
-        return SA.SVector(
-            n * ∂ₜM_c_col * f_frz,        # QCFRZ
-            n * ∂ₜM_c_col * (1 - f_frz),  # QCSHD
-            n * ∂ₜN_c_col,                # NCCOL
-            n * ∂ₜM_r_col * f_frz,        # QRFRZ
-            n * ∂ₜM_r_col * (1 - f_frz),  # QRSHD
-            n * ∂ₜN_r_col,                # NRCOL
-            n * ∂ₜM_col,                  # ∫M_col,      total collision rate
-            n * ∂ₜB_c_col * f_frz,        # BCCOL,       ∂ₜB_rim source
-            n * ∂ₜB_r_col * f_frz,        # BRCOL,       ∂ₜB_rim source
-            n * 𝟙_wet * ∂ₜM_col,          # ∫𝟙_wet_M_col, wet growth indicator
-        )
+        comps = liquid_integrals(Dᵢ)
+        return _partition_collision_node(n_i(Dᵢ), comps..., ∂ₜM_max(Dᵢ))
     end
     return integrate(liquid_ice_collisions_integrands, ice_bounds, quad)
 end

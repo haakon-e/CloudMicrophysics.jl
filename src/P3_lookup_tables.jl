@@ -804,9 +804,9 @@ end
 # table-sourced excess-mass closure.
 @inline function _scan_two_crossings(excess::F, D_lo::FT, D_hi::FT) where {F, FT}
     llo, lhi = log(D_lo), log(D_hi)
-    n_scan = 16
+    n_scan = 8
     Δl = (lhi - llo) / n_scan
-    maxiters = FT === Float32 ? 8 : 10
+    maxiters = 6
     tol = FixedIterations{FT}()
     refine(l₁, l₂) = exp(RS.find_zero(
         l -> excess(exp(l)), RS.BrentsMethod(l₁, l₂), RS.CompactSolution(), tol, maxiters,
@@ -843,8 +843,10 @@ Table-backed liquid-ice collision sources (variant C); see the quadrature method
 the per-diameter freeze/shed partition are kept exactly; the inner cloud and rain
 collision moments are read from `inner_tables` at the fall speed and effective
 radius of each outer node, and the wet-growth onset scan uses the same tabulated
-inner masses. The rime-volume sources use the representative-size Cober-List
-density shared with the variant-A method.
+inner masses. The ice fall speed of each outer node is shared between the channel
+lookups and the Musil ventilation via [`max_freeze_rate_from_velocity`](@ref), so
+it is evaluated once per node. The rime-volume sources use the representative-size
+Cober-List density shared with the variant-A method.
 
 `quad` is the outer-integral quadrature rule.
 """
@@ -864,27 +866,29 @@ density shared with the variant-A method.
     n_i = DT.size_distribution(state, logλ)
     ∂ₜV = volumetric_collision_rate_integrand(vel, ρₐ, state)
     v_i = ∂ₜV.v_i
-    ∂ₜM_max = compute_max_freeze_rate(aps, tps, vel, ρₐ, T, state)
+    ∂ₜM_max = max_freeze_rate_from_velocity(aps, tps, state.params.vent, ρₐ, T)
     ice_bounds0 = velocity_integral_bounds(state, logλ, v_i; p)
 
     cloud_below = (N_c < ϵN) | (L_c < ϵM)
+    nc = ifelse(cloud_below, zero(FT), N_c)
     x_c = L_c / max(N_c, ϵN)
     (; N₀r, Dr_mean) = CM2.pdf_rain_parameters(psd_r, L_r / ρₐ, ρₐ, N_r)
 
-    # Table-backed inner moments at each outer ice size. The fall speed `v_i` and
-    # effective radius `r_i` set both channel lookups, so form them once per size.
-    # The rime-volume inner (third component) is zero; the volume source is added
+    # Per outer ice size the fall speed `v_i(Dᵢ)` and effective radius `r_i(Dᵢ)`
+    # set both channel lookups and the Musil ventilation, so form them once. The
+    # rime-volume inner (third component) is zero; the volume source is added
     # below with the representative-density closure.
     ice_r(Dᵢ) = sqrt(ice_area(state, Dᵢ) / FT(π))
-    function liquid_inner(Dᵢ)
+    function integrand(Dᵢ)
         vv = v_i(Dᵢ)
         rr = ice_r(Dᵢ)
         qc = lookup(inner_tables.cloud_inner, vv, rr, ρₐ, x_c)
         qr = lookup(inner_tables.rain_inner, vv, rr, ρₐ, Dr_mean)
-        nc = ifelse(cloud_below, zero(FT), N_c)
-        return (
+        return _partition_collision_node(
+            n_i(Dᵢ),
             nc * exp(qc.log_H_NC), nc * exp(qc.log_H_MC), zero(FT),
             N₀r * exp(qr.log_H_NR), N₀r * exp(qr.log_H_MR), zero(FT),
+            ∂ₜM_max(Dᵢ, vv),
         )
     end
 
@@ -893,9 +897,9 @@ density shared with the variant-A method.
     function excess(Dᵢ)
         vv = v_i(Dᵢ)
         rr = ice_r(Dᵢ)
-        M_c = ifelse(cloud_below, zero(FT), N_c * exp(lookup(inner_tables.cloud_inner, vv, rr, ρₐ, x_c).log_H_MC))
+        M_c = nc * exp(lookup(inner_tables.cloud_inner, vv, rr, ρₐ, x_c).log_H_MC)
         M_r = N₀r * exp(lookup(inner_tables.rain_inner, vv, rr, ρₐ, Dr_mean).log_H_MR)
-        return M_c + M_r - ∂ₜM_max(Dᵢ)
+        return M_c + M_r - ∂ₜM_max(Dᵢ, vv)
     end
     D_lo, D_hi = first(ice_bounds0), last(ice_bounds0)
     D_wet₁, D_wet₂ = _scan_two_crossings(excess, FT(D_lo), FT(D_hi))
@@ -903,8 +907,8 @@ density shared with the variant-A method.
         ice_bounds0..., clamp(D_wet₁, D_lo, D_hi), clamp(D_wet₂, D_lo, D_hi),
     )))
 
-    rates = ∫liquid_ice_collisions(n_i, ∂ₜM_max, liquid_inner, ice_bounds; quad)
-    (QCFRZ, QCSHD, NCCOL, QRFRZ, QRSHD, NRCOL, ∫M_col, _, _, ∫𝟙_wet_M_col) = rates
+    rates = integrate(integrand, ice_bounds, quad)
+    (QCFRZ, QCSHD, NCCOL, QRFRZ, QRSHD, NRCOL, ∫M_col, _, _, ∫𝟙_wet_M_col) = Tuple(rates)
     f_wet = iszero(∫M_col) ? zero(∫M_col) : ∫𝟙_wet_M_col / ∫M_col
 
     BCCOL, BRCOL = _representative_rime_volume_sources(
