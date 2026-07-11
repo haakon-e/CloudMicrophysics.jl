@@ -850,6 +850,8 @@ struct P3IceTables{RT, CT, IT, Q, M}
     mode::M
 end
 
+Base.broadcastable(t::P3IceTables) = tuple(t)
+
 Adapt.adapt_structure(to, t::P3IceTables) = P3IceTables(
     Adapt.adapt(to, t.rate_tables), Adapt.adapt(to, t.coll_tables),
     Adapt.adapt(to, t.inner_tables), Adapt.adapt(to, t.quad), t.mode,

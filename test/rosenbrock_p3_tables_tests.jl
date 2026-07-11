@@ -65,6 +65,18 @@ function run_p3_tables_case(::Type{FT}, p95_tol) where {FT}
         s.ρ, s.T, s.q_tot, s.q_lcl, s.n_lcl, s.q_rai, s.n_rai,
         s.q_ice, s.n_ice, s.q_rim, s.b_rim, logλ_of(mp, s), Δt; p3_tables = tables,
     )
+    # Positional p3_tables form used by broadcasts on GPU fields.
+    table_pos_of(s) = BMT.bulk_microphysics_tendencies(
+        mode, BMT.Microphysics2Moment(), mp, tps,
+        s.ρ, s.T, s.q_tot, s.q_lcl, s.n_lcl, s.q_rai, s.n_rai,
+        s.q_ice, s.n_ice, s.q_rim, s.b_rim, logλ_of(mp, s), Δt, 1, tables,
+    )
+    @test all(s -> table_pos_of(s) === table_of(s), states)
+    # P3IceTables must broadcast as a scalar so it can be a positional broadcast
+    # argument (as ClimaAtmos passes it on GPU fields).
+    @test Base.broadcastable(tables) === (tables,)
+    take_tables(_, t) = t
+    @test all(take_tables.([1, 2, 3], tables) .=== tables)
 
     quad_res = map(quad_of, states)
     table_res = map(table_of, states)
@@ -89,6 +101,9 @@ function run_p3_tables_case(::Type{FT}, p95_tol) where {FT}
     call() = table_of(s)
     call()
     @test iszero(@allocated call())
+    call_pos() = table_pos_of(s)
+    call_pos()
+    @test iszero(@allocated call_pos())
     return nothing
 end
 

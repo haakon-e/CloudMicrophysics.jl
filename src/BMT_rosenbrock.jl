@@ -486,6 +486,21 @@ fields as the `Instantaneous` entry (without the activation diagnostic).
     )
 end
 
+# Positional `p3_tables` form, required by broadcasts on GPU fields. A broadcast
+# adapts positional arguments (converting device arrays), but keyword arguments
+# are captured in a closure the adapt pass does not traverse.
+@inline bulk_microphysics_tendencies(
+    mode::RosenbrockAverage{<:Union{ExactJacobian, ManualJacobian}}, cm::Microphysics2Moment,
+    mp::CMP.Microphysics2MParams{WR, ICE}, tps,
+    ρ, T, q_tot,
+    q_lcl, n_lcl, q_rai, n_rai, q_ice, n_ice, q_rim, b_rim, logλ,
+    Δt, nsub, p3_tables,
+) where {WR, ICE <: CMP.P3IceParams} = bulk_microphysics_tendencies(
+    mode, cm, mp, tps, ρ, T, q_tot,
+    q_lcl, n_lcl, q_rai, n_rai, q_ice, n_ice, q_rim, b_rim, logλ,
+    Δt, nsub; p3_tables,
+)
+
 @inline _tendency_and_jacobian(::ManualJacobian, g::Instantaneous2MP3Tendency, x) =
     (g(x), _jacobian_2mp3_manual(g, x))
 
