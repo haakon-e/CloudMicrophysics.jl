@@ -99,6 +99,85 @@ A change to any of these requires rebuilding the tables.
 `RateTable` stores a tuple of named quantities.
 Phase 1 stores rates only; additional quantities, such as build-time derivatives for the Jacobian, are a purely additive extension that appends names and array columns without changing the axes or the lookup.
 
+## Liquid-ice collisions
+
+The liquid-ice collision source is the dominant quadrature cost of the ice-phase tendency.
+Its integrand is separable into a temperature-free, bilinear part that is tabulated and a temperature-dependent freeze/shed partition that is applied at the use site.
+
+### The two collision tables
+
+The unpartitioned collision moments factor into an analytic prefactor and a shape function of the same shape coordinates as the Phase-1 rates plus one liquid-distribution coordinate.
+The cloud droplet distribution scales as ``N_c`` times a shape set by the mean droplet mass ``x_c = L_c / N_c``.
+The rain distribution scales as ``N_{0r}`` times a shape set by the mean drop diameter ``D_{r,\mathrm{mean}}``, where ``(N_{0r}, D_{r,\mathrm{mean}})`` are the closed-form parameters of the limited Seifert-Beheng rain PDF.
+
+| Table | Prefactor | Coordinates | Quantities |
+|:------|:----------|:------------|:-----------|
+| cloud collision | ``N_\mathrm{ice} N_c`` | ``\log\lambda,\ F_\mathrm{rim},\ \rho_\mathrm{rim},\ \log\rho_\mathrm{air},\ \log x_c`` | ``G_{NC}, G_{MC}`` |
+| rain collision | ``N_\mathrm{ice} N_{0r}`` | ``\log\lambda,\ F_\mathrm{rim},\ \rho_\mathrm{rim},\ \log\rho_\mathrm{air},\ \log D_{r,\mathrm{mean}}`` | ``G_{NR}, G_{MR}`` |
+
+The tabulated quantities are the number and mass collision moments normalized by the prefactor,
+
+```math
+G_{NC} = \frac{\mathrm{NCCOL}}{N_\mathrm{ice} N_c}, \quad
+G_{MC} = \frac{M_C}{N_\mathrm{ice} N_c}, \quad
+G_{NR} = \frac{\mathrm{NRCOL}}{N_\mathrm{ice} N_{0r}}, \quad
+G_{MR} = \frac{M_R}{N_\mathrm{ice} N_{0r}},
+```
+
+stored as ``\log``.
+The rain channel is normalized by ``N_{0r}`` rather than by ``N_r`` because the ``N_{0,\max}`` clamp of the limited rain PDF binds at realistic loadings, so the rain shape depends on ``L_r`` alone through ``D_{r,\mathrm{mean}}``.
+The ``D_{r,\mathrm{mean}}`` axis spans the interval into which the rain PDF slope is clamped, ``[10^{-4}, 10^{-3}]`` m, so no realizable rain state leaves the grid.
+The build fills the moments without the wet-growth partition (no onset location, no Musil limit, no freeze/shed split), which is both cheaper than the runtime path and exactly the temperature-free part.
+
+### The Musil freeze capacity
+
+The bulk wet-growth limit reuses the same ``a`` and ``b`` ventilation split as the melt rate, but with the ice diameter moment rather than the mass-derivative moment.
+The maximum freezing rate factors as ``\partial_t M_\mathrm{max}(D_i) = A(T_a, \rho_\mathrm{air})\, D_i\, F_v(D_i)`` with the scalar
+
+```math
+A = 2\pi \frac{K_\mathrm{therm}\, \Delta T + L_v D_\mathrm{vapor}\, \Delta\rho_{v,\mathrm{sat}}}{L_f - c_{p,l}\, \Delta T}, \qquad \Delta T = T_\mathrm{freeze} - T_a,
+```
+
+so the bulk freeze capacity is
+
+```math
+\int M_\mathrm{max} = A\, N_\mathrm{ice} \left( a_v V_a + \frac{b_v\, \mathrm{Sc}^{1/3}}{\sqrt{\nu_\mathrm{air}}}\, V_b \right),
+\quad V_a = \int \hat{n}(D) D\, \mathrm{d}D, \quad V_b = \int \hat{n}(D) D^{3/2} \sqrt{v_i(D)}\, \mathrm{d}D,
+```
+
+where ``\hat{n}`` is the unit-number ice distribution.
+The moment ``V_a`` is air-density independent and tabulated in 3D on ``(\log\lambda, F_\mathrm{rim}, \rho_\mathrm{rim})``; ``V_b`` carries the ice fall speed and is tabulated in 4D with the added ``\log\rho_\mathrm{air}`` axis.
+At ``T_a \lesssim 220`` K the denominator turns non-positive and every colliding droplet freezes; the scalar returns `floatmax` there, so a bulk ``f_\mathrm{frz} = \min(1, \int M_\mathrm{max} / \int M_\mathrm{col})`` saturates to one.
+
+### The bulk-partition assembly
+
+The runtime assembly reads the four collision moments and the freeze capacity from the tables, forms one bulk freeze fraction ``f_\mathrm{frz} = \min(1, \int M_\mathrm{max} / \int M_\mathrm{col})`` with ``\int M_\mathrm{col} = M_C + M_R``, and splits each channel proportionally:
+
+```math
+\mathrm{QCFRZ} = f_\mathrm{frz} M_C, \quad
+\mathrm{QCSHD} = (1 - f_\mathrm{frz}) M_C, \quad
+\mathrm{QRFRZ} = f_\mathrm{frz} M_R, \quad
+\mathrm{QRSHD} = (1 - f_\mathrm{frz}) M_R.
+```
+
+Shed rain number uses the mass of a fixed shed drop, ``\mathrm{NRSHD} = \mathrm{QRSHD} / m_\mathrm{liq}(D_\mathrm{shd})``.
+The rime-volume sources use a representative-size Cober-List density, evaluated with the mass-weighted mean ice velocity from the Phase-1 velocity table, the cloud mass-mean diameter ``\bar{D}_c = M_4/M_3``, and the rain representative diameter ``\bar{D}_r = 4 D_{r,\mathrm{mean}}``.
+The wet fraction ``f_\mathrm{wet} = 1 - f_\mathrm{frz}`` feeds the densification of rime mass and volume.
+
+### Accuracy and the bulk-partition delta
+
+The cloud mass and number sources are partition-free: ``\partial_t q_c = -M_C / \rho_\mathrm{air}`` and ``\partial_t N_c = -\mathrm{NCCOL}`` reproduce the quadrature values to the table interpolation error at every temperature.
+At temperatures cold enough that the Musil limit does not bind, ``f_\mathrm{frz} = 1`` and every one of the seven outputs reduces to a table interpolation of the quadrature value, again to the interpolation error.
+Over the error-study harness and a physically realizable sweep, the interpolation error of the four collision moments has a 95th percentile of a few times ``10^{-2}``, with the maximum in the ``F_\mathrm{rim} \to 1`` corner, matching the Phase-1 rate tables.
+
+The bulk freeze/shed partition is a physics change relative to the per-diameter partition of the quadrature scheme, not only an interpolation.
+The two partitions agree to below one percent in the cold band and diverge in the warm band ``T \in [258, 272]`` K, where the direct scheme resolves a per-size wet-growth window that the single bulk fraction cannot represent.
+The five partition-dependent outputs (``\partial_t q_r``, ``\partial_t N_r``, ``\partial_t L_\mathrm{rim}``, ``\partial_t L_\mathrm{ice}``, ``\partial_t B_\mathrm{rim}``) then differ by 10 to 34 percent at the warmest states, with the largest error on the rain sources.
+This delta is a property of the bulk closure and is bounded below by no grid refinement; it is reported here so that its acceptability is a modeling decision.
+The two softest parts of the closure are the wet fraction, which the bulk mean reads near zero while the per-size fraction reaches 0.1 to 0.5, and the representative-size rime density near ``0`` °C where the Cober-List index leaves its floor; both are quantified in the evaluation study.
+
+The variant that keeps the exact per-diameter partition while sourcing the inner moments from tables, and the runtime selector between the two, are added in a later step.
+
 ## API
 
 ```@docs
@@ -110,4 +189,8 @@ P3Scheme.lookup
 P3Scheme.LinAxis
 P3Scheme.LogAxis
 P3Scheme.fractional_index
+P3Scheme.build_p3_collision_tables
+P3Scheme.P3CollisionTables
+P3Scheme.P3CollisionGrid
+P3Scheme.bulk_max_freeze_rate
 ```
