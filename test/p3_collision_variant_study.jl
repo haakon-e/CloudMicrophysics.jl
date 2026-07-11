@@ -179,9 +179,9 @@ function run_collision_variant_study(;
             $h.state, $h.logλ, $psd_c, $psd_r, $h.L_c, $h.N_c, $h.L_r, $h.N_r, $aps, $tps, $vel, $h.ρₐ, $T;
             quad = $(mp.ice.quad),
         ) samples = 60 evals = 1
-        ta = BT.@belapsed vA($h, $T) samples = 200 evals = 1
-        tc = BT.@belapsed vC($h, $T) samples = 100 evals = 1
-        th = BT.@belapsed vH($h, $T, $(FT(1))) samples = 100 evals = 1
+        ta = BT.@belapsed $vA($h, $T) samples = 200 evals = 1
+        tc = BT.@belapsed $vC($h, $T) samples = 100 evals = 1
+        th = BT.@belapsed $vH($h, $T, $(FT(1))) samples = 100 evals = 1
         timing = (; quadrature = tq, A = ta, C = tc, hybrid1 = th)
         @printf(
             "collision time: quad %.3f ms | A %.1f us | C %.1f us | hybrid %.1f us\n",
