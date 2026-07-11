@@ -798,8 +798,8 @@ end
 
 # Locate up to two crossings of `excess(D)` on `[D_lo, D_hi]` by a log-spaced scan
 # with fixed-iteration bisection refinement; `D_lo` stands in for an absent
-# crossing. Matches the scan of [`wet_growth_onset_diameter`](@ref) with a
-# table-sourced excess-mass closure.
+# crossing. Table-backed counterpart of the [`wet_growth_onset_diameter`](@ref)
+# scan, at coarser resolution over a table-sourced excess-mass closure.
 @inline function _scan_two_crossings(excess::F, D_lo::FT, D_hi::FT) where {F, FT}
     llo, lhi = log(D_lo), log(D_hi)
     n_scan = 8
