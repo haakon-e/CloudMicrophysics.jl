@@ -155,6 +155,7 @@ CMP.MassPowerLaw
 CMP.AreaPowerLaw
 CMP.SlopeLaw
 CMP.SlopePowerLaw{Float64}
+CMP.SmoothSlopePowerLaw{Float64}
 CMP.SlopeConstant{Float64}
 CMP.VentilationFactor
 CMP.LocalRimeDensity

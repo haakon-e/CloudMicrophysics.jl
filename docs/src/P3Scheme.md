@@ -341,6 +341,30 @@ With this choice, it appears that some values of $\log(L/N)$ gives rise to multi
 
 ![](P3SlopeParameterizations_multiple_solutions.svg)
 
+#### $μ$ as a smoothed power law in $λ$
+
+The multiple solutions above originate at the two kinks of the hard clamp, where $μ(λ)$ is only $C^0$: the abrupt onset of the rising branch makes $\log(L/N)$ locally increase with $λ$, so the shape map $λ \mapsto \log(L/N)$ is no longer monotone.
+[`SmoothSlopePowerLaw`](@ref) replaces the two clamps with $C^\infty$ transitions of a single sharpness $κ$:
+
+```math
+μ(λ) = M_{μ_{max}}\big(M_0(a λ^b - c)\big), \qquad
+M_0(x) = \frac{1}{κ}\log\!\big(1 + e^{κ x}\big), \qquad
+M_{μ_{max}}(x) = μ_{max} - \frac{1}{κ}\log\!\big(1 + e^{κ (μ_{max} - x)}\big),
+```
+
+where $M_0$ is a smooth $\max(x, 0)$ (softplus) and $M_{μ_{max}}$ a smooth $\min(x, μ_{max})$.
+The corner width in $μ$ is of order $1/κ$; as $κ \to \infty$ the parameterization converges pointwise to the hard-clamped [`SlopePowerLaw`](@ref), and the interior branch $a λ^b - c$ is recovered away from the corners for any $κ$.
+
+The shape map is single-valued when $\log(L/N)$ is strictly monotone in $\log λ$, i.e.
+
+```math
+\frac{\partial}{\partial \log λ}\, \log(L/N) < 0
+\quad\text{for all } (F_{rim}, ρ_{rim}) \text{ and } \log λ \in [2, 17].
+```
+
+The maximum of this derivative over the physical range increases with $κ$ and crosses zero at a critical sharpness $κ_c$; the default $κ$ is set below $κ_c$ with a safety factor so that the criterion holds with a margin, in both `Float32` and `Float64`.
+The binding corner is the lower ($μ = 0$) kink of unrimed ice.
+
 #### $μ$ as a constant
 
 An alternative parameterization for $μ$ is a constant value:
