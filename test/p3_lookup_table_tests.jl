@@ -1,12 +1,10 @@
 using Test
 import Random
 import Statistics: quantile
-import StaticArrays as SA
 import ForwardDiff as FD
 import Adapt
 using KernelAbstractions
 
-import ClimaParams as CP
 import CloudMicrophysics as CM
 import CloudMicrophysics.Parameters as CMP
 import CloudMicrophysics.P3Scheme as P3
