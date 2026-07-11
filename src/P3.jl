@@ -7,6 +7,8 @@ module P3Scheme
 
 using DocStringExtensions
 
+import Adapt
+
 import SpecialFunctions as SF
 import RootSolvers as RS
 import LogExpFunctions
@@ -37,5 +39,6 @@ include("P3_size_distribution.jl")
 include("P3_integral_properties.jl")
 include("P3_terminal_velocity.jl")
 include("P3_processes.jl")
+include("P3_lookup_tables.jl")
 
 end
