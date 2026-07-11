@@ -175,25 +175,25 @@ Base.@kwdef struct P3TableGrid{FT}
     "Upper bound of the `logλ` rate axis [log(1/m)]"
     logλ_hi::FT = 17.0
     "Number of `logλ` nodes on the rate table"
-    n_logλ::Int = 96
+    n_logλ::Int = 80
     "Lower bound of the `x_ice = L_ice / N_ice` axis of the `logλ` table [kg]"
     x_ice_lo::FT = 1e-12
     "Upper bound of the `x_ice` axis of the `logλ` table [kg]"
     x_ice_hi::FT = 2e-4
     "Number of `x_ice` nodes on the `logλ` table"
-    n_x_ice::Int = 96
+    n_x_ice::Int = 80
     "Number of `F_rim` nodes"
-    n_F_rim::Int = 32
+    n_F_rim::Int = 24
     "Lower bound of the `ρ_rim` axis [kg/m³]"
     ρ_rim_lo::FT = 100.0
     "Number of `ρ_rim` nodes"
-    n_ρ_rim::Int = 24
+    n_ρ_rim::Int = 18
     "Lower bound of the `ρ_air` axis [kg/m³]"
     ρ_air_lo::FT = 0.05
     "Upper bound of the `ρ_air` axis [kg/m³]"
     ρ_air_hi::FT = 1.5
     "Number of `ρ_air` nodes"
-    n_ρ_air::Int = 10
+    n_ρ_air::Int = 8
     "Gauss-Legendre order used to fill the nodes"
     build_order::Int = 12
 end

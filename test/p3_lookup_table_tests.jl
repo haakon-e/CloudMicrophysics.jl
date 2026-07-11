@@ -146,14 +146,26 @@ end
         pts = vcat(harness_states(FT, params), sweep_states(FT, params, 200))
         E = Dict(k => FT[] for k in (:selfcol, :vN, :vM, :melt))
         for (state, logλ, ρₐ) in pts
-            push!(E[:selfcol], relerr(P3.ice_self_collection(tables, state, logλ, ρₐ).dNdt,
-                P3.ice_self_collection(state, logλ, vel, ρₐ; quad = qref).dNdt))
-            push!(E[:vN], relerr(P3.ice_terminal_velocity_number_weighted(tables, state, logλ, ρₐ),
-                P3.ice_terminal_velocity_number_weighted(vel, ρₐ, state, logλ; quad = qref)))
-            push!(E[:vM], relerr(P3.ice_terminal_velocity_mass_weighted(tables, state, logλ, ρₐ),
-                P3.ice_terminal_velocity_mass_weighted(vel, ρₐ, state, logλ; quad = qref)))
-            push!(E[:melt], relerr(P3.ice_melt(tables, aps, tps, FT(280), ρₐ, state, logλ).dLdt,
-                P3.ice_melt(vel, aps, tps, FT(280), ρₐ, state, logλ; quad = qref).dLdt))
+            push!(
+                E[:selfcol],
+                relerr(P3.ice_self_collection(tables, state, logλ, ρₐ).dNdt,
+                    P3.ice_self_collection(state, logλ, vel, ρₐ; quad = qref).dNdt),
+            )
+            push!(
+                E[:vN],
+                relerr(P3.ice_terminal_velocity_number_weighted(tables, state, logλ, ρₐ),
+                    P3.ice_terminal_velocity_number_weighted(vel, ρₐ, state, logλ; quad = qref)),
+            )
+            push!(
+                E[:vM],
+                relerr(P3.ice_terminal_velocity_mass_weighted(tables, state, logλ, ρₐ),
+                    P3.ice_terminal_velocity_mass_weighted(vel, ρₐ, state, logλ; quad = qref)),
+            )
+            push!(
+                E[:melt],
+                relerr(P3.ice_melt(tables, aps, tps, FT(280), ρₐ, state, logλ).dLdt,
+                    P3.ice_melt(vel, aps, tps, FT(280), ρₐ, state, logλ; quad = qref).dLdt),
+            )
         end
         for k in keys(E)
             @test quantile(E[k], 0.95) < 4e-2
@@ -220,11 +232,17 @@ end
         F32 = Float32
         p32 = CMP.Microphysics2MParams(F32; with_ice = true, quad = CM.Quadrature.GaussLegendre(F32, 12))
         g32 = P3.P3TableGrid{F32}(n_logλ = 24, n_F_rim = 8, n_ρ_rim = 6, n_ρ_air = 5, n_x_ice = 24)
-        t32 = P3.build_p3_lookup_tables(p32.ice.scheme, p32.ice.terminal_velocity, p32.warm_rain.air_properties; grid = g32)
+        t32 = P3.build_p3_lookup_tables(
+            p32.ice.scheme,
+            p32.ice.terminal_velocity,
+            p32.warm_rain.air_properties;
+            grid = g32,
+        )
         @test eltype(t32.rates) === F32
         @test all(isfinite, t32.rates.data)
         axλ, axF, axr, axa = t32.rates.axes
-        logλ, F_rim, ρ_rim, ρₐ = P3.node_coord(axλ, 12), P3.node_coord(axF, 3), P3.node_coord(axr, 3), P3.node_coord(axa, 3)
+        logλ, F_rim, ρ_rim, ρₐ =
+            P3.node_coord(axλ, 12), P3.node_coord(axF, 3), P3.node_coord(axr, 3), P3.node_coord(axa, 3)
         x = exp(P3.logLdivN(P3.P3State(p32.ice.scheme, one(F32), one(F32), F_rim, ρ_rim), logλ))
         state = P3.P3State(p32.ice.scheme, x, one(F32), F_rim, ρ_rim)
         tab = P3.ice_self_collection(t32, state, logλ, ρₐ).dNdt
