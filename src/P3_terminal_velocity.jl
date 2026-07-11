@@ -125,17 +125,20 @@ function ice_terminal_velocity_mass_weighted(
     velocity_params::CMP.Chen2022VelType, ρₐ, state::P3State, logλ;
     p = 1e-6, quad,
 )
-    (; ρq_ice) = state
+    (; ρq_ice, ρn_ice) = state
     v_term = ice_particle_terminal_velocity(velocity_params, ρₐ, state)
     n = DT.size_distribution(state, logλ)
 
-    # ∫n(D) m(D) v(D) dD, normalized by the mass concentration. The floored
-    # denominator keeps an empty state (ρq_ice → 0, integ → 0) finite and the
-    # mean velocity C0-continuous across ice onset.
-    mass_weighted_integrand = P3MassWeightedIntegrand(n, v_term, state)
+    # ∫n(D) m(D) v(D) dD, normalized by the mass concentration floored by the
+    # distribution's own represented mass ρn_ice·exp(logLdivN). Where the shape
+    # solve is unclamped the floor sits at (or below) ρq_ice, so the mean is
+    # unchanged; when ρq_ice → 0 with ρn_ice > 0 (logλ clamped) it keeps the
+    # bare mean a bounded fall speed (≤ the largest particle speed) while the
+    # sedimentation flux w·ρq stays conservative and vanishes with ρq_ice.
     bnds = velocity_integral_bounds(state, logλ, v_term; p)
-    integ = integrate(mass_weighted_integrand, bnds, quad)
-    return integ / max(ρq_ice, eps(one(ρq_ice)))
+    integ = integrate(P3MassWeightedIntegrand(n, v_term, state), bnds, quad)
+    represented_mass = ρn_ice * exp(logLdivN(state, logλ))
+    return integ / max(ρq_ice, represented_mass, floatmin(eltype(state)))
 end
 
 """
