@@ -346,20 +346,23 @@ Base.@kwdef struct P3CollisionGrid{FT}
     n_Dr::Int = 16
     build_order::Int = 16
     bounds_tail::FT = 1e-5
+    # Representative cloud number for the cloud-moment build; keeps `q_c` in the
+    # physical range so the mass floor of the cloud PDF is not reached in Float32.
+    N_c_ref::FT = 1e8
 end
 
-# Cloud inner collision moments `(∂ₜN_c_col, ∂ₜM_c_col)` per unit cloud number,
-# normalized so `NCCOL = N_ice N_c G_NC`. The ice PSD `n_i` is unit-number and the
-# cloud PSD is built at unit number with `L_c = x_c`.
-@inline function _cloud_unit_moments(state, logλ, n_i, ∂ₜV, ice_bounds, psd_c, ρₐ, x_c, m_liq, p; quad)
-    FT = eltype(state)
-    q_c = x_c / ρₐ
-    n_c = DT.size_distribution(psd_c, q_c, ρₐ, one(FT))
-    bounds_c = CM2.get_size_distribution_bounds(psd_c, q_c, ρₐ, one(FT), p)
-    ρ′_unit = (_Dᵢ, _Dₗ) -> one(FT)
+# Cloud inner collision moments per unit cloud number, normalized so
+# `NCCOL = N_ice N_c G_NC`. The ice PSD `n_i` is unit-number; the cloud PSD is
+# built at the representative number `N_c_ref` and mean mass `x_c`, and the
+# moments are divided by `N_c_ref` (the moments are linear in the cloud number).
+@inline function _cloud_unit_moments(state, logλ, n_i, ∂ₜV, ice_bounds, psd_c, ρₐ, x_c, N_c_ref, m_liq, p; quad)
+    q_c = x_c * N_c_ref / ρₐ
+    n_c = DT.size_distribution(psd_c, q_c, ρₐ, N_c_ref)
+    bounds_c = CM2.get_size_distribution_bounds(psd_c, q_c, ρₐ, N_c_ref, p)
+    ρ′_unit = (_Dᵢ, _Dₗ) -> one(eltype(state))
     cloud = get_liquid_integrals(n_c, ∂ₜV, m_liq, ρ′_unit, bounds_c; quad)
-    G_NC = integrate(Dᵢ -> n_i(Dᵢ) * cloud(Dᵢ)[1], ice_bounds, quad)
-    G_MC = integrate(Dᵢ -> n_i(Dᵢ) * cloud(Dᵢ)[2], ice_bounds, quad)
+    G_NC = integrate(Dᵢ -> n_i(Dᵢ) * cloud(Dᵢ)[1], ice_bounds, quad) / N_c_ref
+    G_MC = integrate(Dᵢ -> n_i(Dᵢ) * cloud(Dᵢ)[2], ice_bounds, quad) / N_c_ref
     return (G_NC, G_MC)
 end
 
@@ -456,7 +459,8 @@ function build_p3_collision_tables(
             @inbounds data_mb[1, i, j, k, l] = log(V_b)
             for m in 1:nxc
                 x_c = node_coord(ax_xc, m)
-                G_NC, G_MC = _cloud_unit_moments(state, logλ, n_i, ∂ₜV, ice_bounds, psd_c, ρₐ, x_c, m_liq, p; quad)
+                G_NC, G_MC =
+                    _cloud_unit_moments(state, logλ, n_i, ∂ₜV, ice_bounds, psd_c, ρₐ, x_c, grid.N_c_ref, m_liq, p; quad)
                 @inbounds data_c[1, i, j, k, l, m] = log(G_NC)
                 @inbounds data_c[2, i, j, k, l, m] = log(G_MC)
             end
