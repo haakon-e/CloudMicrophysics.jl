@@ -43,7 +43,11 @@ export MicrophysicsScheme,
     Instantaneous,
     InstantaneousVerbose,
     LinearizedAverage,
-    bulk_microphysics_tendencies
+    bulk_microphysics_tendencies,
+    P3IceTables,
+    P3CollisionVariantA,
+    P3CollisionVariantC,
+    P3CollisionHybrid
 
 #####
 ##### Singleton types for dispatch
@@ -770,6 +774,59 @@ end
 
 # --- 2-Moment Microphysics (Unified Warm + Optional Ice) ---
 
+"""
+    P3CollisionVariantA()
+    P3CollisionVariantC()
+    P3CollisionHybrid(θ)
+
+Selector for the liquid-ice collision path of a table-backed 2M+P3 tendency:
+variant A (bulk freeze/shed partition), variant C (exact per-diameter partition),
+or the hybrid switch at threshold `θ`. Stored on [`P3IceTables`](@ref).
+"""
+struct P3CollisionVariantA end
+struct P3CollisionVariantC end
+struct P3CollisionHybrid{FT}
+    θ::FT
+end
+
+"""
+    P3IceTables(rate_tables, coll_tables, inner_tables, quad, mode)
+
+Precomputed P3 lookup tables and the collision `mode` for the table-backed method
+of [`bulk_microphysics_tendencies`](@ref). `rate_tables` back ice self-collection,
+the terminal velocities, and melt; `coll_tables` and `inner_tables` back the
+variant-A and variant-C collision paths; `quad` is the outer-integral rule of the
+variant-C and hybrid paths; `mode` is a [`P3CollisionVariantA`](@ref),
+[`P3CollisionVariantC`](@ref), or [`P3CollisionHybrid`](@ref).
+"""
+struct P3IceTables{RT, CT, IT, Q, M}
+    rate_tables::RT
+    coll_tables::CT
+    inner_tables::IT
+    quad::Q
+    mode::M
+end
+
+@inline _table_collision(
+    t::P3IceTables{<:Any, <:Any, <:Any, <:Any, P3CollisionVariantA},
+    state, logλ, pdf_c, pdf_r, L_c, N_c, L_r, N_r, aps, tps, vel, ρ, T,
+) = CMP3.bulk_liquid_ice_collision_sources(
+    t.rate_tables, t.coll_tables, state, logλ, pdf_c, pdf_r, L_c, N_c, L_r, N_r, aps, tps, vel, ρ, T,
+)
+@inline _table_collision(
+    t::P3IceTables{<:Any, <:Any, <:Any, <:Any, P3CollisionVariantC},
+    state, logλ, pdf_c, pdf_r, L_c, N_c, L_r, N_r, aps, tps, vel, ρ, T,
+) = CMP3.bulk_liquid_ice_collision_sources(
+    t.rate_tables, t.inner_tables, state, logλ, pdf_c, pdf_r, L_c, N_c, L_r, N_r, aps, tps, vel, ρ, T; quad = t.quad,
+)
+@inline _table_collision(
+    t::P3IceTables{<:Any, <:Any, <:Any, <:Any, <:P3CollisionHybrid},
+    state, logλ, pdf_c, pdf_r, L_c, N_c, L_r, N_r, aps, tps, vel, ρ, T,
+) = CMP3.bulk_liquid_ice_collision_sources(
+    t.rate_tables, t.coll_tables, t.inner_tables, state, logλ, pdf_c, pdf_r, L_c, N_c, L_r, N_r, aps, tps, vel, ρ,
+    T;
+    quad = t.quad, θ = t.mode.θ,
+)
 
 """
     bulk_microphysics_tendencies(
@@ -888,7 +945,8 @@ to be non-Nothing, eliminating runtime type checks and dynamic dispatch.
     q_lcl, n_lcl, q_rai, n_rai,
     q_ice, n_ice, q_rim, b_rim, logλ,
     inpc_log_shift = zero(ρ),
-    w = zero(ρ), p = zero(ρ),
+    w = zero(ρ), p = zero(ρ);
+    p3_tables = nothing,
 ) where {WR, ICE <: CMP.P3IceParams}
     FT = eltype(ρ)
     ϵₘ = UT.ϵ_numerics_2M_M(FT)
@@ -948,10 +1006,14 @@ to be non-Nothing, eliminating runtime type checks and dynamic dispatch.
     if q_ice > ϵₘ && n_ice > ϵₙ
 
         # --- Liquid-ice collisions
-        coll = CMP3.bulk_liquid_ice_collision_sources(
-            state, logλ, pdf_c, pdf_r, L_lcl, N_lcl, L_rai, N_rai, aps, tps, vel, ρ, T;
-            quad,
-        )
+        coll =
+            p3_tables === nothing ?
+            CMP3.bulk_liquid_ice_collision_sources(
+                state, logλ, pdf_c, pdf_r, L_lcl, N_lcl, L_rai, N_rai, aps, tps, vel, ρ, T; quad,
+            ) :
+            _table_collision(
+                p3_tables, state, logλ, pdf_c, pdf_r, L_lcl, N_lcl, L_rai, N_rai, aps, tps, vel, ρ, T,
+            )
         dq_lcl_dt += coll.∂ₜq_c
         dq_rai_dt += coll.∂ₜq_r
         dn_lcl_dt += coll.∂ₜN_c / ρ
@@ -961,15 +1023,19 @@ to be non-Nothing, eliminating runtime type checks and dynamic dispatch.
         db_rim_dt += coll.∂ₜB_rim / ρ
 
         # --- Ice self-collection (aggregation)
-        S_ice_agg = CMP3.ice_self_collection(state, logλ, vel, ρ; quad)
+        S_ice_agg =
+            p3_tables === nothing ?
+            CMP3.ice_self_collection(state, logλ, vel, ρ; quad) :
+            CMP3.ice_self_collection(p3_tables.rate_tables, state, logλ, ρ)
         dn_ice_dt -= S_ice_agg.dNdt / ρ
 
         # Ice melting (above freezing temperature)
         T_freeze = TDI.TD.Parameters.T_freeze(tps)
-        melt = ifelse(T > T_freeze,
-            CMP3.ice_melt(vel, aps, tps, T, ρ, state, logλ; quad),
-            (; dNdt = zero(ρ), dLdt = zero(ρ)),
-        )
+        melt_fired =
+            p3_tables === nothing ?
+            CMP3.ice_melt(vel, aps, tps, T, ρ, state, logλ; quad) :
+            CMP3.ice_melt(p3_tables.rate_tables, aps, tps, T, ρ, state, logλ)
+        melt = ifelse(T > T_freeze, melt_fired, (; dNdt = zero(ρ), dLdt = zero(ρ)))
         # Specific (per-kg-air) ice-mass melt rate.
         ∂ₜq_ice_melt = melt.dLdt / ρ
         ∂ₜn_ice_melt = melt.dNdt / ρ
