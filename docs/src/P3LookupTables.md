@@ -60,7 +60,7 @@ The default ranges are:
 
 - ``\log\lambda \in [2, 17]``, the shape-solver bracket, so no realistic state clamps.
 - ``F_\mathrm{rim} \in [0, 1 - \varepsilon]``, including ``F_\mathrm{rim} = 0`` exactly; the upper bound is the regularization used by [`state_from_prognostic`](@ref).
-- ``\rho_\mathrm{rim} \in [100, 0.8\,\rho_l]``, the physical rime-density range; the upper bound is the regularization cap.
+- ``\rho_\mathrm{rim} \in [100, 0.8\,\rho_l]``, the physical rime-density range; the upper bound is the regularization limit.
   Unrimed states carry ``\rho_\mathrm{rim} = 0`` and clamp to the lower node, which is exact because the rates do not depend on ``\rho_\mathrm{rim}`` at ``F_\mathrm{rim} = 0``.
 - ``\rho_\mathrm{air} \in [0.05, 1.5]`` kg m``^{-3}``, covering the column.
 
