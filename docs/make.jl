@@ -73,6 +73,7 @@ pages = Any[
     "Home" => "index.md",
     "Parameterizations" => Parameterizations,
     "Bulk tendencies" => "BulkTendencies.md",
+    "Rosenbrock substepping" => "RosenbrockNumerics.md",
     "Thermodynamics interface" => "Thermodynamics.md",
     "How to guides" => Guides,
     "Models" => Models,
