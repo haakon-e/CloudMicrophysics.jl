@@ -180,6 +180,10 @@ build time (the regularized `1 - eps(FT)` and `0.8 ρ_l`), so only the lower
 - `n_ρ_air`: number of `ρ_air` nodes.
 - `build_order`: Gauss-Legendre order used to fill the nodes.
 - `melt_bounds_tail`: tail probability setting the melt-moment integration bounds.
+- `N_ref`: reference number for the shape-table synthetic states. `logλ` depends
+  only on the mean mass `x_ice`, so the node state carries `N_ref` and mass
+  `x_ice N_ref`; a large `N_ref` keeps both above the `ϵ` thresholds for the
+  whole `x_ice` range at `Float32`.
 """
 Base.@kwdef struct P3TableGrid{FT}
     logλ_lo::FT = 2.0
@@ -196,6 +200,7 @@ Base.@kwdef struct P3TableGrid{FT}
     n_ρ_air::Int = 8
     build_order::Int = 12
     melt_bounds_tail::FT = 1e-6
+    N_ref::FT = 1e8
 end
 
 """
@@ -264,7 +269,7 @@ function build_p3_lookup_tables(
         x_ice = node_coord(ax_x, i)
         F_rim = node_coord(ax_F, j)
         ρ_rim = node_coord(ax_r, k)
-        state = P3State(params, x_ice, one(FT), F_rim, ρ_rim)
+        state = P3State(params, x_ice * grid.N_ref, grid.N_ref, F_rim, ρ_rim)
         @inbounds data3[1, i, j, k] = get_distribution_logλ(state)
     end
 

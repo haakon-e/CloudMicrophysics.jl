@@ -28,6 +28,22 @@ maxrelstep(r) = maximum(abs, diff(r)) / (maximum(abs, r) + eps(eltype(r)))
             @test all(isfinite, tables.rates.data)
         end
 
+        # The N_ref build keeps the synthetic mass above the ϵ thresholds, so the
+        # shape table resolves logλ(x_ice) across the whole axis instead of
+        # plateauing below eps(Float32).
+        @testset "$FT shape table resolved along x_ice" begin
+            shape = tables.shape.data
+            nx, nF, nr = size(shape, 2), size(shape, 3), size(shape, 4)
+            for (j, k) in ((1, 1), (nF ÷ 2, nr ÷ 2), (nF, nr))
+                col = shape[1, :, j, k]
+                @test all(isfinite, col)
+                @test col[1] > col[end]                    # larger x_ice, smaller logλ
+                @test maximum(col) - minimum(col) > FT(5)  # spans the axis, no plateau
+                @test length(unique(col)) > 0.9 * nx
+                @test maximum(diff(col)) < FT(1)
+            end
+        end
+
         # Sweep ρq_ice across the mass threshold ϵₘ at fixed number.
         ρn_ice = FT(100) * ϵₘ / FT(1e-8)
         ρq = FT.(exp10.(range(log10(FT(0.1) * ϵₘ), log10(FT(100) * ϵₘ); length = 80)))
