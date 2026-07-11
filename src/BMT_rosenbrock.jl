@@ -413,8 +413,9 @@ documentation page for the substep algorithm.
 [`ExactJacobian`](@ref) and [`ManualJacobian`](@ref); the donor-based matrix
 ([`DonorJacobian`](@ref)/[`CoupledDonorJacobian`](@ref)) is 1M-only.
 
-Returns the net change in the species over `Δt` divided by `Δt`, in the same
-fields as the `Instantaneous` entry (without the activation diagnostic).
+Returns the net change in the species over `Δt` divided by `Δt`, followed by a
+zero `dn_lcl_activation_dt` slot, matching the field layout of the microphysics
+tendency cache (droplet activation is added by the host, not the substep loop).
 """
 @inline function bulk_microphysics_tendencies(
     mode::RosenbrockAverage{<:Union{ExactJacobian, ManualJacobian}}, cm::Microphysics2Moment,
@@ -459,9 +460,9 @@ fields as the `Instantaneous` entry (without the activation diagnostic).
     rates = (x - x₀) / Δt
     return NamedTuple{(
         :dq_lcl_dt, :dn_lcl_dt, :dq_rai_dt, :dn_rai_dt,
-        :dq_ice_dt, :dn_ice_dt, :dq_rim_dt, :db_rim_dt,
+        :dq_ice_dt, :dn_ice_dt, :dq_rim_dt, :db_rim_dt, :dn_lcl_activation_dt,
     )}(
-        Tuple(rates),
+        (Tuple(rates)..., zero(FT)),
     )
 end
 

@@ -58,7 +58,7 @@ function test_rosenbrock_mode(FT)
             mode, BMT.Microphysics2Moment(), mp, tps,
             ρ, T, q_tot, x0..., logλ, Δt, nsub,
         )
-        return SVector{8, FT}(x0...) .+ Δt .* SVector(values(t)...)
+        return SVector{8, FT}(x0...) .+ Δt .* SVector{8, FT}(Base.front(values(t))...)
     end
 
     # x = [q_lcl, n_lcl, q_rai, n_rai, q_ice, n_ice, q_rim, b_rim]
@@ -112,7 +112,7 @@ function test_rosenbrock_mode(FT)
                 manual, BMT.Microphysics2Moment(), mp, tps,
                 r.ρ, r.T, r.q_tot, r.x..., logλ, Δt, n,
             )
-            err_metric(x0 .+ Δt .* SVector(values(t)...), x_ref, x0)
+            err_metric(x0 .+ Δt .* SVector{8, FT}(Base.front(values(t))...), x_ref, x0)
         end
         @test all(isfinite, errs)
         @test errs[3] ≤ errs[1] * (1 + sqrt(eps(FT)))
@@ -148,11 +148,11 @@ function test_rosenbrock_mode(FT)
                 mode, BMT.Microphysics2Moment(), mp, tps,
                 FT(0.45), FT(233), FT(0.003), x_stress..., logλ, Δt, nsub,
             )
-            x1 = SVector{8, FT}(x_stress...) .+ Δt .* SVector(values(t)...)
+            x1 = SVector{8, FT}(x_stress...) .+ Δt .* SVector{8, FT}(Base.front(values(t))...)
             @test all(isfinite, x1)
             # non-negative up to the roundoff of the host-side x + Δt * t
             # reconstruction (internally the state is floored at zero)
-            tol = eps(FT) .* (abs.(SVector{8, FT}(x_stress...)) .+ Δt .* abs.(SVector(values(t)...)))
+            tol = eps(FT) .* (abs.(SVector{8, FT}(x_stress...)) .+ Δt .* abs.(SVector{8, FT}(Base.front(values(t))...)))
             @test all(x1 .>= -tol)
         end
     end
