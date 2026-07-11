@@ -934,7 +934,6 @@ to be non-Nothing, eliminating runtime type checks and dynamic dispatch.
 ) where {WR, ICE <: CMP.P3IceParams}
     FT = eltype(ρ)
     ϵₘ = UT.ϵ_numerics_2M_M(FT)
-    ϵₙ = UT.ϵ_numerics_2M_N(FT)
     ϵB = UT.ϵ_numerics_P3_B(FT)
     # Clamp negative inputs to zero (robustness against numerical errors)
     ρ = UT.clamp_to_nonneg(ρ)
@@ -986,8 +985,8 @@ to be non-Nothing, eliminating runtime type checks and dynamic dispatch.
     inp_depletion_model = mp.ice.inp_depletion_model
     quad = mp.ice.quad
 
-    # Only compute ice processes if there is ice mass/number present
-    if q_ice > ϵₘ && n_ice > ϵₙ
+    # Only compute ice processes if ice mass is present
+    if q_ice > ϵₘ
 
         # --- Liquid-ice collisions
         coll = CMP3.bulk_liquid_ice_collision_sources(
