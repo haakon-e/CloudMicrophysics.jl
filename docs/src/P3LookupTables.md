@@ -199,6 +199,7 @@ The ice fall speed ``v_i(D_i)`` is evaluated once per outer node and shared betw
 The wet-growth onset is located by an 8-node log-spaced scan with bisection refinement over the same tabulated inner masses, so it adds little cost.
 The rime-volume sources use the representative-density Cober-List closure shared with variant A.
 Sharing the fall speed and reducing the scan resolution roughly halve the per-cell variant-C cost relative to the previous order-8 path that evaluated the ice velocity twice per node, in a same-run comparison, at the same seven-output accuracy.
+The onset diameter itself is not tabulated: it is the crossing of the collected mass and the freeze limit and depends on the ice shape, the air density, both liquid mean sizes, both liquid number scalings, and temperature, so it is too high-dimensional to tabulate cleanly, and interpolating it would reintroduce the breakpoint error that the scan avoids.
 
 Because the outer integral and the per-diameter partition are exact, the variant-C error is the table interpolation error for the six collision-moment outputs, temperature independent and with no warm-band bias.
 The rime-volume source ``\partial_t B_\mathrm{rim}`` instead uses the representative-density Cober-List closure shared with variant A, so it carries the same structural, non per-diameter approximation; it is small only where the representative rime density sits on its clamped floor, and departs from the per-diameter value near ``0`` °C and for large drops.
