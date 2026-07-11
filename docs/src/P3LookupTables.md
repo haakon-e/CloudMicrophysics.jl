@@ -77,8 +77,13 @@ The self-collection kernel and the two melt moments are positive and span severa
 The terminal velocities are order one and stored directly.
 
 Interpolation accuracy is limited to first order near the kinks of the shape law, where ``\mu(\log\lambda)`` reaches its bounds, and near the ``F_\mathrm{rim} \to 1`` regime, where the partially-rimed size range vanishes.
-At the default grid the relative error against a GL(128) reference over the error-study harness and a physically realizable sweep has a 95th percentile of a few times ``10^{-2}`` and a maximum below ``1.5 \times 10^{-1}`` per quantity; `test/p3_lookup_error_study.jl` reports the per-axis resolution dependence.
-These errors are within the parameterization uncertainty of the tabulated processes; for example, the self-collection rate carries an assumed collision efficiency of one.
+At the default grid the relative error against a GL(128) reference over the error-study harness and a physically realizable sweep has a 95th percentile of a few times ``10^{-2}`` per quantity.
+The maximum stays below ``1.5 \times 10^{-1}`` for self-collection, both velocities except the mass-weighted one, and melting; the mass-weighted velocity reaches about ``4 \times 10^{-1}`` in the ``F_\mathrm{rim} \to 1`` corner.
+The accepted 95th-percentile target of a few times ``10^{-2}`` is looser than an initial aspiration of ``3 \times 10^{-3}`` (95th percentile) and ``3 \times 10^{-2}`` (maximum).
+Reaching the tighter values requires roughly a hundred megabytes of table and a build of several minutes, and the accepted values remain within the parameterization uncertainty of the tabulated processes, for example the self-collection rate carries an assumed collision efficiency of one.
+`test/p3_lookup_error_study.jl` reports the per-axis resolution dependence behind these values.
+
+The ``\log\lambda`` shape table reproduces the iterative solver to a few times ``10^{-2}`` at the 95th percentile over in-grid states, with a maximum near the ``x_\mathrm{ice} \to \log\lambda`` fold of about ``10^{-1}``, so it serves as a warm start or coarse replacement rather than a drop-in for the solver near the fold.
 
 ## Build at init and parameter invalidation
 

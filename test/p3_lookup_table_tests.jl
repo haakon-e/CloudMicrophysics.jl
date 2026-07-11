@@ -16,15 +16,17 @@ const FLOOR = 1e-12
 relerr(a, b) = abs(a - b) / max(abs(a), abs(b), FLOOR)
 
 # Physically realizable states for the interpolation sweep. `logλ` is drawn on
-# the shape-solver bracket, `ρ_rim` above a rime-density floor (rimed particles
-# are denser than that), and each `logλ` is mapped to the consistent `x_ice`.
+# the shape-solver bracket, `F_rim` across the full tabulated range including the
+# `F_rim → 1` corner, `ρ_rim` above a rime-density floor (rimed particles are
+# denser than that), and each `logλ` is mapped to the consistent `x_ice`.
 function sweep_states(::Type{FT}, params, n; seed = 0xBEEF) where {FT}
     rng = Random.MersenneTwister(seed)
     r_lo, r_hi = FT(100), FT(0.8) * params.ρ_l
+    F_hi = one(FT) - eps(FT)
     states = Tuple{P3.P3State{FT}, FT, FT}[]
     while length(states) < n
         logλ = FT(3 + rand(rng) * 10)
-        F_rim = FT(rand(rng) * 0.95)
+        F_rim = FT(rand(rng)) * F_hi
         ρ_rim = r_lo + rand(rng) * (r_hi - r_lo)
         ρₐ = FT(exp10(log10(0.1) + rand(rng) * (log10(1.4) - log10(0.1))))
         x = exp(P3.logLdivN(P3.P3State(params, one(FT), one(FT), F_rim, ρ_rim), logλ))
@@ -123,10 +125,12 @@ end
 
     @testset "no clamping for harness states" begin
         axλ, axF, axr, axa = tables.rates.axes
+        axx = tables.shape.axes[1]
         for (state, logλ, ρₐ) in harness_states(FT, params)
             @test P3.node_coord(axλ, 1) <= logλ <= P3.node_coord(axλ, axλ.n)
             @test 0 <= state.F_rim <= P3.node_coord(axF, axF.n)
             @test P3.node_coord(axa, 1) <= ρₐ <= P3.node_coord(axa, axa.n)
+            @test P3.node_coord(axx, 1) <= state.ρq_ice / state.ρn_ice <= P3.node_coord(axx, axx.n)
             # ρ_rim only for rimed states; unrimed states clamp harmlessly (the
             # rate is independent of ρ_rim at F_rim = 0).
             if state.F_rim > 0
@@ -136,11 +140,13 @@ end
     end
 
     @testset "interpolation accuracy vs GL(128)" begin
-        # Interpolation of the multilinear table is limited to O(h) near the
-        # `μ(logλ)` clamp kinks and the `F_rim → 1` regime, so the tolerances
-        # here are the values the default grid robustly meets, not the tighter
-        # aspiration of the design note; `test/p3_lookup_error_study.jl` reports
-        # the resolution sweep behind them.
+        # Multilinear interpolation is O(h) near the `μ(logλ)` clamp kinks and in
+        # the `F_rim → 1` regime, where the partially-rimed size range vanishes.
+        # The 95th-percentile tolerance is the accepted accuracy target of the
+        # default grid; the maximum is a per-quantity bound on the `F_rim → 1`
+        # corner, where the mass-weighted velocity is the worst case. See
+        # docs/src/P3LookupTables.md and `test/p3_lookup_error_study.jl` for the
+        # resolution sweep behind these values.
         pts = vcat(harness_states(FT, params), sweep_states(FT, params, 200))
         E = Dict(k => FT[] for k in (:selfcol, :vN, :vM, :melt))
         for (state, logλ, ρₐ) in pts
@@ -165,10 +171,34 @@ end
                     P3.ice_melt(vel, aps, tps, FT(280), ρₐ, state, logλ; quad = qref).dLdt),
             )
         end
+        max_tol = (selfcol = 1.5e-1, vN = 1.5e-1, vM = 5e-1, melt = 1.5e-1)
         for k in keys(E)
             @test quantile(E[k], 0.95) < 4e-2
-            @test maximum(E[k]) < 1.5e-1
+            @test maximum(E[k]) < getproperty(max_tol, k)
         end
+    end
+
+    @testset "shape (logλ) table: node exactness and interpolation" begin
+        axx, axF, axr = tables.shape.axes
+        for (i, j, k) in ((1, 1, 1), (20, 5, 6), (40, 12, 10), (axx.n, axF.n, axr.n))
+            x_ice = P3.node_coord(axx, i)
+            F_rim = P3.node_coord(axF, j)
+            ρ_rim = P3.node_coord(axr, k)
+            state = P3.P3State(params, x_ice, one(FT), F_rim, ρ_rim)
+            @test P3.get_distribution_logλ(tables, state) ≈ tables.shape.data[1, i, j, k] rtol = 1e-12
+            @test P3.get_distribution_logλ(tables, state) ≈ P3.get_distribution_logλ(state) rtol = 1e-12
+        end
+        # First-order interpolation across the `x_ice → logλ` fold of the
+        # SlopePowerLaw shape law, so the bound is looser than the rate tables;
+        # see docs/src/P3LookupTables.md.
+        xlo, xhi = P3.node_coord(axx, 1), P3.node_coord(axx, axx.n)
+        E = FT[]
+        for (state, _, _) in sweep_states(FT, params, 400)
+            xlo <= state.ρq_ice / state.ρn_ice <= xhi || continue
+            push!(E, relerr(P3.get_distribution_logλ(tables, state), P3.get_distribution_logλ(state)))
+        end
+        @test quantile(E, 0.95) < 1e-1
+        @test maximum(E) < 2.5e-1
     end
 
     @testset "interpolant smoothness under mesh refinement" begin

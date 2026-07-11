@@ -25,11 +25,13 @@ struct LogAxis{FT}
 end
 
 function LinAxis(; lo, hi, n)
+    @assert n >= 2 "an interpolation axis needs at least two nodes"
     FT = float(promote_type(typeof(lo), typeof(hi)))
     return LinAxis{FT}(FT(lo), FT((n - 1) / (hi - lo)), Int(n))
 end
 
 function LogAxis(; lo, hi, n)
+    @assert n >= 2 "an interpolation axis needs at least two nodes"
     FT = float(promote_type(typeof(lo), typeof(hi)))
     t_lo, t_hi = log10(FT(lo)), log10(FT(hi))
     return LogAxis{FT}(t_lo, FT((n - 1) / (t_hi - t_lo)), Int(n))
@@ -103,8 +105,8 @@ Base.eltype(::RateTable{Names, FT}) where {Names, FT} = FT
     end
 end
 
-# Statically-unrolled multilinear blend over the 2^N cell corners. Each leaf
-# fetches the `Q` contiguous quantities of one corner as an `SVector`.
+# Multilinear blend over the 2^N cell corners. Each leaf fetches the `Q`
+# contiguous quantities of one corner as an `SVector`.
 @inline function multilinear(data, ::Val{Q}, offset::Int, idx::Tuple, strides::Tuple) where {Q}
     (i0, w) = idx[1]
     s = strides[1]
@@ -120,8 +122,9 @@ end
 
 Multilinear interpolation of every quantity of `table` at the physical
 coordinates `(x_1, …, x_N)`. Return a `NamedTuple` keyed by the table's quantity
-names. Exact over the `2^N` cell corners, statically unrolled, and differentiable
-in the coordinates.
+names. Reproduces the node values at the `2^N` cell corners. The coordinates
+should share the table element type, except for `ForwardDiff.Dual` coordinates
+over that type; a coordinate of a wider type promotes the returned values.
 """
 @inline function lookup(t::RateTable{Names, FT, N}, coords::Vararg{Any, N}) where {Names, FT, N}
     Q = length(Names)
@@ -150,11 +153,7 @@ end
 Adapt.adapt_structure(to, t::P3LookupTables) =
     P3LookupTables(Adapt.adapt(to, t.rates), Adapt.adapt(to, t.shape))
 
-# The self-collection kernel and the two melt moments are positive and span
-# several decades across the `x_ice` axis; they are stored as `log` and
-# exponentiated at the use site (Fortran P3 stores its ice-rate columns the same
-# way), so the multilinear interpolant acts on a near-linear function. The
-# terminal velocities are order one and stored directly.
+# selfcol and the two melt moments are stored as log; the velocities directly.
 const RATE_QUANTITY_NAMES = (:log_selfcol_g, :log_melt_a_mom, :log_melt_b_mom, :v_number, :v_mass)
 const SHAPE_QUANTITY_NAMES = (:logλ,)
 
@@ -163,39 +162,40 @@ const SHAPE_QUANTITY_NAMES = (:logλ,)
 
 Grid resolution and bounds for [`build_p3_lookup_tables`](@ref). The `F_rim`
 upper bound and the `ρ_rim` upper bound are derived from the P3 parameters at
-build time (the regularised `1 - eps(FT)` and `0.8 ρ_l`), so only the lower
+build time (the regularized `1 - eps(FT)` and `0.8 ρ_l`), so only the lower
 `ρ_rim` bound and the `x_ice` / `ρ_air` bounds are set here.
 
 # Fields
-$(FIELDS)
+- `logλ_lo`: lower bound of the `logλ` rate axis [log(1/m)].
+- `logλ_hi`: upper bound of the `logλ` rate axis [log(1/m)].
+- `n_logλ`: number of `logλ` nodes on the rate table.
+- `x_ice_lo`: lower bound of the `x_ice = L_ice / N_ice` axis of the `logλ` table [kg].
+- `x_ice_hi`: upper bound of the `x_ice` axis of the `logλ` table [kg].
+- `n_x_ice`: number of `x_ice` nodes on the `logλ` table.
+- `n_F_rim`: number of `F_rim` nodes.
+- `ρ_rim_lo`: lower bound of the `ρ_rim` axis [kg/m³].
+- `n_ρ_rim`: number of `ρ_rim` nodes.
+- `ρ_air_lo`: lower bound of the `ρ_air` axis [kg/m³].
+- `ρ_air_hi`: upper bound of the `ρ_air` axis [kg/m³].
+- `n_ρ_air`: number of `ρ_air` nodes.
+- `build_order`: Gauss-Legendre order used to fill the nodes.
+- `melt_bounds_tail`: tail probability setting the melt-moment integration bounds.
 """
 Base.@kwdef struct P3TableGrid{FT}
-    "Lower bound of the `logλ` rate axis [log(1/m)]"
     logλ_lo::FT = 2.0
-    "Upper bound of the `logλ` rate axis [log(1/m)]"
     logλ_hi::FT = 17.0
-    "Number of `logλ` nodes on the rate table"
     n_logλ::Int = 80
-    "Lower bound of the `x_ice = L_ice / N_ice` axis of the `logλ` table [kg]"
     x_ice_lo::FT = 1e-12
-    "Upper bound of the `x_ice` axis of the `logλ` table [kg]"
     x_ice_hi::FT = 2e-4
-    "Number of `x_ice` nodes on the `logλ` table"
     n_x_ice::Int = 80
-    "Number of `F_rim` nodes"
     n_F_rim::Int = 24
-    "Lower bound of the `ρ_rim` axis [kg/m³]"
     ρ_rim_lo::FT = 100.0
-    "Number of `ρ_rim` nodes"
     n_ρ_rim::Int = 18
-    "Lower bound of the `ρ_air` axis [kg/m³]"
     ρ_air_lo::FT = 0.05
-    "Upper bound of the `ρ_air` axis [kg/m³]"
     ρ_air_hi::FT = 1.5
-    "Number of `ρ_air` nodes"
     n_ρ_air::Int = 8
-    "Gauss-Legendre order used to fill the nodes"
     build_order::Int = 12
+    melt_bounds_tail::FT = 1e-6
 end
 
 """
@@ -203,21 +203,6 @@ end
 
 Fill the P3 rate tables by evaluating the P3 process integrals at every grid
 node with a high-order quadrature rule, and return a [`P3LookupTables`](@ref).
-
-The rate table is gridded on `(logλ, F_rim, ρ_rim, log ρ_air)`. Each self
--collection, terminal-velocity, and melt integral is a function of the ice state
-only through `logλ` (and `μ(logλ)`), `F_rim`, `ρ_rim`, and `ρ_air`, independent
-of the absolute number and mass concentrations. Each node builds the synthetic
-state with unit volumetric number (`ρn_ice = 1`) and the consistent
-`ρq_ice = exp(logLdivN(state, logλ))`, so `get_distribution_logλ` of that state
-returns the node `logλ`, and evaluates the integrals at the node `logλ`. The
-stored quantities are normalised by the analytic prefactors so a lookup
-reconstructs the rate for any state: self-collection by `N_ice²`, the melt
-moments by `N_ice` and the closed-form melt/ventilation factors, and the terminal
-velocities by nothing.
-
-The `logλ` table is gridded on `(log x_ice, F_rim, ρ_rim)` and stores the shape
-solver output; it inverts the same `logLdivN` relation.
 
 # Arguments
 - `params`: [`CMP.ParametersP3`](@ref).
@@ -261,7 +246,7 @@ function build_p3_lookup_tables(
             g = ice_self_collection(state, logλ, velocity_params, ρₐ; quad).dNdt
             v_number = ice_terminal_velocity_number_weighted(velocity_params, ρₐ, state, logλ; quad)
             v_mass = ice_terminal_velocity_mass_weighted(velocity_params, ρₐ, state, logλ; quad)
-            bnds = velocity_integral_bounds(state, logλ, v_term; p = FT(1e-6))
+            bnds = velocity_integral_bounds(state, logλ, v_term; p = grid.melt_bounds_tail)
             melt_a = integrate(D -> ∂ice_mass_∂D(state, D) * N′(D) / D, bnds, quad)
             melt_b = integrate(D -> ∂ice_mass_∂D(state, D) * sqrt(D * v_term(D)) * N′(D) / D, bnds, quad)
             @inbounds begin
@@ -309,8 +294,9 @@ Table-backed number-weighted mean ice terminal velocity; see the quadrature
 method [`ice_terminal_velocity_number_weighted`](@ref).
 """
 @inline function ice_terminal_velocity_number_weighted(tables::P3LookupTables, state::P3State, logλ, ρₐ)
+    FT = eltype(state)
     q = lookup(tables.rates, _rate_coords(state, logλ, ρₐ)...)
-    below_ϵ = (state.ρn_ice < eps(one(state.ρn_ice))) | (state.ρq_ice < eps(one(state.ρq_ice)))
+    below_ϵ = (state.ρn_ice < UT.ϵ_numerics_2M_N(FT)) | (state.ρq_ice < UT.ϵ_numerics_2M_M(FT))
     return ifelse(below_ϵ, zero(q.v_number), q.v_number)
 end
 
@@ -321,8 +307,9 @@ Table-backed mass-weighted mean ice terminal velocity; see the quadrature method
 [`ice_terminal_velocity_mass_weighted`](@ref).
 """
 @inline function ice_terminal_velocity_mass_weighted(tables::P3LookupTables, state::P3State, logλ, ρₐ)
+    FT = eltype(state)
     q = lookup(tables.rates, _rate_coords(state, logλ, ρₐ)...)
-    below_ϵ = (state.ρn_ice < eps(one(state.ρn_ice))) | (state.ρq_ice < eps(one(state.ρq_ice)))
+    below_ϵ = (state.ρn_ice < UT.ϵ_numerics_2M_N(FT)) | (state.ρq_ice < UT.ϵ_numerics_2M_M(FT))
     return ifelse(below_ϵ, zero(q.v_mass), q.v_mass)
 end
 
