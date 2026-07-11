@@ -477,6 +477,125 @@ function build_p3_collision_tables(
 end
 
 """
+    bulk_max_freeze_rate(tables::P3CollisionTables, aps, tps, state, logλ, ρₐ, Tₐ)
+
+Table-backed bulk Musil freeze capacity `∫ n_i(Dᵢ) ∂ₜM_max(Dᵢ) dDᵢ` [kg/s]:
+
+```math
+∫M_\\mathrm{max} = A(T_a, ρ_\\mathrm{air})\\, N_\\mathrm{ice}
+    \\left( a_v V_a + \\frac{b_v\\, \\mathrm{Sc}^{1/3}}{\\sqrt{ν_\\mathrm{air}}}\\, V_b \\right),
+```
+
+with the scalar `A` from [`max_freeze_rate_scalar`](@ref) and the tabulated Musil
+moments `V_a`, `V_b`. Returns `floatmax` in the `Tₐ ≲ 220 K` freeze-everything
+branch, so a bulk `f_frz = min(1, ∫M_max / ∫M_col)` saturates to `1`.
+"""
+@inline function bulk_max_freeze_rate(tables::P3CollisionTables, aps, tps, state::P3State, logλ, ρₐ, Tₐ)
+    (; ν_air, D_vapor) = aps
+    (; aᵥ, bᵥ) = state.params.vent
+    A = max_freeze_rate_scalar(aps, tps, ρₐ, Tₐ)
+    V_a = exp(lookup(tables.musil_a, logλ, state.F_rim, state.ρ_rim).log_V_a)
+    V_b = exp(lookup(tables.musil_b, logλ, state.F_rim, state.ρ_rim, ρₐ).log_V_b)
+    cbrt_Sc = cbrt(ν_air / D_vapor)
+    return A * state.ρn_ice * (aᵥ * V_a + bᵥ * cbrt_Sc / sqrt(ν_air) * V_b)
+end
+
+"""
+    bulk_liquid_ice_collision_sources(
+        rate_tables::P3LookupTables, coll_tables::P3CollisionTables,
+        state, logλ, psd_c, psd_r, L_c, N_c, L_r, N_r, aps, tps, vel, ρₐ, T,
+    )
+
+Table-backed liquid-ice collision sources (variant A); see the quadrature method
+[`bulk_liquid_ice_collision_sources`](@ref). The unpartitioned collision moments
+`NCCOL`, `M_C`, `NRCOL`, `M_R` are read from `coll_tables` and denormalized by
+the analytic prefactors `N_ice N_c` and `N_ice N₀r`. The bulk freeze fraction
+`f_frz = min(1, ∫M_max / ∫M_col)` from [`bulk_max_freeze_rate`](@ref) splits each
+channel into freezing and shedding, `NRSHD` uses `m_liq(D_shd)`, the rime-volume
+sources use a representative-size Cober-List density with the mass-weighted ice
+velocity from `rate_tables`, and `f_wet = 1 - f_frz` feeds the wet densification.
+
+The partition-free outputs `∂ₜq_c = -M_C/ρₐ` and `∂ₜN_c = -NCCOL` are exact at
+all temperatures; the cold, partition-non-binding limit reproduces every output
+of the quadrature method to the table interpolation error.
+"""
+@inline function bulk_liquid_ice_collision_sources(
+    rate_tables::P3LookupTables, coll_tables::P3CollisionTables,
+    state::P3State, logλ, psd_c, psd_r, L_c, N_c, L_r, N_r, aps, tps, vel, ρₐ, T,
+)
+    FT = promote_type(eltype(state), UT.promote_typeof(L_c, N_c, L_r, N_r, ρₐ, T))
+    (; τ_wet, ρ_i, T_freeze, ρ_rim_local) = state.params
+    D_shd = FT(1e-3)  # 1 mm
+    ρw = psd_c.ρw
+    @assert ρw == psd_r.ρw "cloud and rain must share the liquid water density"
+    m_liq(Dₗ) = ρw * CO.volume_sphere_D(Dₗ)
+    N_ice = state.ρn_ice
+    ϵN = UT.ϵ_numerics_2M_N(FT)
+    ϵM = UT.ϵ_numerics_2M_M(FT)
+
+    # Cloud channel: NCCOL = N_ice N_c G_NC, M_C = N_ice N_c G_MC
+    cloud_below = (N_c < ϵN) | (L_c < ϵM)
+    x_c = L_c / max(N_c, ϵN)
+    qc = lookup(coll_tables.cloud, logλ, state.F_rim, state.ρ_rim, ρₐ, x_c)
+    pref_c = N_ice * N_c
+    NCCOL = ifelse(cloud_below, zero(FT), pref_c * exp(qc.log_G_NC))
+    M_C = ifelse(cloud_below, zero(FT), pref_c * exp(qc.log_G_MC))
+
+    # Rain channel: NRCOL = N_ice N₀r G_NR, M_R = N_ice N₀r G_MR
+    (; N₀r, Dr_mean) = CM2.pdf_rain_parameters(psd_r, L_r / ρₐ, ρₐ, N_r)
+    pref_r = N_ice * N₀r
+    qr = lookup(coll_tables.rain, logλ, state.F_rim, state.ρ_rim, ρₐ, Dr_mean)
+    NRCOL = pref_r * exp(qr.log_G_NR)
+    M_R = pref_r * exp(qr.log_G_MR)
+
+    # Bulk freeze/shed partition against the Musil capacity
+    ∫M_col = M_C + M_R
+    ∫M_max = bulk_max_freeze_rate(coll_tables, aps, tps, state, logλ, ρₐ, T)
+    f_frz = min(one(FT), ifelse(∫M_col > 0, ∫M_max / ∫M_col, one(FT)))
+    f_wet = max(zero(FT), one(FT) - f_frz)
+
+    QCFRZ = f_frz * M_C
+    QCSHD = (one(FT) - f_frz) * M_C
+    QRFRZ = f_frz * M_R
+    QRSHD = (one(FT) - f_frz) * M_R
+    NRSHD = QRSHD / m_liq(D_shd)
+
+    # Representative-size Cober-List rime density; mass-weighted ice velocity from
+    # the Phase-1 velocity table, cloud mass-mean size D̄c = M₄/M₃, rain D̄r = 4 Dr_mean
+    v̄ᵢ = ice_terminal_velocity_mass_weighted(rate_tables, state, logλ, ρₐ)
+    v_l = CO.particle_terminal_velocity(vel.rain, ρₐ)
+    T°C = T - T_freeze
+    μm = FT(1e6)
+    (; λc, νcD, μcD) = CM2.pdf_cloud_parameters(psd_c, L_c / ρₐ, ρₐ, N_c)
+    M₃ = DT.generalized_gamma_Mⁿ(νcD, μcD, λc, N_c, 3)
+    M₄ = DT.generalized_gamma_Mⁿ(νcD, μcD, λc, N_c, 4)
+    D̄c = M₄ / M₃
+    D̄r = 4 * Dr_mean
+    Rᵢc = D̄c * μm * abs(v̄ᵢ - v_l(D̄c)) / (2 * T°C)
+    Rᵢr = D̄r * μm * abs(v̄ᵢ - v_l(D̄r)) / (2 * T°C)
+    BCCOL = QCFRZ / ρ_rim_local(Rᵢc)
+    BRCOL = QRFRZ / ρ_rim_local(Rᵢr)
+
+    # Wet densification of rime
+    (; ρq_ice, F_rim, ρ_rim) = state
+    B_rim = ifelse(iszero(ρ_rim), zero(FT), (ρq_ice * F_rim) / ρ_rim)
+    QIWET = f_wet * ρq_ice * (one(FT) - F_rim) / τ_wet
+    BIWET = f_wet * (ρq_ice / ρ_i - B_rim) / τ_wet
+
+    ∂ₜq_c = (-QCFRZ - QCSHD) / ρₐ
+    ∂ₜq_r = (-QRFRZ + QCSHD) / ρₐ
+    ∂ₜN_c = -NCCOL
+    ∂ₜN_r = -NRCOL + NRSHD
+    ∂ₜL_rim = QCFRZ + QRFRZ + QIWET
+    ∂ₜL_ice = QCFRZ + QRFRZ
+    ∂ₜB_rim = BCCOL + BRCOL + BIWET
+
+    return @NamedTuple{∂ₜq_c::FT, ∂ₜq_r::FT, ∂ₜN_c::FT, ∂ₜN_r::FT, ∂ₜL_rim::FT, ∂ₜL_ice::FT, ∂ₜB_rim::FT}((
+        ∂ₜq_c, ∂ₜq_r, ∂ₜN_c, ∂ₜN_r, ∂ₜL_rim, ∂ₜL_ice, ∂ₜB_rim,
+    ))
+end
+
+"""
     ice_self_collection(tables::P3LookupTables, state, logλ, ρₐ)
 
 Table-backed ice self-collection rate; see the quadrature method
