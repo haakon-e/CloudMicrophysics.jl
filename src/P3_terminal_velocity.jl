@@ -17,7 +17,8 @@ struct P3IceParticleVelocityFunctor{FT, VS, VL, S} <: Function
 end
 @inline function (f::P3IceParticleVelocityFunctor)(D)
     vₜ = ifelse(D <= f.D_cutoff, f.v_term_small(D), f.v_term_large(D))
-    return vₜ * f.state.params.aspect_ratio(f.state, D)
+    v = vₜ * f.state.params.aspect_ratio(f.state, D)
+    return min(v, f.state.params.v_term_ice_max)
 end
 
 """
