@@ -42,7 +42,13 @@ end
 
 function P3State(params::CMP.ParametersP3, ρq_ice, ρn_ice, F_rim, ρ_rim)
     FT = UT.promote_typeof(ρq_ice, ρn_ice, F_rim, ρ_rim)
-    (; mass, ρ_i) = params
+    (; mass, ρ_i, ρ_l) = params
+    # Clamp to the physical domain so the threshold formulas never evaluate a
+    # power of a non-positive density. Inert on physical inputs.
+    ρq_ice = UT.clamp_to_nonneg(FT(ρq_ice))
+    ρn_ice = UT.clamp_to_nonneg(FT(ρn_ice))
+    F_rim = clamp(FT(F_rim), FT(0), FT(1) - eps(FT))
+    ρ_rim = clamp(FT(ρ_rim), FT(0), FT(0.8) * ρ_l)
     ρ_d = get_ρ_d(mass, F_rim, ρ_rim)
     ρ_g = get_ρ_g(F_rim, ρ_rim, ρ_d)
     D_th = get_D_th(mass, ρ_i)
@@ -50,7 +56,7 @@ function P3State(params::CMP.ParametersP3, ρq_ice, ρn_ice, F_rim, ρ_rim)
     D_cr = ifelse(iszero(F_rim), FT(Inf), get_D_cr(mass, F_rim, ρ_g))
     return P3State(
         params,
-        FT(ρq_ice), FT(ρn_ice), FT(F_rim), FT(ρ_rim),
+        ρq_ice, ρn_ice, F_rim, ρ_rim,
         FT(ρ_g), FT(D_th), FT(D_gr), FT(D_cr),
     )
 end
@@ -99,9 +105,14 @@ of the threshold formulas evaluated by the [`P3State`](@ref) constructor.
 - `ρb_rim`: rime volume concentration [m³/m³]
 """
 function state_from_prognostic(params::CMP.ParametersP3, ρq_ice, ρn_ice, ρq_rim, ρb_rim)
-    FT = eltype(ρq_ice)
-    F_rim = min(UT.rime_mass_fraction(ρq_rim, ρq_ice), one(FT) - eps(FT))
-    ρ_rim = min(UT.rime_density(ρq_rim, ρb_rim), FT(0.8) * params.ρ_l)  # TODO: Make this limit configurable
+    # Floor the prognostic moments so the regularised ratios stay non-negative;
+    # F_rim and ρ_rim are bounded in the `P3State` constructor.
+    ρq_ice = UT.clamp_to_nonneg(ρq_ice)
+    ρn_ice = UT.clamp_to_nonneg(ρn_ice)
+    ρq_rim = UT.clamp_to_nonneg(ρq_rim)
+    ρb_rim = UT.clamp_to_nonneg(ρb_rim)
+    F_rim = UT.rime_mass_fraction(ρq_rim, ρq_ice)
+    ρ_rim = UT.rime_density(ρq_rim, ρb_rim)
     return P3State(params, ρq_ice, ρn_ice, F_rim, ρ_rim)
 end
 

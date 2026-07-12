@@ -41,6 +41,61 @@ function test_p3_state_creation(FT)
     end
 end
 
+function test_p3_nonphysical_state_bounds(FT)
+    @testset "P3State bounds on non-physical prognostic input" begin
+        params = CMP.ParametersP3(FT)
+        Chen = CMP.Chen2022VelType(FT)
+        ρₐ = FT(1)
+        quad = P3.GaussLegendre(FT, 12)
+        Ds = FT.((1e-6, 1e-4, 1e-3, 1e-2))
+
+        # (label, ρq_ice, ρn_ice, ρq_rim, ρb_rim) — states drawn from the
+        # non-physical prognostic ice moments observed at ice onset (negative
+        # rime/number moments, rime mass fraction ≫ 1, rime density ≫ ρ_l)
+        nonphysical = (
+            (FT(1e-3), FT(1e5), FT(-3e-4), FT(1e-6)),   # neg ρq_rim, pos ρb_rim → neg ρ_rim
+            (FT(1e-3), FT(1e5), FT(3e-4), FT(-1e-6)),   # neg ρb_rim
+            (FT(-1e-3), FT(1e5), FT(3e-4), FT(1e-6)),   # neg ρq_ice
+            (FT(1e-3), FT(-2e4), FT(3e-4), FT(1e-6)),   # neg ρn_ice
+            (FT(1e-10), FT(1e5), FT(1e-2), FT(1e-6)),   # q_rim/q_ice ≈ 1e8
+            (FT(1e-3), FT(1e5), FT(1e-2), FT(1e-8)),    # rime density ≈ 1e6
+            (FT(1e-3), FT(1e5), FT(-1e-2), FT(1e-6)),   # large neg ρ_rim
+            (FT(-1e-3), FT(-2e4), FT(-3e-4), FT(-1e-6)),  # all four negative
+        )
+
+        for (ρq_ice, ρn_ice, ρq_rim, ρb_rim) in nonphysical
+            state = @inferred P3.state_from_prognostic(params, ρq_ice, ρn_ice, ρq_rim, ρb_rim)
+            @test FT(0) <= state.F_rim <= FT(1)
+            @test FT(0) <= state.ρ_rim <= FT(0.8) * params.ρ_l
+            @test state.ρq_ice >= FT(0)
+            @test state.ρn_ice >= FT(0)
+            for D in Ds
+                @test isfinite(P3.ice_mass(state, D))
+                @test isfinite(P3.ice_area(state, D))
+                @test isfinite(P3.ice_particle_terminal_velocity(Chen, ρₐ, state)(D))
+            end
+            logλ = @inferred P3.get_distribution_logλ_from_prognostic(
+                params, ρq_ice, ρn_ice, ρq_rim, ρb_rim,
+            )
+            @test isfinite(logλ)
+            vn = P3.ice_terminal_velocity_number_weighted_from_prognostic(
+                Chen, ρₐ, params, ρq_ice, ρn_ice, ρq_rim, ρb_rim, logλ; quad,
+            )
+            vm = P3.ice_terminal_velocity_mass_weighted_from_prognostic(
+                Chen, ρₐ, params, ρq_ice, ρn_ice, ρq_rim, ρb_rim, logλ; quad,
+            )
+            @test isfinite(vn) && vn >= FT(0)
+            @test isfinite(vm) && vm >= FT(0)
+        end
+
+        # The clamps are inert on physical states: a directly-constructed
+        # physical state is unchanged.
+        phys = P3.P3State(params, FT(1e-3), FT(1e5), FT(0.3), FT(400))
+        @test phys.F_rim == FT(0.3)
+        @test phys.ρ_rim == FT(400)
+    end
+end
+
 function test_thresholds_solver(FT)
 
     params = CMP.ParametersP3(FT)
@@ -1108,6 +1163,7 @@ end
 @testset "P3 tests ($FT)" for FT in (Float64, Float32)
     # state creation
     test_p3_state_creation(FT)
+    test_p3_nonphysical_state_bounds(FT)
 
     # numerics
     test_thresholds_solver(FT)
