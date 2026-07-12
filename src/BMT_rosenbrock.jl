@@ -1131,9 +1131,41 @@ evaluated separately.
     )
     return f, J
 end
-@inline _tendency_and_jacobian(::DonorJacobian, g, x) = (g(x), _jacobian_1m_linearized(g, x))
-@inline _tendency_and_jacobian(::CoupledDonorJacobian, g, x) =
-    (g(x), _jacobian_1m_coupled(g, x))
+@inline _tendency_and_jacobian(::DonorJacobian, g::Raw1MTendency, x::MicroState1M) =
+    _tendency_and_donor_jacobian(g, x)
+@inline function _tendency_and_jacobian(
+    ::CoupledDonorJacobian, g::Raw1MTendency, x::MicroState1M{FT},
+) where {FT}
+    f, Jdonor = _tendency_and_donor_jacobian(g, x)
+    return f, Jdonor + _wbf_coupling(g, x, FT)
+end
+
+"""
+    _tendency_and_donor_jacobian(g::Raw1MTendency, x::MicroState1M)
+
+The raw substep tendency `f = g(x)` and the donor-based Jacobian `J` from a single
+evaluation of [`_microphysics_source_terms`](@ref): the aggregated tendency and the
+donor-linearized matrix are both derived from the same source terms, so the source
+terms are evaluated once rather than once for `f` and again for `J`.
+"""
+@inline function _tendency_and_donor_jacobian(g::Raw1MTendency, x::MicroState1M{FT}) where {FT}
+    (; q_lcl, q_icl, q_rai, q_sno) = x
+    src = _microphysics_source_terms(
+        Microphysics1Moment(), g.mp, g.tps, g.ρ, g.T, FT(g.q_tot),
+        q_lcl, q_icl, q_rai, q_sno,
+    )
+    agg = _aggregate_tendencies(src)
+    f = MicroState1M{FT}(agg.dq_lcl_dt, agg.dq_icl_dt, agg.dq_rai_dt, agg.dq_sno_dt)
+    q_min = TDI.TD.Parameters.q_min(g.tps)
+    M = _linearize(src, q_lcl, q_icl, q_rai, q_sno, q_min)
+    J = _jacobian_1m(FT;
+        lcl_lcl = M.M11, lcl_icl = M.M12,
+        icl_icl = M.M22,
+        rai_lcl = M.M31, rai_rai = M.M33, rai_sno = M.M34,
+        sno_lcl = M.M41, sno_icl = M.M42, sno_rai = M.M43, sno_sno = M.M44,
+    )
+    return f, J
+end
 
 """
     _full_species_mask(x)
@@ -1284,16 +1316,26 @@ and added to each receiver row. The direct condensate dependence of the rates
 recovered; use [`ExactJacobian`](@ref) for the full derivative.
 """
 @inline function _jacobian_1m_coupled(g::Raw1MTendency, x::MicroState1M{FT}) where {FT}
-    Jdonor = _jacobian_1m_linearized(g, x)
+    return _jacobian_1m_linearized(g, x) + _wbf_coupling(g, x, FT)
+end
+
+"""
+    _wbf_coupling(g::Raw1MTendency, x::MicroState1M, ::Type{FT})
+
+The vapor-competition (Wegener-Bergeron-Findeisen) coupling matrix added to the
+donor-based Jacobian by [`CoupledDonorJacobian`](@ref): each receiver row gets
+`-∂(vapor-exchange rate)/∂q_vap`, obtained from the derivative of the
+vapor-to-species rates ([`_vapor_exchange_rates`](@ref)) with respect to `q_tot`.
+"""
+@inline function _wbf_coupling(g::Raw1MTendency, x::MicroState1M, ::Type{FT}) where {FT}
     dS_dq_tot = FD.derivative(qt -> _vapor_exchange_rates(g, x, qt), FT(g.q_tot))
     wbf = -dS_dq_tot
-    coupling = SA.SMatrix{4, 4, FT}(
+    return SA.SMatrix{4, 4, FT}(
         wbf[1], wbf[2], wbf[3], wbf[4],
         wbf[1], wbf[2], wbf[3], wbf[4],
         wbf[1], wbf[2], wbf[3], wbf[4],
         wbf[1], wbf[2], wbf[3], wbf[4],
     )
-    return Jdonor + coupling
 end
 
 #####
