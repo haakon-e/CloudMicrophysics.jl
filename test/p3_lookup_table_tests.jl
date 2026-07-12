@@ -77,7 +77,7 @@ end
 
     @testset "lookup exactness at nodes and inference" begin
         axλ, axF, axr, axa = tables.rates.axes
-        for (i, j, k, l) in ((1, 1, 1, 1), (7, 3, 4, 2), (axλ.n, axF.n, axr.n, axa.n))
+        for (i, j, k, l) in ((1, 1, 1, 1), (7, 3, 4, 2), (P3.naxis(axλ), axF.n, axr.n, axa.n))
             c = (P3.node_coord(axλ, i), P3.node_coord(axF, j), P3.node_coord(axr, k), P3.node_coord(axa, l))
             q = P3.lookup(tables.rates, c...)
             for (qi, name) in enumerate(P3.RATE_QUANTITY_NAMES)
@@ -127,7 +127,7 @@ end
         axλ, axF, axr, axa = tables.rates.axes
         axx = tables.shape.axes[1]
         for (state, logλ, ρₐ) in harness_states(FT, params)
-            @test P3.node_coord(axλ, 1) <= logλ <= P3.node_coord(axλ, axλ.n)
+            @test P3.node_coord(axλ, 1) <= logλ <= P3.node_coord(axλ, P3.naxis(axλ))
             @test 0 <= state.F_rim <= P3.node_coord(axF, axF.n)
             @test P3.node_coord(axa, 1) <= ρₐ <= P3.node_coord(axa, axa.n)
             @test P3.node_coord(axx, 1) <= state.ρq_ice / state.ρn_ice <= P3.node_coord(axx, axx.n)
@@ -207,10 +207,10 @@ end
         # non-finite node) would keep it near constant. See SCREAM's P3 test.
         axλ, axF, axr, axa = tables.rates.axes
         bounds = (
-            (P3.node_coord(axλ, 1), P3.node_coord(axλ, axλ.n)),
-            (P3.node_coord(axF, 1), P3.node_coord(axF, axF.n)),
-            (P3.node_coord(axr, 1), P3.node_coord(axr, axr.n)),
-            (P3.node_coord(axa, 1), P3.node_coord(axa, axa.n)),
+            (P3.node_coord(axλ, 1), P3.node_coord(axλ, P3.naxis(axλ))),
+            (P3.node_coord(axF, 1), P3.node_coord(axF, P3.naxis(axF))),
+            (P3.node_coord(axr, 1), P3.node_coord(axr, P3.naxis(axr))),
+            (P3.node_coord(axa, 1), P3.node_coord(axa, P3.naxis(axa))),
         )
         base = (6.0, 0.3, 400.0, 0.9)
         maxdiff(dim, n) = begin

@@ -88,7 +88,7 @@ end
         axλ, axF, axr, axa, axxc = ctables.cloud.axes
         axDr = ctables.rain.axes[5]
         maxerr = 0.0
-        for (i, j, k, l) in ((3, 2, 2, 2), (12, 5, 4, 3), (axλ.n, axF.n, axr.n, axa.n))
+        for (i, j, k, l) in ((3, 2, 2, 2), (12, 5, 4, 3), (P3.naxis(axλ), axF.n, axr.n, axa.n))
             logλ = P3.node_coord(axλ, i)
             F_rim = P3.node_coord(axF, j)
             ρ_rim = P3.node_coord(axr, k)
@@ -125,7 +125,7 @@ end
         # The rain closed form scales exactly in N₀r; verify the tabulated shape.
         axλ, axF, axr, axa, axDr = ctables.rain.axes
         maxerr = 0.0
-        for (i, j, k, l, m) in ((4, 2, 2, 2, 3), (axλ.n, axF.n, axr.n, axa.n, axDr.n))
+        for (i, j, k, l, m) in ((4, 2, 2, 2, 3), (P3.naxis(axλ), axF.n, axr.n, axa.n, axDr.n))
             logλ = P3.node_coord(axλ, i)
             F_rim = P3.node_coord(axF, j)
             ρ_rim = P3.node_coord(axr, k)
@@ -158,7 +158,7 @@ end
         axλ, axF, axr, axa, axxc = ctables.cloud.axes
         axDr = ctables.rain.axes[5]
         for h in vcat(collision_harness(FT, params), collision_sweep(FT, params, 200))
-            @test P3.node_coord(axλ, 1) <= h.logλ <= P3.node_coord(axλ, axλ.n)
+            @test P3.node_coord(axλ, 1) <= h.logλ <= P3.node_coord(axλ, P3.naxis(axλ))
             @test 0 <= h.state.F_rim <= P3.node_coord(axF, axF.n)
             @test P3.node_coord(axa, 1) <= h.ρₐ <= P3.node_coord(axa, axa.n)
             if h.state.F_rim > 0

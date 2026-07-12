@@ -65,6 +65,73 @@ outside `[lo, hi]` clamps to the nearest edge (`w` saturates at `0` or `1`).
 @inline fractional_index(ax::LogAxis, x) = split_index((log10(x) - ax.lo) * ax.inv_step, ax.n)
 
 """
+    GradedAxis{FT}
+
+A three-panel piecewise-uniform interpolation axis: `[e_1, e_4]` split at two
+interior breakpoints `e_2 < e_3`, uniform within each panel and with the
+breakpoints as exact nodes. Placing the `μ`-clamp corners of
+[`CMP.SlopePowerLaw`](@ref) on exact `logλ` nodes removes the interpolation error
+at the slope-law kinks. Field `edges` holds the four panel boundaries and `m`
+the interval count of each panel, so the node count is `sum(m) + 1`. Look up like
+[`LinAxis`](@ref).
+"""
+struct GradedAxis{FT}
+    edges::NTuple{4, FT}
+    m::NTuple{3, Int}
+end
+
+@inline naxis(ax::GradedAxis) = ax.m[1] + ax.m[2] + ax.m[3] + 1
+
+@inline function node_coord(ax::GradedAxis{FT}, i) where {FT}
+    (e1, e2, e3, e4) = ax.edges
+    (m1, m2, m3) = ax.m
+    return if i <= m1 + 1
+        e1 + (i - 1) / FT(m1) * (e2 - e1)
+    elseif i <= m1 + m2 + 1
+        e2 + (i - m1 - 1) / FT(m2) * (e3 - e2)
+    else
+        e3 + (i - m1 - m2 - 1) / FT(m3) * (e4 - e3)
+    end
+end
+
+@inline function fractional_index(ax::GradedAxis, x)
+    (e1, e2, e3, e4) = ax.edges
+    (m1, m2, m3) = ax.m
+    if x <= e2
+        return split_index((x - e1) / (e2 - e1) * m1, m1 + 1)
+    elseif x <= e3
+        (i0, w) = split_index((x - e2) / (e3 - e2) * m2, m2 + 1)
+        return (i0 + m1, w)
+    else
+        (i0, w) = split_index((x - e3) / (e4 - e3) * m3, m3 + 1)
+        return (i0 + m1 + m2, w)
+    end
+end
+
+"""
+    graded_logλ_axis(slope, lo, hi, n)
+
+Construct the `logλ` rate-table axis at resolution `n`. For a
+[`CMP.SlopePowerLaw`](@ref), place its two `μ`-clamp corners on exact nodes with
+a [`GradedAxis`](@ref) whose panels carry a node count proportional to their
+`logλ` width; for any other slope law, or a corner outside `[lo, hi]`, return a
+uniform [`LinAxis`](@ref).
+"""
+graded_logλ_axis(_slope, lo, hi, n) = LinAxis(; lo, hi, n)
+
+function graded_logλ_axis(slope::CMP.SlopePowerLaw, lo, hi, n)
+    (; a, b, c, μ_max) = slope
+    e2, e3 = minmax(log(c / a) / b, log((μ_max + c) / a) / b)
+    (isfinite(e2) && isfinite(e3) && lo < e2 < e3 < hi && n >= 4) ||
+        return LinAxis(; lo, hi, n)
+    FT = typeof(float(lo))
+    span = hi - lo
+    m1 = clamp(round(Int, (n - 1) * (e2 - lo) / span), 1, n - 3)
+    m2 = clamp(round(Int, (n - 1) * (e3 - e2) / span), 1, n - 2 - m1)
+    return GradedAxis((FT(lo), FT(e2), FT(e3), FT(hi)), (m1, m2, (n - 1) - m1 - m2))
+end
+
+"""
     RateTable{Names, FT, N}
 
 Dense `N`-dimensional lookup table for the quantities named by the tuple
@@ -226,7 +293,7 @@ function build_p3_lookup_tables(
     FT = typeof(params.ρ_l)
     F_rim_hi = one(FT) - eps(FT)
     ρ_rim_hi = FT(0.8) * params.ρ_l
-    ax_λ = LinAxis(; lo = grid.logλ_lo, hi = grid.logλ_hi, n = grid.n_logλ)
+    ax_λ = graded_logλ_axis(params.slope, grid.logλ_lo, grid.logλ_hi, grid.n_logλ)
     ax_F = LinAxis(; lo = zero(FT), hi = F_rim_hi, n = grid.n_F_rim)
     ax_r = LinAxis(; lo = grid.ρ_rim_lo, hi = ρ_rim_hi, n = grid.n_ρ_rim)
     ax_a = LogAxis(; lo = grid.ρ_air_lo, hi = grid.ρ_air_hi, n = grid.n_ρ_air)
@@ -432,7 +499,7 @@ function build_p3_collision_tables(
     @assert ρw == psd_r.ρw "cloud and rain must share the liquid water density"
     m_liq(Dₗ) = ρw * CO.volume_sphere_D(Dₗ)
 
-    ax_λ = LinAxis(; lo = grid.logλ_lo, hi = grid.logλ_hi, n = grid.n_logλ)
+    ax_λ = graded_logλ_axis(params.slope, grid.logλ_lo, grid.logλ_hi, grid.n_logλ)
     ax_F = LinAxis(; lo = zero(FT), hi = F_rim_hi, n = grid.n_F_rim)
     ax_r = LinAxis(; lo = grid.ρ_rim_lo, hi = ρ_rim_hi, n = grid.n_ρ_rim)
     ax_a = LogAxis(; lo = grid.ρ_air_lo, hi = grid.ρ_air_hi, n = grid.n_ρ_air)
