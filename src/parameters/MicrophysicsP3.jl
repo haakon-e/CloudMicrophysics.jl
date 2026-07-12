@@ -283,6 +283,8 @@ $(DocStringExtensions.FIELDS)
     ρ_l::FT
     "Water freeze temperature [`K`]"
     T_freeze::FT
+    "Interim ceiling on the per-particle ice terminal velocity [`m s⁻¹`]"
+    v_term_ice_max::FT
     "Terminal-velocity aspect-ratio treatment, an [`AspectRatio`](@ref)"
     aspect_ratio::AR = Oblate()
 end
@@ -306,6 +308,7 @@ function ParametersP3(toml_dict::CP.ParamDict; slope_law = :powerlaw, aspect_rat
             :density_liquid_water => :ρ_l,
             :temperature_water_freeze => :T_freeze,
             :P3_wet_growth_timescale => :τ_wet,
+            :P3_max_ice_terminal_velocity => :v_term_ice_max,
         ), "CloudMicrophysics")
     return ParametersP3(;
         mass = MassPowerLaw(toml_dict),
@@ -328,4 +331,4 @@ ShowMethods.field_units(::AreaPowerLaw) = (; γ = "μm^(2-σ)")
 ShowMethods.field_units(::SlopePowerLaw) = (; a = "m^b")
 ShowMethods.field_units(::LocalRimeDensity) = (; ρ_ice = "kg m⁻³")
 ShowMethods.field_units(::ParametersP3) =
-    (; τ_wet = "s", ρ_i = "kg m⁻³", ρ_l = "kg m⁻³", T_freeze = "K")
+    (; τ_wet = "s", ρ_i = "kg m⁻³", ρ_l = "kg m⁻³", T_freeze = "K", v_term_ice_max = "m s⁻¹")
