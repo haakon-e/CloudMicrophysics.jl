@@ -529,7 +529,11 @@ end
     D̄r = 4 * Dr_mean  # representative large-drop size of the exponential rain PDF
     Rᵢc = D̄c * m_per_μm * abs(v̄ᵢ - v_l(D̄c)) / (2 * T°C)
     Rᵢr = D̄r * m_per_μm * abs(v̄ᵢ - v_l(D̄r)) / (2 * T°C)
-    return (QCFRZ / ρ_rim_local(Rᵢc), QRFRZ / ρ_rim_local(Rᵢr))
+    # No collected liquid mass gives no rime-volume source; the mean collision
+    # size D̄c = M₄/M₃ is indeterminate when the cloud population is empty.
+    BCCOL = ifelse(QCFRZ > zero(FT), QCFRZ / ρ_rim_local(Rᵢc), zero(FT))
+    BRCOL = ifelse(QRFRZ > zero(FT), QRFRZ / ρ_rim_local(Rᵢr), zero(FT))
+    return (BCCOL, BRCOL)
 end
 
 # Assemble the seven bulk collision sources from the partitioned channel rates,

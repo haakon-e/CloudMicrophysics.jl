@@ -261,6 +261,15 @@ end
         )
         @test all(isfinite, values(r))
         @test r.∂ₜN_c <= 0
+        # Ice present, cloud and rain absent: rime-volume closure stays finite.
+        r0 = P3.bulk_liquid_ice_collision_sources(
+            rt32, it32, state, logλ, psd_c32, psd_r32,
+            F32(0), F32(0), F32(0), F32(0),
+            aps32, TDI.TD.Parameters.ThermodynamicsParameters(F32), vel32, F32(0.9), F32(263);
+            quad = CM.Quadrature.GaussLegendre(F32, 8),
+        )
+        @test all(isfinite, values(r0))
+        @test iszero(r0.∂ₜB_rim)
     end
 
     @testset "device kernel (Adapt round-trip)" begin
@@ -312,6 +321,35 @@ end
         @test all(isfinite, values(rC))
         # the ice-cloud sink is partition-free; the table path tracks quadrature
         @test rC.dn_lcl_dt ≈ base.dn_lcl_dt rtol = 1.5e-1
+    end
+
+    @testset "table path stays finite with ice but no liquid" begin
+        # Ice present, cloud and rain absent: the representative rime-volume
+        # closure must not divide by an indeterminate mean collision size.
+        engA = BMT.P3IceTables(rate_tables, ctables, itables, out_quad, BMT.P3CollisionVariantA())
+        engC = BMT.P3IceTables(rate_tables, ctables, itables, out_quad, BMT.P3CollisionVariantC())
+        engH = BMT.P3IceTables(rate_tables, ctables, itables, out_quad, BMT.P3CollisionHybrid(FT(1)))
+        for (F_rim, ρ_rim) in ((FT(0), FT(0)), (FT(0.4), FT(400)))
+            ρ = FT(0.4)
+            q_ice, n_ice = FT(1e-6), FT(1e5)
+            q_rim = F_rim * q_ice
+            b_rim = ρ_rim > 0 ? q_rim / ρ_rim : FT(0)
+            s = P3.state_from_prognostic(params, ρ * q_ice, ρ * n_ice, ρ * q_rim, ρ * b_rim)
+            logλ = P3.get_distribution_logλ(s)
+            for T in (FT(240), FT(275))
+                args = (
+                    ρ, T, q_ice + FT(1e-3),
+                    FT(0), FT(0), FT(0), FT(0),  # no cloud, no rain
+                    q_ice, n_ice, q_rim, b_rim, logλ,
+                )
+                for eng in (engA, engC, engH)
+                    r = BMT.bulk_microphysics_tendencies(
+                        BMT.Microphysics2Moment(), mp, tps, args...; p3_tables = eng,
+                    )
+                    @test all(isfinite, values(r))
+                end
+            end
+        end
     end
 end
 nothing
