@@ -1058,22 +1058,29 @@ end
     ice_terminal_velocity_number_weighted(tables::P3LookupTables, state, logλ, ρₐ)
 
 Table-backed number-weighted mean ice terminal velocity; see the quadrature
-method [`ice_terminal_velocity_number_weighted`](@ref).
+method [`ice_terminal_velocity_number_weighted`](@ref). The tabulated mean is
+the ratio at unit number, so the same `max(ρn_ice, eps)` floor is reapplied to
+reproduce the onset ramp to zero.
 """
 @inline function ice_terminal_velocity_number_weighted(tables::P3LookupTables, state::P3State, logλ, ρₐ)
+    (; ρn_ice) = state
     q = lookup(tables.rates, _rate_coords(state, logλ, ρₐ)...)
-    return q.v_number
+    return q.v_number * ρn_ice / max(ρn_ice, eps(one(ρn_ice)))
 end
 
 """
     ice_terminal_velocity_mass_weighted(tables::P3LookupTables, state, logλ, ρₐ)
 
 Table-backed mass-weighted mean ice terminal velocity; see the quadrature method
-[`ice_terminal_velocity_mass_weighted`](@ref).
+[`ice_terminal_velocity_mass_weighted`](@ref). The tabulated mean is the ratio
+at unit number, so the same `max(ρq_ice, represented_mass)` floor is reapplied to
+reproduce the onset ramp to zero.
 """
 @inline function ice_terminal_velocity_mass_weighted(tables::P3LookupTables, state::P3State, logλ, ρₐ)
+    (; ρq_ice, ρn_ice) = state
     q = lookup(tables.rates, _rate_coords(state, logλ, ρₐ)...)
-    return q.v_mass
+    represented_mass = ρn_ice * exp(logLdivN(state, logλ))
+    return q.v_mass * represented_mass / max(ρq_ice, represented_mass, floatmin(eltype(state)))
 end
 
 """
