@@ -75,6 +75,6 @@ Compute the mass weighted mean particle size [m]
 function D_m(state, logλ)
     μ = get_μ(state, logλ)
     mass_weighted_moment = logmass_gamma_moment(state, μ, logλ; n = 1)
-    log_N₀ = get_logN₀(state.ρn_ice, μ, logλ)
-    return exp(log_N₀ + mass_weighted_moment) / state.ρq_ice
+    log_N₀ = get_logN₀(state.n_ice, μ, logλ)
+    return exp(log_N₀ + mass_weighted_moment) / state.q_ice
 end

@@ -72,7 +72,7 @@ Returns the melting rate of ice (QIMLT in Morrison and Mildbrandt (2015)).
     (; K_therm) = aps
     L_f = TDI.Lf(tps, Tₐ)
 
-    (; ρq_ice, ρn_ice) = state
+    (; q_ice, n_ice) = state
     (; T_freeze, vent) = state.params
 
     v_term = ice_particle_terminal_velocity(velocity_params, ρₐ, state)
@@ -89,7 +89,7 @@ Returns the melting rate of ice (QIMLT in Morrison and Mildbrandt (2015)).
     # only consider melting (not fusion)
     dLdt = max(0, dLdt_unclamped)
     # compute change of N_ice proportional to change in mass
-    dNdt = ρn_ice / ρq_ice * dLdt
+    dNdt = n_ice / q_ice * dLdt
 
     return (; dNdt, dLdt)
 end
@@ -775,10 +775,10 @@ A `NamedTuple` of `(; ∂ₜq_c, ∂ₜq_r, ∂ₜN_c, ∂ₜN_r, ∂ₜL_rim, �
     # NCSHD = QCSHD / m_liq(D_shd)
 
     # Densification of rime
-    (; ρq_ice, F_rim, ρ_rim) = state
-    B_rim = iszero(ρ_rim) ? zero(ρ_rim) : (ρq_ice * F_rim) / ρ_rim  # from: ρ_rim = L_rim / B_rim
-    QIWET = f_wet * ρq_ice * (1 - F_rim) / τ_wet   # densification of rime mass
-    BIWET = f_wet * (ρq_ice / ρ_i - B_rim) / τ_wet  # densification of rime volume
+    (; q_ice, F_rim, ρ_rim) = state
+    b_rim = iszero(ρ_rim) ? zero(ρ_rim) : (q_ice * F_rim) / ρ_rim  # from: ρ_rim = q_rim / b_rim
+    QIWET = f_wet * q_ice * (1 - F_rim) / τ_wet   # densification of rime mass
+    BIWET = f_wet * (q_ice / ρ_i - b_rim) / τ_wet  # densification of rime volume
 
     # Bulk rates
     ## Liquid phase

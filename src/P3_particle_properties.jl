@@ -11,7 +11,7 @@ This struct bundles the P3 parameterizations `params`, the provided rime state
 # Construction
 
   - [`state_from_prognostic`](@ref): Main entry point.
-    Accepts the volumetric prognostic variables `(ρq_ice, ρn_ice, ρq_rim, ρb_rim)`,
+    Accepts the specific prognostic variables `(q_ice, n_ice, q_rim, b_rim)`,
     regularises them into `(F_rim, ρ_rim)`, and returns the constructed state.
 
 # Fields
@@ -21,10 +21,10 @@ struct P3State{FT, PARAMS <: CMP.ParametersP3}
     "[`CMP.ParametersP3`](@ref) object"
     params::PARAMS
 
-    "Volumetric ice mass concentration [kg/m³]"
-    ρq_ice::FT
-    "Volumetric ice number concentration [1/m³]"
-    ρn_ice::FT
+    "Specific ice mass content [kg/kg]"
+    q_ice::FT
+    "Specific ice number content [1/kg]"
+    n_ice::FT
     "Rime mass fraction"
     F_rim::FT
     "Rime density"
@@ -40,8 +40,8 @@ struct P3State{FT, PARAMS <: CMP.ParametersP3}
     D_cr::FT
 end
 
-function P3State(params::CMP.ParametersP3, ρq_ice, ρn_ice, F_rim, ρ_rim)
-    FT = UT.promote_typeof(ρq_ice, ρn_ice, F_rim, ρ_rim)
+function P3State(params::CMP.ParametersP3, q_ice, n_ice, F_rim, ρ_rim)
+    FT = UT.promote_typeof(q_ice, n_ice, F_rim, ρ_rim)
     (; mass, ρ_i) = params
     ρ_d = get_ρ_d(mass, F_rim, ρ_rim)
     ρ_g = get_ρ_g(F_rim, ρ_rim, ρ_d)
@@ -50,7 +50,7 @@ function P3State(params::CMP.ParametersP3, ρq_ice, ρn_ice, F_rim, ρ_rim)
     D_cr = ifelse(iszero(F_rim), FT(Inf), get_D_cr(mass, F_rim, ρ_g))
     return P3State(
         params,
-        FT(ρq_ice), FT(ρn_ice), FT(F_rim), FT(ρ_rim),
+        FT(q_ice), FT(n_ice), FT(F_rim), FT(ρ_rim),
         FT(ρ_g), FT(D_th), FT(D_gr), FT(D_cr),
     )
 end
@@ -58,14 +58,14 @@ end
 Base.show(io::IO, mime::MIME"text/plain", x::P3State) =
     ShowMethods.verbose_show_type_and_fields(io, mime, x)
 ShowMethods.field_units(::P3State) = (;
-    ρq_ice = "kg/m³", ρn_ice = "1/m³", ρ_rim = "kg/m³",
+    q_ice = "kg/kg", n_ice = "1/kg", ρ_rim = "kg/m³",
     ρ_g = "kg/m³", D_th = "m", D_gr = "m", D_cr = "m",
 )
 
 """
-    state_from_prognostic(params, ρq_ice, ρn_ice, ρq_rim, ρb_rim)
+    state_from_prognostic(params, q_ice, n_ice, q_rim, b_rim)
 
-Construct a [`P3State`](@ref) from the volumetric prognostic ice variables directly, 
+Construct a [`P3State`](@ref) from the specific prognostic ice variables directly,
 computing the (clamped, regularised) rime mass fraction and rime density.
 
 The regularised ratios come from [`UT.rime_mass_fraction`](@ref) and
@@ -93,16 +93,16 @@ of the threshold formulas evaluated by the [`P3State`](@ref) constructor.
 
 # Arguments
 - `params`: [`CMP.ParametersP3`](@ref)
-- `ρq_ice`: ice mass concentration [kg/m³]
-- `ρn_ice`: ice number concentration [1/m³]
-- `ρq_rim`: rime mass concentration [kg/m³]
-- `ρb_rim`: rime volume concentration [m³/m³]
+- `q_ice`: specific ice mass content [kg/kg]
+- `n_ice`: specific ice number content [1/kg]
+- `q_rim`: specific rime mass content [kg/kg]
+- `b_rim`: specific rime volume content [m³/kg]
 """
-function state_from_prognostic(params::CMP.ParametersP3, ρq_ice, ρn_ice, ρq_rim, ρb_rim)
-    FT = eltype(ρq_ice)
-    F_rim = min(UT.rime_mass_fraction(ρq_rim, ρq_ice), one(FT) - eps(FT))
-    ρ_rim = min(UT.rime_density(ρq_rim, ρb_rim), FT(0.8) * params.ρ_l)  # TODO: Make this limit configurable
-    return P3State(params, ρq_ice, ρn_ice, F_rim, ρ_rim)
+function state_from_prognostic(params::CMP.ParametersP3, q_ice, n_ice, q_rim, b_rim)
+    FT = eltype(q_ice)
+    F_rim = min(UT.rime_mass_fraction(q_rim, q_ice), one(FT) - eps(FT))
+    ρ_rim = min(UT.rime_density(q_rim, b_rim), FT(0.8) * params.ρ_l)  # TODO: Make this limit configurable
+    return P3State(params, q_ice, n_ice, F_rim, ρ_rim)
 end
 
 Base.eltype(::P3State{FT}) where {FT} = FT

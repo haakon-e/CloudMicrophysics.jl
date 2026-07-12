@@ -23,7 +23,7 @@ concentration at diameter `D`, for the [`P3State`](@ref) `state` and log-slope `
 """
 function logN′ice(state::P3State, logλ)
     μ = get_μ(state, logλ)
-    log_N₀ = get_logN₀(state.ρn_ice, μ, logλ)
+    log_N₀ = get_logN₀(state.n_ice, μ, logλ)
     # Promote to a common type: differentiating w.r.t. the ice number makes
     # `log_N₀` a `Dual` while `μ` (a function of the fixed `logλ`) stays a plain
     # float, and `P3LogNumberFunctor` stores both in a single field type.
@@ -246,7 +246,7 @@ Compute `log(N₀)` given the `state`, `N`, and `logλ`,
            = log(N) - M⁰
 
 # Arguments
-- `N_ice`: The number concentration [1/m³]
+- `N_ice`: The specific ice number content [1/kg]
 - `μ`: The shape parameter [`-`]
 - `logλ`: The log of the slope parameter [log(1/m)]
 """
@@ -305,12 +305,17 @@ function get_distribution_logλ(state, logλ_guess = nothing, logλ_min = 2, log
     FT = eltype(state)
     ϵₘ = UT.ϵ_numerics_2M_M(FT)
     ϵₙ = UT.ϵ_numerics_2M_N(FT)
-    (; ρn_ice, ρq_ice) = state
-    (ρn_ice < ϵₙ || ρq_ice < ϵₘ) && return log(zero(ρq_ice))
-    target_log_LdN = log(ρq_ice) - log(ρn_ice)
+    (; n_ice, q_ice) = state
+    lo, hi = FT(logλ_min), FT(logλ_max)
+    # Floor the mass and number inside the logs so the mean-size target is
+    # finite and C0-continuous across onset: below the ϵ thresholds the target
+    # freezes at its limiting value and the solve returns a finite, bounded
+    # logλ. The size distribution still vanishes with n_ice, so no spurious
+    # ice appears; the number is relaxed toward a mass-consistent range by
+    # `number_tendency_from_mass_limits`.
+    target_log_LdN = log(max(q_ice, ϵₘ)) - log(max(n_ice, ϵₙ))
 
     shape_problem(logλ) = logLdivN(state, logλ) - target_log_LdN
-    lo, hi = FT(logλ_min), FT(logλ_max)
     f_lo, f_hi = shape_problem(lo), shape_problem(hi)
     if !isfinite(f_lo) || !isfinite(f_hi) || f_lo * f_hi > 0
         return abs(f_lo) ≤ abs(f_hi) ? lo : hi
@@ -336,20 +341,20 @@ function get_distribution_logλ(state, logλ_guess = nothing, logλ_min = 2, log
         FixedIterations{FT}(),
         maxiters,
     )
-    return sol.root  # logλ
+    return clamp(sol.root, lo, hi)  # logλ, within the search bounds
 end
 
 """
-    get_distribution_logλ_from_prognostic(params, ρq_ice, ρn_ice, ρq_rim, ρb_rim)
+    get_distribution_logλ_from_prognostic(params, q_ice, n_ice, q_rim, b_rim)
 
-Compute `log(λ)` for P3, using prognostic ice variables directly
+Compute `log(λ)` for P3, using the specific prognostic ice variables directly
 
 The P3 variables `F_rim` and `ρ_rim` are computed in a regularised way
 """
 function get_distribution_logλ_from_prognostic(
-    params, ρq_ice, ρn_ice, ρq_rim, ρb_rim, args...,
+    params, q_ice, n_ice, q_rim, b_rim, args...,
 )
-    state = state_from_prognostic(params, ρq_ice, ρn_ice, ρq_rim, ρb_rim)
+    state = state_from_prognostic(params, q_ice, n_ice, q_rim, b_rim)
     return get_distribution_logλ(state, args...)
 end
 
@@ -384,7 +389,7 @@ Find all solutions for `logλ` given the `state` ([`P3State`](@ref)), `L`, and `
 """
 function get_distribution_logλ_all_solutions(state::P3State)
     # Find bounds by evaluating function incrementally, then apply root finding with bounds above and below zero-point
-    target_log_LdN = log(state.ρq_ice) - log(state.ρn_ice)
+    target_log_LdN = log(state.q_ice) - log(state.n_ice)
 
     shape_problem(logλ) = logLdivN(state, logλ) - target_log_LdN
 

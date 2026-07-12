@@ -84,20 +84,17 @@ function ice_terminal_velocity_number_weighted(
     velocity_params::CMP.Chen2022VelType, ρₐ, state::P3State, logλ;
     p = 1e-6, quad,
 )
-    (; ρn_ice, ρq_ice) = state
+    (; n_ice) = state
     v_term = ice_particle_terminal_velocity(velocity_params, ρₐ, state)
     n = DT.size_distribution(state, logλ)
 
-    # ∫n(D) v(D) dD, normalized by the number concentration
+    # ∫n(D) v(D) dD, normalized by the number content. The floored
+    # denominator keeps an empty state (n_ice → 0, integ → 0) finite and the
+    # mean velocity C0-continuous across ice onset.
     number_weighted_integrand = P3NumberWeightedIntegrand(n, v_term)
     bnds = velocity_integral_bounds(state, logλ, v_term; p)
     integ = integrate(number_weighted_integrand, bnds, quad)
-
-    # A degenerate ice state (ρn_ice or ρq_ice below ϵ) integrates to zero over
-    # zero-width bounds; select zero in place of the degenerate ratio.
-    below_ϵ = (ρn_ice < eps(one(ρn_ice))) | (ρq_ice < eps(one(ρq_ice)))
-    result = integ / ρn_ice  # non-finite for a degenerate state; discarded below
-    return ifelse(below_ϵ, zero(result), result)
+    return integ / max(n_ice, eps(one(n_ice)))
 end
 
 struct P3MassWeightedIntegrand{N, V, S} <: Function
@@ -128,29 +125,29 @@ function ice_terminal_velocity_mass_weighted(
     velocity_params::CMP.Chen2022VelType, ρₐ, state::P3State, logλ;
     p = 1e-6, quad,
 )
-    (; ρn_ice, ρq_ice) = state
+    (; q_ice, n_ice) = state
     v_term = ice_particle_terminal_velocity(velocity_params, ρₐ, state)
     n = DT.size_distribution(state, logλ)
 
-    # ∫n(D) m(D) v(D) dD, normalized by the mass concentration
-    mass_weighted_integrand = P3MassWeightedIntegrand(n, v_term, state)
+    # ∫n(D) m(D) v(D) dD, normalized by the mass content floored by the
+    # distribution's own represented mass n_ice·exp(logLdivN). Where the shape
+    # solve is unclamped the floor sits at (or below) q_ice, so the mean is
+    # unchanged; when q_ice → 0 with n_ice > 0 (logλ clamped) it keeps the
+    # bare mean a bounded fall speed (≤ the largest particle speed) while the
+    # sedimentation flux w·q stays conservative and vanishes with q_ice.
     bnds = velocity_integral_bounds(state, logλ, v_term; p)
-    integ = integrate(mass_weighted_integrand, bnds, quad)
-
-    # A degenerate ice state (ρn_ice or ρq_ice below ϵ) integrates to zero over
-    # zero-width bounds; select zero in place of the degenerate ratio.
-    below_ϵ = (ρn_ice < eps(one(ρn_ice))) | (ρq_ice < eps(one(ρq_ice)))
-    result = integ / ρq_ice  # non-finite for a degenerate state; discarded below
-    return ifelse(below_ϵ, zero(result), result)
+    integ = integrate(P3MassWeightedIntegrand(n, v_term, state), bnds, quad)
+    represented_mass = n_ice * exp(logLdivN(state, logλ))
+    return integ / max(q_ice, represented_mass, floatmin(eltype(state)))
 end
 
 """
     ice_terminal_velocity_number_weighted_from_prognostic(
-        velocity_params, ρₐ, params, ρq_ice, ρn_ice, ρq_rim, ρb_rim, logλ; kw...
+        velocity_params, ρₐ, params, q_ice, n_ice, q_rim, b_rim, logλ; kw...
     )
 
-Pointwise wrapper that takes the *raw prognostic* P3 ice state
-(`ρq_ice`, `ρn_ice`, `ρq_rim`, `ρb_rim`) and returns the number-weighted
+Pointwise wrapper that takes the *specific prognostic* P3 ice state
+(`q_ice`, `n_ice`, `q_rim`, `b_rim`) and returns the number-weighted
 mean ice terminal velocity. Builds the per-cell `P3State` via
 [`state_from_prognostic`](@ref), so `F_rim` is regularised to
 `[0, 1 - eps(FT)]` and `ρ_rim` is clamped to `[0, 0.8 ρ_l]`.
@@ -159,15 +156,15 @@ Designed for `@.`-broadcast use from a host (CA, KiD, etc.) where the
 state must be reconstructed from prognostic variables every cell.
 """
 @inline function ice_terminal_velocity_number_weighted_from_prognostic(
-    velocity_params, ρₐ, params, ρq_ice, ρn_ice, ρq_rim, ρb_rim, logλ; kw...,
+    velocity_params, ρₐ, params, q_ice, n_ice, q_rim, b_rim, logλ; kw...,
 )
-    state = state_from_prognostic(params, ρq_ice, ρn_ice, ρq_rim, ρb_rim)
+    state = state_from_prognostic(params, q_ice, n_ice, q_rim, b_rim)
     return ice_terminal_velocity_number_weighted(velocity_params, ρₐ, state, logλ; kw...)
 end
 
 """
     ice_terminal_velocity_mass_weighted_from_prognostic(
-        velocity_params, ρₐ, params, ρq_ice, ρn_ice, ρq_rim, ρb_rim, logλ; kw...
+        velocity_params, ρₐ, params, q_ice, n_ice, q_rim, b_rim, logλ; kw...
     )
 
 Mass-weighted counterpart to
@@ -176,8 +173,8 @@ the per-cell `P3State` via the regularised
 [`state_from_prognostic`](@ref).
 """
 @inline function ice_terminal_velocity_mass_weighted_from_prognostic(
-    velocity_params, ρₐ, params, ρq_ice, ρn_ice, ρq_rim, ρb_rim, logλ; kw...,
+    velocity_params, ρₐ, params, q_ice, n_ice, q_rim, b_rim, logλ; kw...,
 )
-    state = state_from_prognostic(params, ρq_ice, ρn_ice, ρq_rim, ρb_rim)
+    state = state_from_prognostic(params, q_ice, n_ice, q_rim, b_rim)
     return ice_terminal_velocity_mass_weighted(velocity_params, ρₐ, state, logλ; kw...)
 end
