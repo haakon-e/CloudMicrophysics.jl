@@ -549,6 +549,8 @@ present under [`CMP.ThreeMoment`](@ref) ice.
     MicroState{FT, 1, false, true}((warm..., cat.q_ice, cat.n_ice, cat.q_rim, cat.b_rim, cat.z_ice))
 @inline _rosenbrock_initial_state(::CMP.TwoMoment, ::CMP.PredictedLiquidFraction, ::Type{FT}, warm, cat) where {FT} =
     MicroState{FT, 1, true, false}((warm..., cat.q_ice, cat.n_ice, cat.q_rim, cat.b_rim, cat.q_liq_on_ice))
+@inline _rosenbrock_initial_state(::CMP.ThreeMoment, ::CMP.PredictedLiquidFraction, ::Type{FT}, warm, cat) where {FT} =
+    MicroState{FT, 1, true, true}((warm..., cat.q_ice, cat.n_ice, cat.q_rim, cat.b_rim, cat.q_liq_on_ice, cat.z_ice))
 
 """
     _rosenbrock_ice_rates(moments, liquid, rates)

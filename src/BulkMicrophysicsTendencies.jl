@@ -861,10 +861,12 @@ region must pass coefficients precomputed from the primal state.
 @inline function _reflectivity_coefficients(
     moments::CMP.ThreeMoment, mp, ρ, ice::NTuple{NCAT, <:NamedTuple}, shapes, ::Nothing,
 ) where {NCAT}
+    liquid = _liquid(mp)
     return ntuple(Val(NCAT)) do j
         (; q_ice, n_ice, q_rim, b_rim) = ice[j]
         state = CMP3.state_from_prognostic(
-            mp.ice.scheme, q_ice * ρ, n_ice * ρ, q_rim * ρ, b_rim * ρ, _cat_ρz(moments, ice[j], ρ),
+            mp.ice.scheme, q_ice * ρ, n_ice * ρ, q_rim * ρ, b_rim * ρ,
+            _cat_ρq_liq(liquid, ice[j], ρ), _cat_ρz(moments, ice[j], ρ),
         )
         CMP3.reflectivity_growth_coefficients(state, shapes[j])
     end

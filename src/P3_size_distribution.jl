@@ -327,6 +327,14 @@ function logLdivN_whole(state::P3State, logλ, F_liq)
     logNdivN₀ = loggamma_moment(μ, logλ; k = 0)
     return logLdivN₀ - logNdivN₀
 end
+# Whole-particle `log(q_tot/N)` at an explicit shape parameter μ (the shared
+# whole-particle μ solved from `(L_whole, N, Z)` under three-moment ice); see the
+# joint `_distribution_shape`.
+function logLdivN_whole(state::P3State, μ, logλ, F_liq)
+    logLdivN₀ = log_mixed_mass_moment(state, μ, logλ, F_liq; n = 0)
+    logNdivN₀ = loggamma_moment(μ, logλ; k = 0)
+    return logLdivN₀ - logNdivN₀
+end
 
 """
     get_logN₀(N_ice, μ, logλ)
@@ -590,6 +598,38 @@ function _distribution_shape(moments::CMP.ThreeMoment, ::CMP.NoLiquidFraction, s
     μ = _solve_shape_μ(residual, FT(0), μ_max)
     logλ = clamp(logλ_of_μ(μ), lo, hi)
     return P3Shape(; logλ, μ)
+end
+
+"""
+    _distribution_shape(moments::CMP.ThreeMoment, liquid::CMP.PredictedLiquidFraction, state::P3State)
+
+Diagnose the joint three-moment predicted-liquid-fraction [`P3Shape`](@ref). The
+whole-particle number and sixth moments are pure gamma moments regardless of
+liquid, so the slope is pinned analytically by `Z/N` exactly as in the dry
+three-moment solve. μ solves the whole-particle mass residual
+[`logLdivN_whole`](@ref)`(state, μ, logλ(μ), F_liq)` against `log(q_tot/N)` on
+`μ ∈ [0, μ_max]` with the in-residual `logλ` clamp (C23 shared-μ closure). The
+ice-core slope then solves the frozen core at the shared μ
+([`get_distribution_logλ_core`](@ref)). Reduces bit-for-bit to the dry
+three-moment solve for `(μ, logλ)` at `F_liq = 0`, where `logλ_core = logλ`.
+"""
+function _distribution_shape(moments::CMP.ThreeMoment, ::CMP.PredictedLiquidFraction, state::P3State{FT}) where {FT}
+    (; ρn_ice, F_liq) = state
+    q_tot = total_mass_concentration(state)
+    μ_max = FT(moments.μ_max)
+    lo, hi = FT(LOGλ_MIN), FT(LOGλ_MAX)
+    ϵₘ = UT.ϵ_numerics_2M_M(FT)
+    ϵₙ = UT.ϵ_numerics_2M_N(FT)
+    target_logLdN = log(max(q_tot, ϵₘ)) - log(max(ρn_ice, ϵₙ))
+    logZdN = log(reflectivity_number_ratio(state))
+    logλ_of_μ(μ) = (SF.loggamma(μ + 7) - SF.loggamma(μ + 1) - logZdN) / 6
+    residual(μ) = logLdivN_whole(state, μ, clamp(logλ_of_μ(μ), lo, hi), F_liq) - target_logLdN
+    μ = _solve_shape_μ(residual, FT(0), μ_max)
+    logλ = clamp(logλ_of_μ(μ), lo, hi)
+    # The frozen core shares μ; its slope solves the core mass. At F_liq = 0 the
+    # core and whole solves coincide, so the shape matches the dry solve exactly.
+    logλ_core = iszero(F_liq) ? logλ : get_distribution_logλ_core(state, μ)
+    return P3Shape(; logλ, μ, logλ_core)
 end
 
 # Brent + fixed-iteration root find with a deterministic bracket (no warm start).
