@@ -12,6 +12,14 @@ column states, and attribute it to one of three levels:
   error, so they tolerate a coarser rule than the transport components.
 - `bulk`: the full `bulk_microphysics_tendencies` vector.
 
+A separate `reflectivity` level (`run_reflectivity_error_study`) measures the
+error of the sixth-moment-weighted terminal velocity `V_z` for three-moment
+ice, whose `D⁶` weight stresses the size-distribution tail harder than any
+mass/number integral. Its states derive from the ice-bearing study states: for
+each state and each prescribed shape parameter μ, the slope solves the state's
+mass target and the sixth moment follows analytically. The outcome selects
+`P3Scheme.REFLECTIVITY_QUADRATURE_ORDER`.
+
 The states are `generate_column_states` plus graupel/hail cores
 (`hail_core_states`), whose large mean particle sizes stress the
 size-distribution tail. The error metric is `|a - b| / max(|a|, |b|, floor)`,
@@ -48,6 +56,7 @@ import CloudMicrophysics.Parameters as CMP
 import CloudMicrophysics.P3Scheme as P3
 import CloudMicrophysics.BulkMicrophysicsTendencies as BMT
 import CloudMicrophysics.ThermodynamicsInterface as TDI
+import SpecialFunctions as SF
 import BenchmarkTools as BT
 import Statistics: median, quantile
 
@@ -365,5 +374,85 @@ function run_quadrature_error_study(;
         end
     end
 
+    return results
+end
+
+"""
+    reflectivity_error_states(FT; μ_values)
+
+Three-moment `(P3State, ρ)` pairs derived from the ice-bearing study states.
+For each state and each prescribed shape parameter in `μ_values`, the slope
+solves the state's mass target `log(L/N)` by bisection and the sixth moment
+follows from `Z = N · Γ(μ+7)/Γ(μ+1) · λ⁻⁶`.
+"""
+function reflectivity_error_states(::Type{FT}; μ_values) where {FT}
+    params = CMP.ParametersP3(FT; moments = :three_moment)
+    base = vcat(generate_column_states(FT), hail_core_states(FT, STUDY_HAIL_CORES))
+    out = @NamedTuple{state::P3.P3State{FT, typeof(params)}, ρ::FT}[]
+    for s in base
+        s.q_ice > 0 && s.n_ice > 0 || continue
+        (ρq, ρn, ρq_rim, ρb_rim) = s.ρ .* (s.q_ice, s.n_ice, s.q_rim, s.b_rim)
+        st0 = P3.state_from_prognostic(params, ρq, ρn, ρq_rim, ρb_rim)
+        target = log(ρq) - log(ρn)
+        for μt in FT.(μ_values)
+            r(logλ) = P3.logLdivN(st0, μt, logλ) - target
+            lo, hi = FT(P3.LOGλ_MIN), FT(P3.LOGλ_MAX)
+            r(lo) * r(hi) < 0 || continue
+            for _ in 1:200
+                mid = (lo + hi) / 2
+                r(lo) * r(mid) <= 0 ? (hi = mid) : (lo = mid)
+            end
+            logλt = (lo + hi) / 2
+            Z = ρn * exp(SF.loggamma(μt + 7) - SF.loggamma(μt + 1) - 6 * logλt)
+            st = P3.state_from_prognostic(params, ρq, ρn, ρq_rim, ρb_rim, Z)
+            push!(out, (; state = st, ρ = s.ρ))
+        end
+    end
+    return out
+end
+
+"""
+    run_reflectivity_error_study(; FT, orders, reference_order, μ_values)
+
+Relative error of the reflectivity-weighted terminal velocity `V_z` per
+Gauss-Legendre order, against the `reference_order` rule, across
+[`reflectivity_error_states`](@ref). Return `(; order, level, median, p95, max)`
+rows.
+"""
+function run_reflectivity_error_study(;
+    FT = Float64,
+    orders = (5, 6, 7, 8, 10, 12, 16),
+    reference_order = 128,
+    μ_values = (0, 5, 10, 20),
+)
+    vel = CMP.Chen2022VelType(FT)
+    states = reflectivity_error_states(FT; μ_values)
+    shapes = [P3.get_distribution_shape(state) for (; state) in states]
+    ref_quad = CM.Quadrature.GaussLegendre(FT, reference_order)
+    refs = [
+        P3.ice_terminal_velocity_reflectivity_weighted(vel, ρ, state, shape; quad = ref_quad)
+        for ((; state, ρ), shape) in zip(states, shapes)
+    ]
+    results = NamedTuple[]
+    println("order | level | median | p95 | max   ($(length(states)) states, FT = $FT)")
+    for n in orders
+        quad = CM.Quadrature.GaussLegendre(FT, n)
+        errs = [
+            abs(
+                P3.ice_terminal_velocity_reflectivity_weighted(vel, ρ, state, shape; quad) -
+                ref,
+            ) / max(abs(ref), floatmin(FT))
+            for ((; state, ρ), shape, ref) in zip(states, shapes, refs)
+        ]
+        row = (;
+            order = n, level = :reflectivity,
+            median = median(errs), p95 = quantile(errs, 0.95), max = maximum(errs),
+        )
+        push!(results, row)
+        println(rpad("GL($n)", 7), " | ", rpad(row.level, 12), " | ",
+            rpad(round(row.median, sigdigits = 3), 10), " | ",
+            rpad(round(row.p95, sigdigits = 3), 10), " | ",
+            round(row.max, sigdigits = 3))
+    end
     return results
 end
