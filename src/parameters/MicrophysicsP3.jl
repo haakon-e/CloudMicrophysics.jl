@@ -356,13 +356,36 @@ $(DocStringExtensions.FIELDS)
 @kwdef struct PredictedLiquidFraction{FT} <: LiquidFractionTreatment
     "Liquid fraction below which the vapor path uses the ice-core branch [`-`]"
     F_dry::FT
+    "Width of the vapor-path switch band starting at `F_dry` [`-`]"
+    ΔF_switch::FT
     "Liquid fraction above which the particle is dumped to rain [`-`]"
     F_melt::FT
+    "Volumetric mass concentration regularising the liquid mass fraction [`kg m⁻³`]"
+    q_liq_present::FT
+    "Whole-particle size above which liquid is shed from ice [`m`]"
+    D_shd_onset::FT
+    "Mean diameter of drops shed from ice into rain [`m`]"
+    D_shd_drop::FT
+    function PredictedLiquidFraction{FT}(F_dry, ΔF_switch, F_melt, q_liq_present, D_shd_onset, D_shd_drop) where {FT}
+        # The vapor-path ramp band is [F_dry, F_dry + ΔF_switch]; keep it strictly
+        # inside (0, F_melt) so the ramp weight is zero at F_liq = 0 and saturates
+        # below the complete-melt threshold.
+        @assert 0 < F_dry
+        @assert 0 < ΔF_switch
+        @assert F_dry + ΔF_switch < F_melt < 1
+        @assert q_liq_present > 0
+        @assert D_shd_drop < D_shd_onset
+        return new{FT}(F_dry, ΔF_switch, F_melt, q_liq_present, D_shd_onset, D_shd_drop)
+    end
 end
 function PredictedLiquidFraction(toml_dict::CP.ParamDict)
     name_map = (;
         :P3_liquid_fraction_dry_threshold => :F_dry,
+        :P3_liquid_fraction_switch_width => :ΔF_switch,
         :P3_liquid_fraction_complete_melt_threshold => :F_melt,
+        :P3_liquid_presence_mass_concentration => :q_liq_present,
+        :P3_shedding_onset_diameter => :D_shd_onset,
+        :P3_shedding_drop_diameter => :D_shd_drop,
     )
     params = CP.get_parameter_values(toml_dict, name_map, "CloudMicrophysics")
     return PredictedLiquidFraction{CP.float_type(toml_dict)}(; params...)
@@ -406,6 +429,10 @@ $(DocStringExtensions.FIELDS)
     T_freeze::FT
     "Interim ceiling on the per-particle ice terminal velocity [`m s⁻¹`]"
     v_term_ice_max::FT
+    "Lower bound on the mean ice particle mass [`kg`]"
+    mean_mass_min::FT
+    "Upper bound on the mean ice particle mass [`kg`]"
+    mean_mass_max::FT
     "Terminal-velocity aspect-ratio treatment, an [`AspectRatio`](@ref)"
     aspect_ratio::AR = Oblate()
 end
@@ -440,6 +467,8 @@ function ParametersP3(
             :temperature_water_freeze => :T_freeze,
             :P3_wet_growth_timescale => :τ_wet,
             :P3_max_ice_terminal_velocity => :v_term_ice_max,
+            :P3_ice_mean_mass_min => :mean_mass_min,
+            :P3_ice_mean_mass_max => :mean_mass_max,
         ), "CloudMicrophysics")
     return ParametersP3(;
         mass = MassPowerLaw(toml_dict),
@@ -462,5 +491,7 @@ ShowMethods.field_units(::MassPowerLaw) = (; α_va = "kg m^(-β_va)")
 ShowMethods.field_units(::AreaPowerLaw) = (; γ = "μm^(2-σ)")
 ShowMethods.field_units(::SlopePowerLaw) = (; a = "m^b")
 ShowMethods.field_units(::LocalRimeDensity) = (; ρ_ice = "kg m⁻³")
-ShowMethods.field_units(::ParametersP3) =
-    (; τ_wet = "s", ρ_i = "kg m⁻³", ρ_l = "kg m⁻³", T_freeze = "K", v_term_ice_max = "m s⁻¹")
+ShowMethods.field_units(::ParametersP3) = (;
+    τ_wet = "s", ρ_i = "kg m⁻³", ρ_l = "kg m⁻³", T_freeze = "K",
+    v_term_ice_max = "m s⁻¹", mean_mass_min = "kg", mean_mass_max = "kg",
+)

@@ -43,8 +43,10 @@ struct P3State{FT, PARAMS <: CMP.ParametersP3}
     D_cr::FT
 end
 
-function P3State(params::CMP.ParametersP3, ρq_ice, ρn_ice, F_rim, ρ_rim, ρz_ice = nothing)
-    FT = UT.promote_typeof(ρq_ice, ρn_ice, F_rim, ρ_rim)
+function P3State(
+    params::CMP.ParametersP3, ρq_ice, ρn_ice, F_rim, ρ_rim, F_liq = false, ρz_ice = nothing,
+)
+    FT = UT.promote_typeof(ρq_ice, ρn_ice, F_rim, ρ_rim, F_liq)
     (; mass, ρ_i) = params
     # Clamp to the physical domain so the threshold formulas never evaluate a
     # power of a non-positive density. Inert on physical inputs.
@@ -54,20 +56,36 @@ function P3State(params::CMP.ParametersP3, ρq_ice, ρn_ice, F_rim, ρ_rim, ρz_
     # Bound the rime density by the solid-ice density. Since `ρ_g ≤ ρ_rim`, this
     # keeps `ρ_g ≤ ρ_i`, preserving the `D_th ≤ D_gr` threshold ordering.
     ρ_rim = clamp(FT(ρ_rim), FT(0), ρ_i)
+    # Clamp the liquid fraction into [0, F_melt] before any use.
+    F_liq = clamp(FT(F_liq), FT(0), _liquid_fraction_ceiling(params.liquid, FT))
     ρ_d = get_ρ_d(mass, F_rim, ρ_rim)
     ρ_g = get_ρ_g(F_rim, ρ_rim, ρ_d)
     D_th = get_D_th(mass, ρ_i)
-    D_gr = ifelse(iszero(F_rim), FT(Inf), get_D_gr(mass, ρ_g))
-    D_cr = ifelse(iszero(F_rim), FT(Inf), get_D_cr(mass, F_rim, ρ_g))
+    unrimed = _unrimed_threshold_test(params.liquid, F_rim)
+    D_gr = ifelse(unrimed, FT(Inf), get_D_gr(mass, ρ_g))
+    D_cr = ifelse(unrimed, FT(Inf), get_D_cr(mass, F_rim, ρ_g))
     # Sixth-moment admissibility clamp; zero under two-moment ice.
     ρz_in = ρz_ice === nothing ? zero(FT) : UT.clamp_to_nonneg(FT(ρz_ice))
     ρz = apply_z_bounds(params.moments, ρn_ice, ρz_in)
     return P3State(
         params,
-        ρq_ice, ρn_ice, F_rim, ρ_rim, zero(FT), ρz,
+        ρq_ice, ρn_ice, F_rim, ρ_rim, F_liq, ρz,
         FT(ρ_g), FT(D_th), FT(D_gr), FT(D_cr),
     )
 end
+
+# Unrimed selector for the threshold sentinels. Under the predicted liquid
+# treatment the test reads the value of `F_rim`, so a differentiated zero (a
+# `Dual` with nonzero partials at `q_rim = 0`) selects the same branch as the
+# plain zero and the `ρ_g = NaN` sentinel does not enter the thresholds under
+# ForwardDiff; the exact Jacobian is the only substep Jacobian on that path.
+_unrimed_threshold_test(::CMP.NoLiquidFraction, F_rim) = iszero(F_rim)
+_unrimed_threshold_test(::CMP.PredictedLiquidFraction, F_rim) = iszero(FD.value(F_rim))
+
+# Upper bound on the clamped liquid mass fraction: F_melt under the predicted
+# treatment, zero when liquid is off (F_liq is forced to zero).
+_liquid_fraction_ceiling(::CMP.NoLiquidFraction, ::Type{FT}) where {FT} = zero(FT)
+_liquid_fraction_ceiling(liquid::CMP.PredictedLiquidFraction, ::Type{FT}) where {FT} = FT(liquid.F_melt)
 
 Base.show(io::IO, mime::MIME"text/plain", x::P3State) =
     ShowMethods.verbose_show_type_and_fields(io, mime, x)
@@ -109,7 +127,7 @@ function state_from_prognostic(params::CMP.ParametersP3, ρq_ice, ρn_ice, ρq_r
     ρb_rim = UT.clamp_to_nonneg(ρb_rim)
     F_rim = UT.rime_mass_fraction(ρq_rim, ρq_ice)
     ρ_rim = UT.rime_density(ρq_rim, ρb_rim)
-    return P3State(params, ρq_ice, ρn_ice, F_rim, ρ_rim, ρz_ice)
+    return P3State(params, ρq_ice, ρn_ice, F_rim, ρ_rim, false, ρz_ice)
 end
 
 """
@@ -139,6 +157,41 @@ zero under [`CMP.TwoMoment`](@ref) ice. Assumes `ρn_ice ≥ 0`. See the
 @inline function apply_z_bounds(moments::CMP.ThreeMoment, ρn_ice, ρz_ice)
     (; zn_lo, zn_hi) = moments
     return clamp(ρz_ice, zn_lo * ρn_ice, zn_hi * ρn_ice)
+end
+
+"""
+    state_from_prognostic(params::ParametersP3{FT, MOM, <:PredictedLiquidFraction}, ρq_ice, ρn_ice, ρq_rim, ρb_rim, ρq_liq)
+
+Construct a [`P3State`](@ref) under the predicted-liquid-fraction treatment from
+the volumetric prognostic ice variables, including the liquid mass on ice
+`ρq_liq`. `ρq_ice` keeps its frozen-core meaning, so `F_rim = ρq_rim/ρq_ice` and
+`ρ_rim` are computed exactly as in the four-argument method. The liquid mass
+fraction is the regularised ratio `F_liq = ρq_liq/(ρq_ice + ρq_liq)`
+([`UT.liquid_mass_fraction`](@ref)) keyed on the physical presence scale
+`params.liquid.q_liq_present`, then clamped into `[0, F_melt]` by the
+[`P3State`](@ref) constructor.
+
+# Arguments
+- `params`: [`CMP.ParametersP3`](@ref) with a `PredictedLiquidFraction` treatment
+- `ρq_ice`: frozen-core ice mass concentration [kg/m³]
+- `ρn_ice`: ice number concentration [1/m³]
+- `ρq_rim`: rime mass concentration [kg/m³]
+- `ρb_rim`: rime volume concentration [m³/m³]
+- `ρq_liq`: liquid mass on ice [kg/m³]
+"""
+function state_from_prognostic(
+    params::CMP.ParametersP3{FT, MOM, <:CMP.PredictedLiquidFraction},
+    ρq_ice, ρn_ice, ρq_rim, ρb_rim, ρq_liq,
+) where {FT, MOM}
+    ρq_ice = UT.clamp_to_nonneg(ρq_ice)
+    ρn_ice = UT.clamp_to_nonneg(ρn_ice)
+    ρq_rim = UT.clamp_to_nonneg(ρq_rim)
+    ρb_rim = UT.clamp_to_nonneg(ρb_rim)
+    ρq_liq = UT.clamp_to_nonneg(ρq_liq)
+    F_rim = UT.rime_mass_fraction(ρq_rim, ρq_ice)
+    ρ_rim = UT.rime_density(ρq_rim, ρb_rim)
+    F_liq = UT.liquid_mass_fraction(ρq_liq, ρq_ice + ρq_liq, params.liquid.q_liq_present)
+    return P3State(params, ρq_ice, ρn_ice, F_rim, ρ_rim, F_liq)
 end
 
 Base.eltype(::P3State{FT}) where {FT} = FT
@@ -509,3 +562,54 @@ spheroid derivation and the residual `ϕ > 1` band above `D_th`.
 
     return ifelse(iszero(D), zero(ϕ_ob), ϕ_ob)
 end
+
+"""
+    liquid_blend(F_liq, X_ice, X_liq)
+
+Return the whole-particle liquid-fraction blend
+`(1 - F_liq) X_ice + F_liq X_liq` of an ice-core property `X_ice` and the
+corresponding pure-drop property `X_liq` (C19 Eqs 10, 12, 13). Reduces to
+`X_ice` at `F_liq = 0` and to `X_liq` at `F_liq = 1`.
+"""
+@inline liquid_blend(F_liq, X_ice, X_liq) = (1 - F_liq) * X_ice + F_liq * X_liq
+
+"""
+    mixed_mass(state::P3State, D)
+
+Return the whole (mixed-phase) particle mass at maximum dimension `D`: the
+liquid-fraction blend of the ice-core mass [`ice_mass`](@ref) and the pure-drop
+mass `(π/6) ρ_l D³` (C19 Eq 10). The ice-core mass keeps its own meaning; the
+blend differs from `ice_mass` only where `state.F_liq > 0`.
+"""
+@inline function mixed_mass(state::P3State, D)
+    (; ρ_l) = state.params
+    m_drop = ρ_l * CO.volume_sphere_D(D)
+    return liquid_blend(state.F_liq, ice_mass(state, D), m_drop)
+end
+
+"""
+    mixed_area(state::P3State, D)
+
+Return the whole (mixed-phase) particle projected area at maximum dimension `D`:
+the liquid-fraction blend of the ice-core area [`ice_area`](@ref) and the
+pure-drop area `(π/4) D²` (C19 Eq 12).
+"""
+@inline function mixed_area(state::P3State, D)
+    A_drop = D^2 * π / 4
+    return liquid_blend(state.F_liq, ice_area(state, D), A_drop)
+end
+
+"""
+    total_mass_concentration(state::P3State)
+
+Return the total mixed-phase mass concentration `ρq_tot = ρq_ice + ρq_liq`
+[kg/m³], recovered from the frozen core and the stored liquid fraction as
+`ρq_ice / (1 - F_liq)`. Equals `ρq_ice` when liquid is off.
+
+The stored `F_liq` is regularised and clamped into `[0, F_melt]`, so the
+recovered total equals the prognostic sum only where those are inert; past the
+`F_melt` clamp it understates the prognostic total. Suitable for the diagnostic
+whole-particle shape solve, not for conserved budgets; see the
+[P3 liquid-fraction documentation](@ref P3-liquid-fraction).
+"""
+@inline total_mass_concentration(state::P3State) = state.ρq_ice / (1 - state.F_liq)

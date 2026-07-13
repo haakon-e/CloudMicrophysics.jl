@@ -55,6 +55,38 @@ aspect-ratio factor selected by `state.params.aspect_ratio`.
     return P3IceParticleVelocityFunctor(v_term_small, v_term_large, D_cutoff, state)
 end
 
+# Callable returned by `mixed_particle_terminal_velocity`: the liquid-fraction
+# blend of the ice-core and pure-drop (Chen rain) terminal velocities.
+struct P3MixedParticleVelocityFunctor{VI, VD, FT} <: Function
+    v_ice::VI
+    v_drop::VD
+    F_liq::FT
+end
+@inline (f::P3MixedParticleVelocityFunctor)(D) = liquid_blend(f.F_liq, f.v_ice(D), f.v_drop(D))
+velocity_breakpoints(f::P3MixedParticleVelocityFunctor) = velocity_breakpoints(f.v_ice)
+
+"""
+    mixed_particle_terminal_velocity(velocity_params, ρₐ, state::P3State)
+
+Return a single-argument function `v_term(D)` giving the whole (mixed-phase)
+particle terminal velocity: the liquid-fraction blend
+`(1 - F_liq) v_ice(D) + F_liq v_drop(D)` of the ice-core velocity
+[`ice_particle_terminal_velocity`](@ref) and the Chen 2022 rain velocity
+(C19 Eq 13). Reduces to the ice-core velocity at `F_liq = 0`.
+
+# Arguments
+ - `velocity_params`: A [`CMP.Chen2022VelType`](@ref)
+ - `ρₐ`: Air density [kg/m³]
+ - `state`: A [`P3State`](@ref)
+"""
+@inline function mixed_particle_terminal_velocity(
+    velocity_params::CMP.Chen2022VelType, ρₐ, state::P3State,
+)
+    v_ice = ice_particle_terminal_velocity(velocity_params, ρₐ, state)
+    v_drop = CO.particle_terminal_velocity(velocity_params.rain, ρₐ)
+    return P3MixedParticleVelocityFunctor(v_ice, v_drop, state.F_liq)
+end
+
 struct P3NumberWeightedIntegrand{N, V} <: Function
     n::N
     v_term::V

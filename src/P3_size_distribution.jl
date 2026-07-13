@@ -200,6 +200,23 @@ function loggamma_moment(μ, logλ; k = 0, scale = 1)
 end
 
 """
+    log_upper_incomplete_gamma(z, x)
+
+Compute `log Γ(z, x) = log ∫_x^∞ tᶻ⁻¹ e⁻ᵗ dt`, the log of the unregularised
+upper incomplete gamma function, as `loggamma(z) + log Q(z, x)` with `Q` the
+regularised upper incomplete gamma ratio ([`UT.gamma_inc`](@ref)). Taking the
+log directly (rather than the `eps`-floored `log(max(Q, eps))` of
+[`loggamma_inc_moment`](@ref)) keeps the deep tail accurate: in Float32 `Q`
+remains representable well past `x = 90` and only underflows to `0` (giving
+`-Inf`) at extreme `x`, where the moment it feeds is physically negligible.
+Used by the closed-form shedding moment.
+"""
+@inline function log_upper_incomplete_gamma(z, x)
+    (_, Q) = UT.gamma_inc(z, x)
+    return SF.loggamma(z) + log(max(Q, zero(Q)))
+end
+
+"""
     get_μ(slope::CMP.SlopeLaw, logλ)
     get_μ(state::P3State, logλ)
     
@@ -243,6 +260,31 @@ function logmass_gamma_moment(state::P3State, μ, logλ; n = 0)
 end
 
 """
+    log_mixed_mass_moment(state, μ, logλ, F_liq; [n = 0])
+
+Compute `log(∫_0^∞ Dⁿ mₜ(D) G(D) dD)`, the log of the `n`-th moment of the whole
+(mixed-phase) mass-weighted kernel, where the mixed mass is the blend
+`mₜ = (1 - F_liq) m_core(D) + F_liq (π/6) ρ_l D³` ([`mixed_mass`](@ref)).
+
+The blend adds the single pure-`D³` drop moment `liq0` to the piecewise ice-core
+moment `core` ([`logmass_gamma_moment`](@ref)) as a log-space convex combination
+with `F_liq` outside every logarithm:
+
+```math
+\\log M = \\mathrm{core} + \\log\\!\\big(1 + F_{liq}\\,(e^{liq0 - core} - 1)\\big).
+```
+
+The value equals `core` exactly at `F_liq = 0` and its derivative with respect to
+`F_liq` is finite there (`e^{liq0 - core} - 1`), avoiding the singular
+`log(F_liq)` intermediate.
+"""
+function log_mixed_mass_moment(state::P3State, μ, logλ, F_liq; n = 0)
+    core = logmass_gamma_moment(state, μ, logλ; n)
+    liq0 = loggamma_moment(μ, logλ; k = 3 + n, scale = π * state.params.ρ_l / 6)
+    return core + log1p(F_liq * expm1(liq0 - core))
+end
+
+"""
     logLdivN(state, logλ)
     logLdivN(state, shape::P3Shape)
 
@@ -263,8 +305,25 @@ end
 function logLdivN(state::P3State, shape::P3Shape)
     return logLdivN(state, shape.μ, shape.logλ)
 end
+# `log(L/N)` for the ice core at a fixed shape parameter μ (the shared
+# whole-particle μ); see `get_distribution_logλ_core`.
 function logLdivN(state::P3State, μ, logλ)
     logLdivN₀ = logmass_gamma_moment(state, μ, logλ; n = 0)
+    logNdivN₀ = loggamma_moment(μ, logλ; k = 0)
+    return logLdivN₀ - logNdivN₀
+end
+
+"""
+    logLdivN_whole(state, logλ, F_liq)
+
+Compute `log(q_tot/N)` for the whole (mixed-phase) particle PSD at slope `logλ`,
+using the blended mass moment [`log_mixed_mass_moment`](@ref). Reduces to
+[`logLdivN`](@ref) at `F_liq = 0`. Driven to the target `log(ρq_tot/ρn_ice)` by
+[`get_distribution_logλ_whole`](@ref).
+"""
+function logLdivN_whole(state::P3State, logλ, F_liq)
+    μ = get_μ(state, logλ)
+    logLdivN₀ = log_mixed_mass_moment(state, μ, logλ, F_liq; n = 0)
     logNdivN₀ = loggamma_moment(μ, logλ; k = 0)
     return logLdivN₀ - logNdivN₀
 end
@@ -359,52 +418,133 @@ function get_distribution_logλ(state, logλ_guess = nothing, logλ_min = LOGλ_
     target_log_LdN = log(max(ρq_ice, ϵₘ)) - log(max(ρn_ice, ϵₙ))
 
     shape_problem(logλ) = logLdivN(state, logλ) - target_log_LdN
-    f_lo, f_hi = shape_problem(lo), shape_problem(hi)
-    if !isfinite(f_lo) || !isfinite(f_hi) || f_lo * f_hi > 0
-        return abs(f_lo) ≤ abs(f_hi) ? lo : hi
-    end
-    (lo, f_lo, hi, f_hi) =
-        _narrow_bracket(shape_problem, lo, f_lo, hi, f_hi, logλ_guess)
-
     # Fixed iteration count (no early-exit) keeps GPU warps convergent. The
     # branchless Brent's method converges rapidly, and the shape problem
     # `logLdivN(logλ)` is close to linear over the [2,17] bracket, so these
     # counts empirically reach excellent accuracy across sampled physical
-    # states. This is an EMPIRICAL, curvature-dependent result, NOT a guaranteed
+    # states. This is an empirical, curvature-dependent result, not a guaranteed
     # tolerance: a strongly-curved shape function (e.g. a future `get_μ` law)
     # could leave the root under-resolved with no runtime signal (the solver's
     # `converged` flag is unused). Accuracy is guarded end-to-end by the
     # `N ≈ ∫N′ dD` integral checks in `test/p3_tests.jl`; revisit the budget if
     # those tighten or the slope law changes.
+    return _solve_shape_logλ(shape_problem, FT, logλ_guess, lo, hi, _shape_solver_maxiters(FT))
+end
+
+# Shared bracketing Brent solve for the shape problem `shape_problem(logλ) = 0`.
+# Returns the bracket endpoint nearest the root if the bracket is invalid
+# (non-finite or same-sign), else the fixed-iteration Brent root clamped into
+# `[lo, hi]`. `maxiters` is chosen by the caller so each solve sets its own
+# empirically calibrated iteration budget.
+function _solve_shape_logλ(shape_problem::F, ::Type{FT}, logλ_guess, lo, hi, maxiters) where {F, FT}
+    f_lo, f_hi = shape_problem(lo), shape_problem(hi)
+    if !isfinite(f_lo) || !isfinite(f_hi) || f_lo * f_hi > 0
+        return abs(f_lo) ≤ abs(f_hi) ? lo : hi
+    end
+    (lo, f_lo, hi, f_hi) = _narrow_bracket(shape_problem, lo, f_lo, hi, f_hi, logλ_guess)
     sol = RS.find_zero(
         shape_problem,
         RS.BrentsMethod(lo, hi),
         RS.CompactSolution(),
         FixedIterations{FT}(),
-        _shape_solver_maxiters(FT),
+        maxiters,
     )
     return clamp(sol.root, lo, hi)  # logλ, within the search bounds
 end
+
+"""
+    get_distribution_logλ_whole(state, [logλ_guess, logλ_min, logλ_max])
+
+Solve for the whole-particle log-slope `logλ` under predicted liquid fraction:
+the slope of the mixed-phase PSD normalised to the total mass
+`ρq_tot = ρq_ice + ρq_liq` at the ice number `ρn_ice`, using the blended mass
+target [`logLdivN_whole`](@ref). Reduces to [`get_distribution_logλ`](@ref) at
+`F_liq = 0`. A fixed-iteration Brent solve identical in structure to the ice-core
+solve; the iteration budget is calibrated separately (see the whole-particle
+shape-solve study in `test/p3_liquid_fraction_tests.jl`).
+"""
+function get_distribution_logλ_whole(state, logλ_guess = nothing, logλ_min = 2, logλ_max = 17)
+    FT = eltype(state)
+    ϵₘ = UT.ϵ_numerics_2M_M(FT)
+    ϵₙ = UT.ϵ_numerics_2M_N(FT)
+    F_liq = state.F_liq
+    q_tot = total_mass_concentration(state)
+    lo, hi = FT(logλ_min), FT(logλ_max)
+    target_log_LdN = log(max(q_tot, ϵₘ)) - log(max(state.ρn_ice, ϵₙ))
+    shape_problem(logλ) = logLdivN_whole(state, logλ, F_liq) - target_log_LdN
+    return _solve_shape_logλ(shape_problem, FT, logλ_guess, lo, hi, _whole_shape_maxiters(FT))
+end
+
+"""
+    get_distribution_logλ_core(state, μ, [logλ_guess, logλ_min, logλ_max])
+
+Solve for the ice-core log-slope `logλ` under predicted liquid fraction: the
+slope of the frozen-core PSD normalised to the frozen mass `ρq_ice` at the ice
+number `ρn_ice`, at the shared shape parameter `μ` (set from the whole-particle
+solve, see [`get_distribution_logλ_whole`](@ref)). The core mass relation is the
+frozen-core [`ice_mass`](@ref) via [`logLdivN`](@ref)`(state, μ, logλ)`. A
+fixed-iteration Brent solve identical in structure to the whole-particle solve.
+"""
+function get_distribution_logλ_core(state, μ, logλ_guess = nothing, logλ_min = 2, logλ_max = 17)
+    FT = eltype(state)
+    ϵₘ = UT.ϵ_numerics_2M_M(FT)
+    ϵₙ = UT.ϵ_numerics_2M_N(FT)
+    (; ρn_ice, ρq_ice) = state
+    lo, hi = FT(logλ_min), FT(logλ_max)
+    target_log_LdN = log(max(ρq_ice, ϵₘ)) - log(max(ρn_ice, ϵₙ))
+    shape_problem(logλ) = logLdivN(state, μ, logλ) - target_log_LdN
+    return _solve_shape_logλ(shape_problem, FT, logλ_guess, lo, hi, _core_shape_maxiters(FT))
+end
+
+# Iteration budgets for the two liquid-fraction shape solves, widened over the
+# ice-core dry-solve budget (8/10) and calibrated against a high-iteration
+# reference in `test/p3_liquid_fraction_tests.jl`.
+@inline _whole_shape_maxiters(::Type{Float32}) = 12
+@inline _whole_shape_maxiters(::Type{FT}) where {FT} = 14
+@inline _core_shape_maxiters(::Type{Float32}) = 12
+@inline _core_shape_maxiters(::Type{FT}) where {FT} = 14
 
 """
     get_distribution_shape(params::ParametersP3{FT, <:TwoMoment}, logλ)
     get_distribution_shape(state::P3State, logλ)
     get_distribution_shape(state::P3State)
 
-Return the [`P3Shape`](@ref) for a given `logλ`; the one-argument form diagnoses
-the shape for the state's moment closure. Under [`CMP.TwoMoment`](@ref) ice, μ
-comes from the slope law with `logλ` solved via [`get_distribution_logλ`](@ref);
-under [`CMP.ThreeMoment`](@ref) ice, μ and `logλ` are solved jointly from the
-number, mass, and sixth-moment content. `logλ_core` equals `logλ` when liquid is
+Return the [`P3Shape`](@ref) for a given `logλ`, or diagnose the full shape for a
+`state`. The one-argument state form dispatches on both the moment closure and
+the liquid treatment. Under [`CMP.TwoMoment`](@ref) ice, μ comes from the slope
+law with `logλ` solved via [`get_distribution_logλ`](@ref); under
+[`CMP.ThreeMoment`](@ref) ice, μ and `logλ` are solved jointly from the number,
+mass, and sixth-moment content. Under [`CMP.PredictedLiquidFraction`](@ref) the
+stored `logλ` is the whole-particle slope ([`get_distribution_logλ_whole`](@ref))
+and `logλ_core` solves the frozen core at the shared μ
+([`get_distribution_logλ_core`](@ref)); `logλ_core` equals `logλ` when liquid is
 off.
 """
 get_distribution_shape(params::CMP.ParametersP3{FT, <:CMP.TwoMoment}, logλ) where {FT} =
     P3Shape(; logλ, μ = get_μ(params.moments.slope, logλ))
-get_distribution_shape(state::P3State, logλ) = get_distribution_shape(state.params, logλ)
-get_distribution_shape(state::P3State) = _distribution_shape(state.params.moments, state)
+get_distribution_shape(state::P3State, logλ) =
+    _distribution_shape(state.params.moments, state.params.liquid, state, logλ)
+get_distribution_shape(state::P3State) =
+    _distribution_shape(state.params.moments, state.params.liquid, state)
 
-_distribution_shape(::CMP.TwoMoment, state::P3State) =
+# --- Two-moment ice ---
+# Without liquid fraction the single slope is both whole and core.
+_distribution_shape(::CMP.TwoMoment, ::CMP.NoLiquidFraction, state::P3State, logλ) =
+    get_distribution_shape(state.params, logλ)
+_distribution_shape(::CMP.TwoMoment, ::CMP.NoLiquidFraction, state::P3State) =
     get_distribution_shape(state, get_distribution_logλ(state))
+
+# The stored `logλ` is the whole-particle slope. μ is diagnosed there and shared
+# with the ice-core PSD, whose slope solves the frozen core at that fixed μ.
+function _distribution_shape(::CMP.TwoMoment, ::CMP.PredictedLiquidFraction, state::P3State, logλ)
+    μ = get_μ(state, logλ)
+    return P3Shape(; logλ, μ, logλ_core = get_distribution_logλ_core(state, μ))
+end
+function _distribution_shape(::CMP.TwoMoment, ::CMP.PredictedLiquidFraction, state::P3State)
+    logλ = get_distribution_logλ_whole(state)
+    μ = get_μ(state, logλ)
+    return P3Shape(; logλ, μ, logλ_core = get_distribution_logλ_core(state, μ))
+end
 
 """
     reflectivity_number_ratio(state::P3State)
@@ -422,7 +562,7 @@ bound and μ follows the mass target.
 end
 
 """
-    _distribution_shape(moments::CMP.ThreeMoment, state::P3State)
+    _distribution_shape(moments::CMP.ThreeMoment, liquid::CMP.NoLiquidFraction, state::P3State)
 
 Diagnose the [`P3Shape`](@ref) from `(L, N, Z)` for three-moment ice. The slope
 is pinned analytically by `Z/N`,
@@ -437,7 +577,7 @@ into `[LOGλ_MIN, LOGλ_MAX]` inside the residual, so the returned `logλ`
 reproduces the mass target when a size bound binds. The μ-clamp is the
 reflectivity limiter.
 """
-function _distribution_shape(moments::CMP.ThreeMoment, state::P3State{FT}) where {FT}
+function _distribution_shape(moments::CMP.ThreeMoment, ::CMP.NoLiquidFraction, state::P3State{FT}) where {FT}
     (; ρn_ice, ρq_ice) = state
     μ_max = FT(moments.μ_max)
     lo, hi = FT(LOGλ_MIN), FT(LOGλ_MAX)

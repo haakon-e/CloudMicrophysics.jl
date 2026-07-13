@@ -27,7 +27,7 @@ arguments — non-concrete, heap-boxed, and silent.
 """
 @inline promote_typeof(args...) = Base.promote_typeof(args...)
 export unrolled_logsumexp
-export sgs_weight_function, rime_mass_fraction, rime_density
+export sgs_weight_function, rime_mass_fraction, rime_density, liquid_mass_fraction
 export gamma_inc, gamma_inc_inv
 
 """
@@ -511,5 +511,21 @@ Regularised rime density `ρ_rim = q_rim / b_rim` that stays finite when
 """
 @inline rime_density(q_rim, b_rim, kw...) = _regularised_ratio(q_rim, b_rim, kw...)
 
+"""
+    liquid_mass_fraction(ρq_liq, ρq_tot, q_present)
+
+Regularised liquid mass fraction `F_liq = ρq_liq / (ρq_tot + q_present)` of a
+mixed-phase ice particle, where `ρq_tot = ρq_ice + ρq_liq` is the total
+mixed-phase mass and `q_present` is a physical volumetric mass-concentration
+scale. Adding `q_present` to the denominator keeps the ratio finite as
+`ρq_tot → 0`. Distinct from [`rime_mass_fraction`](@ref), which regularises on
+`eps(FT)`.
+
+# Arguments
+- `ρq_liq`: volumetric liquid mass on ice `[kg m⁻³]`.
+- `ρq_tot`: total mixed-phase mass `ρq_ice + ρq_liq` `[kg m⁻³]`.
+- `q_present`: physical volumetric mass-concentration scale `[kg m⁻³]`.
+"""
+@inline liquid_mass_fraction(ρq_liq, ρq_tot, q_present) = ρq_liq / (ρq_tot + q_present)
 
 end # module
