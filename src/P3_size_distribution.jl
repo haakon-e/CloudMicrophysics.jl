@@ -1,5 +1,27 @@
 import CloudMicrophysics.DistributionTools: size_distribution
 
+"""
+    P3Shape{FT}
+
+Diagnosed ice size-distribution shape for one category, held fixed across a
+substep. Constructed with keywords only.
+
+# Fields
+$(FIELDS)
+"""
+struct P3Shape{FT}
+    "Whole-particle log-slope `log(λ)` [log(1/m)]"
+    logλ::FT
+    "Shape parameter μ [-]"
+    μ::FT
+    "Ice-core log-slope `log(λ)` [log(1/m)]; equals `logλ` when liquid is off"
+    logλ_core::FT
+    function P3Shape(; logλ, μ, logλ_core = logλ)
+        logλ, μ, logλ_core = promote(logλ, μ, logλ_core)
+        return new{typeof(logλ)}(logλ, μ, logλ_core)
+    end
+end
+
 # Callable returned by `logN′ice`: evaluates `log(N′(D))` for a fixed state and slope.
 # We store `λ = exp(logλ)` (computed once when the functor is built) rather than `logλ`
 # so the slope term is a single multiply `λ * D` in the quadrature hot loop, instead of
@@ -16,18 +38,19 @@ end
 end
 
 """
-    logN′ice(state, logλ)
+    logN′ice(state, shape)
 
 Return a callable that computes `log(N′(D))`, the log of the ice particle number
-concentration at diameter `D`, for the [`P3State`](@ref) `state` and log-slope `logλ`.
+concentration at diameter `D`, for the [`P3State`](@ref) `state` and the
+diagnosed [`P3Shape`](@ref) `shape`.
 """
-function logN′ice(state::P3State, logλ)
-    μ = get_μ(state, logλ)
-    log_N₀ = get_logN₀(state.ρn_ice, μ, logλ)
+function logN′ice(state::P3State, shape::P3Shape)
+    μ = shape.μ
+    log_N₀ = get_logN₀(state.ρn_ice, μ, shape.logλ)
     # Promote to a common type: differentiating w.r.t. the ice number makes
-    # `log_N₀` a `Dual` while `μ` (a function of the fixed `logλ`) stays a plain
-    # float, and `P3LogNumberFunctor` stores both in a single field type.
-    λ = exp(logλ)
+    # `log_N₀` a `Dual` while `μ` (frozen on the shape) stays a plain float, and
+    # `P3LogNumberFunctor` stores both in a single field type.
+    λ = exp(shape.logλ)
     return P3LogNumberFunctor(promote(log_N₀, μ, λ)...)
 end
 
@@ -38,15 +61,15 @@ end
 @inline (f::P3SizeDistributionFunctor)(D) = exp(f.logN′(D))
 
 """
-    size_distribution(state::P3State, logλ)
+    size_distribution(state::P3State, shape)
 
 Return `n(D)`, a function that computes the size distribution for ice particles at diameter `D`
 
 # Arguments
 - `state`: The [`P3State`](@ref)
-- `logλ`: The log of the slope parameter [log(1/m)]
+- `shape`: The diagnosed [`P3Shape`](@ref)
 """
-DT.size_distribution(state::P3State, logλ) = P3SizeDistributionFunctor(logN′ice(state, logλ))
+DT.size_distribution(state::P3State, shape::P3Shape) = P3SizeDistributionFunctor(logN′ice(state, shape))
 
 ### ------------------------------------------------ ###
 ### ----- Obtaining P3 distribution parameters ----- ###
@@ -190,7 +213,7 @@ Compute the slope parameter μ
 """
 get_μ((; a, b, c, μ_max)::CMP.SlopePowerLaw, logλ) = clamp(a * exp(logλ)^b - c, 0, μ_max)
 get_μ((; μ)::CMP.SlopeConstant, logλ...) = μ
-get_μ((; params)::P3State, logλ) = get_μ(params.slope, logλ)
+get_μ((; params)::P3State, logλ) = get_μ(params.moments.slope, logλ)
 
 """
     logmass_gamma_moment(state, logλ; [n=0])
@@ -221,8 +244,11 @@ end
 
 """
     logLdivN(state, logλ)
+    logLdivN(state, shape::P3Shape)
 
-Compute `log(L/N)` given the `state` and `logλ`
+Compute `log(L/N)` given the `state` and either a bare `logλ` (with μ evaluated
+from the slope law, used inside the shape solve) or a diagnosed [`P3Shape`](@ref)
+(reading `shape.μ`, used by external callers).
 
 # Arguments
 - `state`: [`P3State`](@ref) object
@@ -232,6 +258,11 @@ function logLdivN(state::P3State, logλ)
     μ = get_μ(state, logλ)
     logLdivN₀ = logmass_gamma_moment(state, μ, logλ; n = 0)
     logNdivN₀ = loggamma_moment(μ, logλ; k = 0)
+    return logLdivN₀ - logNdivN₀
+end
+function logLdivN(state::P3State, shape::P3Shape)
+    logLdivN₀ = logmass_gamma_moment(state, shape.μ, shape.logλ; n = 0)
+    logNdivN₀ = loggamma_moment(shape.μ, shape.logλ; k = 0)
     return logLdivN₀ - logNdivN₀
 end
 
@@ -343,6 +374,18 @@ function get_distribution_logλ(state, logλ_guess = nothing, logλ_min = 2, log
     )
     return clamp(sol.root, lo, hi)  # logλ, within the search bounds
 end
+
+"""
+    get_distribution_shape(state::P3State, logλ)
+    get_distribution_shape(state::P3State)
+
+Return the [`P3Shape`](@ref) for `state`. The two-argument form builds the shape
+from a given (host-frozen or solved) `logλ`; the one-argument form solves for
+`logλ` via [`get_distribution_logλ`](@ref) first. Under the two-moment closure,
+μ comes from the slope law and `logλ_core` equals `logλ`.
+"""
+get_distribution_shape(state::P3State, logλ) = P3Shape(; logλ, μ = get_μ(state, logλ))
+get_distribution_shape(state::P3State) = get_distribution_shape(state, get_distribution_logλ(state))
 
 """
     get_distribution_logλ_from_prognostic(params, ρq_ice, ρn_ice, ρq_rim, ρb_rim)

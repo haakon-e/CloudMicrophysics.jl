@@ -1,4 +1,3 @@
-# TODO: Implement `F_liq` as another P3State-like struct
 """
     P3State{FT}
 
@@ -29,6 +28,10 @@ struct P3State{FT, PARAMS <: CMP.ParametersP3}
     F_rim::FT
     "Rime density"
     ρ_rim::FT
+    "Liquid mass fraction; zero when the liquid-fraction treatment is off"
+    F_liq::FT
+    "Volumetric sixth moment [m⁶/m³]; zero under two-moment ice"
+    ρz_ice::FT
 
     "Graupel density [kg/m³] — `NaN` when `F_rim = 0` (no graupel regime)"
     ρ_g::FT
@@ -58,7 +61,7 @@ function P3State(params::CMP.ParametersP3, ρq_ice, ρn_ice, F_rim, ρ_rim)
     D_cr = ifelse(iszero(F_rim), FT(Inf), get_D_cr(mass, F_rim, ρ_g))
     return P3State(
         params,
-        ρq_ice, ρn_ice, F_rim, ρ_rim,
+        ρq_ice, ρn_ice, F_rim, ρ_rim, zero(FT), zero(FT),
         FT(ρ_g), FT(D_th), FT(D_gr), FT(D_cr),
     )
 end
@@ -66,7 +69,7 @@ end
 Base.show(io::IO, mime::MIME"text/plain", x::P3State) =
     ShowMethods.verbose_show_type_and_fields(io, mime, x)
 ShowMethods.field_units(::P3State) = (;
-    ρq_ice = "kg/m³", ρn_ice = "1/m³", ρ_rim = "kg/m³",
+    ρq_ice = "kg/m³", ρn_ice = "1/m³", ρ_rim = "kg/m³", ρz_ice = "m⁶/m³",
     ρ_g = "kg/m³", D_th = "m", D_gr = "m", D_cr = "m",
 )
 

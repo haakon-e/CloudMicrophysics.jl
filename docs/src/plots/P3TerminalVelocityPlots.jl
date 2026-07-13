@@ -35,10 +35,10 @@ function get_values(
             ρ_rim = ρ_rims[j]
             state = P3.P3State(params, L, N, F_rim, ρ_rim)
             state_noar = P3.P3State(params_noar, L, N, F_rim, ρ_rim)
-            logλ = P3.get_distribution_logλ(state)
-            V_m[i, j] = P3.ice_terminal_velocity_mass_weighted(Chen2022, ρ_a, state_noar, logλ; quad)
-            V_m_ϕ[i, j] = P3.ice_terminal_velocity_mass_weighted(Chen2022, ρ_a, state, logλ; quad)
-            D_m[i, j] = P3.D_m(state, logλ)
+            shape = P3.get_distribution_shape(state)
+            V_m[i, j] = P3.ice_terminal_velocity_mass_weighted(Chen2022, ρ_a, state_noar, shape; quad)
+            V_m_ϕ[i, j] = P3.ice_terminal_velocity_mass_weighted(Chen2022, ρ_a, state, shape; quad)
+            D_m[i, j] = P3.D_m(state, shape)
             D_m_regimes[i, j] = D_m[i, j]
             ϕᵢ[i, j] = P3.ϕᵢ(state, D_m[i, j])
 

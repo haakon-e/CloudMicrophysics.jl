@@ -172,6 +172,7 @@ function benchmark_test(FT)
     @info "P3 Scheme"
     state = P3.P3State(params_P3, L_ice, N_ice, F_rim, ρ_rim)
     logλ = P3.get_distribution_logλ(state)
+    shape = P3.get_distribution_shape(state, logλ)
     bench_press(
         P3.P3State,
         P3.P3State,
@@ -182,14 +183,14 @@ function benchmark_test(FT)
     _glq = P3.GaussLegendre(FT, 12)
     bench_press(
         FT, (a, b, c, d) -> P3.ice_terminal_velocity_number_weighted(a, b, c, d; quad = _glq),
-        (ch2022, ρ_air, state, logλ), 170_000,
+        (ch2022, ρ_air, state, shape), 170_000,
     )
     bench_press(
         FT, (a, b, c, d) -> P3.ice_terminal_velocity_mass_weighted(a, b, c, d; quad = _glq),
-        (ch2022, ρ_air, state, logλ), 200_000,
+        (ch2022, ρ_air, state, shape), 200_000,
     )
     bench_press(FT, P3.integrate, (x -> x^4, FT(0), FT(1), P3.GaussLegendre(FT, 6)), 7_000)
-    bench_press(FT, P3.D_m, (state, logλ), 20_000)
+    bench_press(FT, P3.D_m, (state, shape), 20_000)
 
     @info "P3 Ice Nucleation"
     bench_press(
@@ -200,8 +201,8 @@ function benchmark_test(FT)
     )
     bench_press(
         @NamedTuple{dNdt::FT, dLdt::FT},
-        (vp, ap, tp, T, ρ, st, lλ) -> P3.ice_melt(vp, ap, tp, T, ρ, st, lλ; quad = _glq),
-        (ch2022, aps, tps, T_air, ρ_air, state, logλ),
+        (vp, ap, tp, T, ρ, st, sh) -> P3.ice_melt(vp, ap, tp, T, ρ, st, sh; quad = _glq),
+        (ch2022, aps, tps, T_air, ρ_air, state, shape),
         150_000,
     )
     bench_press(FT, CMI_het.P3_deposition_N_i, (ip.p3, T_air_cold), 230)
@@ -323,10 +324,10 @@ function benchmark_test(FT)
 
         @info "P3 Collisions"
         bench_press(@NamedTuple{∂ₜq_c::FT, ∂ₜq_r::FT, ∂ₜN_c::FT, ∂ₜN_r::FT, ∂ₜL_rim::FT, ∂ₜL_ice::FT, ∂ₜB_rim::FT},
-            (st, lλ, pc, pr, Lc, Nc, Lr, Nr, ap, tp, vp, ρ, T) ->
-                P3.bulk_liquid_ice_collision_sources(st, lλ, pc, pr, Lc, Nc, Lr, Nr, ap, tp, vp, ρ, T; quad = _glq),
+            (st, sh, pc, pr, Lc, Nc, Lr, Nr, ap, tp, vp, ρ, T) ->
+                P3.bulk_liquid_ice_collision_sources(st, sh, pc, pr, Lc, Nc, Lr, Nr, ap, tp, vp, ρ, T; quad = _glq),
             (
-                state, logλ,
+                state, shape,
                 sb.pdf_c, sb.pdf_r, ρ_air * q_liq, N_liq, ρ_air * q_rai, N_rai,
                 aps, tps, ch2022,
                 ρ_air, T_air,

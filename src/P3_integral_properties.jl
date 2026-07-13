@@ -8,7 +8,7 @@
 # throughout the P3 scheme is unchanged.
 
 """
-    integral_bounds(state::P3State, logλ; p, moment_order = 0)
+    integral_bounds(state::P3State, shape; p, moment_order = 0)
 
 Compute the integration bounds for the P3 size distribution,
 
@@ -21,7 +21,7 @@ Compute the integration bounds for the P3 size distribution,
 
 # Arguments
 - `state`: [`P3State`](@ref) object
-- `logλ`: The log of the slope parameter [log(1/m)]
+- `shape`: The diagnosed [`P3Shape`](@ref)
 - `p`: The integration bounds are set to the `p`-th and `1-p`-th quantiles of the size distribution.
 - `moment_order`: For integrands proportional to moments of the size distribution,
     `moment_order` can be used to indicate the order of the moment.
@@ -31,10 +31,10 @@ Compute the integration bounds for the P3 size distribution,
 # Returns
 - `bnds`: The integration bounds (a `Tuple`), for use in numerical integration (c.f. [`integrate`](@ref)).
 """
-@inline function integral_bounds(state::P3State{FT}, logλ; p, moment_order = 0) where {FT}
+@inline function integral_bounds(state::P3State{FT}, shape::P3Shape; p, moment_order = 0) where {FT}
     # Get reduced lower and upper bounds from quantiles
-    k = get_μ(state, logλ) + moment_order
-    λ = exp(logλ)
+    k = shape.μ + moment_order
+    λ = exp(shape.logλ)
     # μ == 1 here, so use the unit-μ quantile (avoids a `(z/λ)^1` runtime pow per bound)
     D_min = DT.generalized_gamma_quantile_unit_μ(k, λ, FT(p))
     D_max = DT.generalized_gamma_quantile_unit_μ(k, λ, FT(1 - p))
@@ -49,7 +49,7 @@ Compute the integration bounds for the P3 size distribution,
 end
 
 """
-    velocity_integral_bounds(state::P3State, logλ, v_term; p, moment_order = 0)
+    velocity_integral_bounds(state::P3State, shape, v_term; p, moment_order = 0)
 
 Compute the integration bounds for a velocity-weighted P3 integral: the
 mass-regime [`integral_bounds`](@ref) with the [`velocity_breakpoints`](@ref)
@@ -57,24 +57,24 @@ of the terminal-velocity closure `v_term` clamped into `[D_min, D_max]` and
 re-sorted, so each breakpoint coincides with a subinterval boundary. Returns a
 fixed-length tuple.
 """
-function velocity_integral_bounds(state::P3State{FT}, logλ, v_term::V; p, moment_order = 0) where {FT, V}
-    bnds = integral_bounds(state, logλ; p, moment_order)
+function velocity_integral_bounds(state::P3State{FT}, shape::P3Shape, v_term::V; p, moment_order = 0) where {FT, V}
+    bnds = integral_bounds(state, shape; p, moment_order)
     breaks = map(D -> clamp(FT(D), first(bnds), last(bnds)), velocity_breakpoints(v_term))
     return Tuple(SA.sort(SA.SVector(bnds..., breaks...)))
 end
 
 """
-    D_m(state::P3State, logλ)
+    D_m(state::P3State, shape)
 
 Compute the mass weighted mean particle size [m]
 
 # Parameters
  - `state`: [`P3State`](@ref) object
- - `logλ`: The log of the slope parameter [log(1/m)]
+ - `shape`: The diagnosed [`P3Shape`](@ref)
 """
-function D_m(state, logλ)
-    μ = get_μ(state, logλ)
-    mass_weighted_moment = logmass_gamma_moment(state, μ, logλ; n = 1)
-    log_N₀ = get_logN₀(state.ρn_ice, μ, logλ)
+function D_m(state, shape::P3Shape)
+    μ = shape.μ
+    mass_weighted_moment = logmass_gamma_moment(state, μ, shape.logλ; n = 1)
+    log_N₀ = get_logN₀(state.ρn_ice, μ, shape.logλ)
     return exp(log_N₀ + mass_weighted_moment) / state.ρq_ice
 end

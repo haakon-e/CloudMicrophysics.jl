@@ -273,16 +273,17 @@ function evaluate_quadrature_levels(mp, tps, s)
     )
     out[:bulk] = collect(FT, values(t))
     if has_ice
+        shape = P3.get_distribution_shape(state, logλ)
         coll = P3.bulk_liquid_ice_collision_sources(
-            state, logλ, cloud_pdf, rain_pdf, ρ * q_lcl, n_lcl, ρ * q_rai, n_rai,
+            state, shape, cloud_pdf, rain_pdf, ρ * q_lcl, n_lcl, ρ * q_rai, n_rai,
             aps, tps, terminal_velocity, ρ, T; quad,
         )
         out[:collision] = collect(FT, values(coll))
-        sc = P3.ice_self_collection(state, logλ, terminal_velocity, ρ; quad)
+        sc = P3.ice_self_collection(state, shape, terminal_velocity, ρ; quad)
         out[:selfcol] = [sc.dNdt]
-        out[:vN] = [P3.ice_terminal_velocity_number_weighted(terminal_velocity, ρ, state, logλ; quad)]
-        out[:vM] = [P3.ice_terminal_velocity_mass_weighted(terminal_velocity, ρ, state, logλ; quad)]
-        melt = P3.ice_melt(terminal_velocity, aps, tps, T, ρ, state, logλ; quad)
+        out[:vN] = [P3.ice_terminal_velocity_number_weighted(terminal_velocity, ρ, state, shape; quad)]
+        out[:vM] = [P3.ice_terminal_velocity_mass_weighted(terminal_velocity, ρ, state, shape; quad)]
+        melt = P3.ice_melt(terminal_velocity, aps, tps, T, ρ, state, shape; quad)
         out[:melt] = collect(FT, values(melt))
     end
     return out

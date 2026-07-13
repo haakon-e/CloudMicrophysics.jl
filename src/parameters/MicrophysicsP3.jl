@@ -1,5 +1,7 @@
 export ParametersP3
 export MassPowerLaw, AreaPowerLaw, SlopePowerLaw, SlopeConstant, VentilationFactor
+export MomentClosure, TwoMoment, ThreeMoment
+export LiquidFractionTreatment, NoLiquidFraction, PredictedLiquidFraction
 
 ### ----------------------------- ###
 ### --- SUB-PARAMETERIZATIONS --- ###
@@ -250,6 +252,89 @@ abstract type AspectRatio end
 struct Oblate <: AspectRatio end
 struct NoAspectRatio <: AspectRatio end
 
+"""
+    MomentClosure
+
+Moment-closure treatment for the ice size distribution. Concrete subtypes are
+[`TwoMoment`](@ref) and [`ThreeMoment`](@ref).
+"""
+abstract type MomentClosure end
+
+"""
+    TwoMoment{SL <: SlopeLaw}
+
+Two-moment ice: the shape parameter μ is closed by a [`SlopeLaw`](@ref) fit μ(λ).
+
+# Fields
+$(DocStringExtensions.FIELDS)
+"""
+struct TwoMoment{SL <: SlopeLaw} <: MomentClosure
+    "Slope relation, e.g. [`SlopePowerLaw`](@ref) or [`SlopeConstant`](@ref)"
+    slope::SL
+end
+
+"""
+    ThreeMoment{FT}
+
+Three-moment ice: the shape parameter μ is diagnosed from the number, mass, and
+sixth-moment (Z) content.
+
+# Fields
+$(DocStringExtensions.FIELDS)
+"""
+@kwdef struct ThreeMoment{FT} <: MomentClosure
+    "Upper bound on the diagnosed shape parameter μ [`-`]"
+    μ_max::FT
+    "Shape parameter μ of freshly nucleated or multiplied ice [`-`]"
+    μ_init::FT
+end
+function ThreeMoment(toml_dict::CP.ParamDict)
+    name_map = (;
+        :P3_ice_shape_parameter_max => :μ_max,
+        :P3_ice_shape_parameter_initial => :μ_init,
+    )
+    params = CP.get_parameter_values(toml_dict, name_map, "CloudMicrophysics")
+    return ThreeMoment{CP.float_type(toml_dict)}(; params...)
+end
+
+"""
+    LiquidFractionTreatment
+
+Predicted-liquid-fraction treatment for ice. Concrete subtypes are
+[`NoLiquidFraction`](@ref) and [`PredictedLiquidFraction`](@ref).
+"""
+abstract type LiquidFractionTreatment end
+
+"""
+    NoLiquidFraction
+
+Dry-ice P3: no predicted liquid fraction.
+"""
+struct NoLiquidFraction <: LiquidFractionTreatment end
+
+"""
+    PredictedLiquidFraction{FT}
+
+Predicted bulk liquid mass carried on ice.
+
+# Fields
+$(DocStringExtensions.FIELDS)
+"""
+@kwdef struct PredictedLiquidFraction{FT} <: LiquidFractionTreatment
+    "Liquid fraction below which the vapor path uses the ice-core branch [`-`]"
+    F_dry::FT
+    "Liquid fraction above which the particle is dumped to rain [`-`]"
+    F_melt::FT
+end
+function PredictedLiquidFraction(toml_dict::CP.ParamDict)
+    name_map = (;
+        :P3_liquid_fraction_dry_threshold => :F_dry,
+        :P3_liquid_fraction_complete_melt_threshold => :F_melt,
+    )
+    params = CP.get_parameter_values(toml_dict, name_map, "CloudMicrophysics")
+    return PredictedLiquidFraction{CP.float_type(toml_dict)}(; params...)
+end
+
 ### ----------------------------- ###
 ### --- TOP-LEVEL CONSTRUCTOR --- ###
 ### ----------------------------- ###
@@ -264,13 +349,16 @@ From Morrison and Milbrandt (2015) [MorrisonMilbrandt2015](@cite)
 # Fields
 $(DocStringExtensions.FIELDS)
 """
-@kwdef struct ParametersP3{FT, SLOPELAW <: SlopeLaw, AR <: AspectRatio} <: ParametersType
+@kwdef struct ParametersP3{FT, MOM <: MomentClosure, LIQ <: LiquidFractionTreatment, AR <: AspectRatio} <:
+              ParametersType
     "Mass-size relation, e.g. [`MassPowerLaw`](@ref)"
     mass::MassPowerLaw{FT}
     "Area-size relation, e.g. [`AreaPowerLaw`](@ref)"
     area::AreaPowerLaw{FT}
-    "Slope relation, e.g. [`SlopePowerLaw`](@ref) or [`SlopeConstant`](@ref)"
-    slope::SLOPELAW
+    "Moment-closure treatment, a [`MomentClosure`](@ref)"
+    moments::MOM
+    "Predicted-liquid-fraction treatment, a [`LiquidFractionTreatment`](@ref)"
+    liquid::LIQ
     "Ventilation relation, e.g. [`VentilationFactor`](@ref)"
     vent::VentilationFactor{FT}
     "Local rime density, e.g. [`LocalRimeDensity`](@ref)"
@@ -290,18 +378,28 @@ $(DocStringExtensions.FIELDS)
 end
 
 """
-    ParametersP3(toml_dict::CP.ParamDict; [slope_law = :powerlaw], [aspect_ratio = Oblate()])
+    ParametersP3(toml_dict::CP.ParamDict; [slope_law = :powerlaw], [moments = :two_moment], [liquid = :none], [aspect_ratio = Oblate()])
 
 Create a `ParametersP3` object from a `ClimaParams` TOML dictionary.
 
 # Arguments
 - `toml_dict::CP.ParamDict`: A `ClimaParams` TOML dictionary
-- `slope_law`: Slope law to use (`:constant` or, by default, `:powerlaw`)
+- `slope_law`: Slope law nested inside a `:two_moment` closure (`:constant` or, by default, `:powerlaw`)
+- `moments`: Moment closure (`:two_moment` by default, or `:three_moment`)
+- `liquid`: Liquid-fraction treatment (`:none` by default, or `:predicted`)
 - `aspect_ratio`: an [`AspectRatio`](@ref); by default, `Oblate()`
 
 """
-function ParametersP3(toml_dict::CP.ParamDict; slope_law = :powerlaw, aspect_ratio = Oblate())
+function ParametersP3(
+    toml_dict::CP.ParamDict;
+    slope_law = :powerlaw, moments = :two_moment, liquid = :none, aspect_ratio = Oblate(),
+)
     @assert slope_law in (:constant, :powerlaw)
+    @assert moments in (:two_moment, :three_moment)
+    @assert liquid in (:none, :predicted)
+    slope = slope_law == :powerlaw ? SlopePowerLaw(toml_dict) : SlopeConstant(toml_dict)
+    mom = moments == :two_moment ? TwoMoment(slope) : ThreeMoment(toml_dict)
+    liq = liquid == :none ? NoLiquidFraction() : PredictedLiquidFraction(toml_dict)
     params = CP.get_parameter_values(toml_dict,
         (;
             :density_ice_water => :ρ_i,  # TODO: Use `WaterProperties` struct for ice and liquid water density
@@ -313,7 +411,8 @@ function ParametersP3(toml_dict::CP.ParamDict; slope_law = :powerlaw, aspect_rat
     return ParametersP3(;
         mass = MassPowerLaw(toml_dict),
         area = AreaPowerLaw(toml_dict),
-        slope = slope_law == :powerlaw ? SlopePowerLaw(toml_dict) : SlopeConstant(toml_dict),
+        moments = mom,
+        liquid = liq,
         vent = VentilationFactor(toml_dict),
         ρ_rim_local = LocalRimeDensity(toml_dict),
         aspect_ratio,

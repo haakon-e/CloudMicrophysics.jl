@@ -981,6 +981,8 @@ to be non-Nothing, eliminating runtime type checks and dynamic dispatch.
     L_rim = q_rim * ρ  # [kg rim / m³ air]
     B_rim = b_rim * ρ  # [m³ rim / m³ air]
     state = CMP3.state_from_prognostic(mp.ice.scheme, L_ice, N_ice, L_rim, B_rim)
+    # Diagnosed shape frozen from the host-provided logλ; passed to every P3 process.
+    shape = CMP3.get_distribution_shape(state, logλ)
 
     # Unpack warm rain parameters
     aps = mp.warm_rain.air_properties
@@ -1014,7 +1016,7 @@ to be non-Nothing, eliminating runtime type checks and dynamic dispatch.
 
         # --- Liquid-ice collisions
         coll = CMP3.bulk_liquid_ice_collision_sources(
-            state, logλ, pdf_c, pdf_r, L_lcl, N_lcl, L_rai, N_rai, aps, tps, vel, ρ, T;
+            state, shape, pdf_c, pdf_r, L_lcl, N_lcl, L_rai, N_rai, aps, tps, vel, ρ, T;
             quad,
         )
         dq_lcl_dt += coll.∂ₜq_c
@@ -1026,13 +1028,13 @@ to be non-Nothing, eliminating runtime type checks and dynamic dispatch.
         db_rim_dt += coll.∂ₜB_rim / ρ
 
         # --- Ice self-collection (aggregation)
-        S_ice_agg = CMP3.ice_self_collection(state, logλ, vel, ρ; quad)
+        S_ice_agg = CMP3.ice_self_collection(state, shape, vel, ρ; quad)
         dn_ice_dt -= S_ice_agg.dNdt / ρ
 
         # Ice melting (above freezing temperature)
         T_freeze = TDI.TD.Parameters.T_freeze(tps)
         melt = ifelse(T > T_freeze,
-            CMP3.ice_melt(vel, aps, tps, T, ρ, state, logλ; quad),
+            CMP3.ice_melt(vel, aps, tps, T, ρ, state, shape; quad),
             (; dNdt = zero(ρ), dLdt = zero(ρ)),
         )
         # Specific (per-kg-air) ice-mass melt rate.

@@ -1,6 +1,7 @@
 using Test: @testset, @test, @test_throws, @test_broken, @inferred
 import CloudMicrophysics.P3Scheme as P3
 import CloudMicrophysics.Parameters as CMP
+import CloudMicrophysics.BulkMicrophysicsTendencies as BMT
 import CloudMicrophysics.Microphysics2M as CM2
 import CloudMicrophysics.Common as CO
 import CloudMicrophysics.DistributionTools as DT
@@ -277,7 +278,7 @@ function test_shape_solver(FT)
                             state = P3.P3State(params, FT(0), FT(0), F_rim, ρ_rim) # L_ice, N_ice not used in this test
                             # Compute the shape parameters that correspond to the input test values
                             logλ_ex = log(λ_ex)
-                            μ = P3.get_μ(params.slope, logλ_ex)
+                            μ = P3.get_μ(params.moments.slope, logλ_ex)
                             logN₀_ex = P3.get_logN₀(N_ice, μ, logλ_ex)
                             # Compute mass density based on input shape parameters
                             L_calc = exp(log(N_ice) + P3.logLdivN(state, logλ_ex))
@@ -424,17 +425,17 @@ function test_bulk_terminal_velocities(FT)
         # Zero mass with nonzero number: the mean velocity is the finite
         # smallest-particle limit (C0-continuous across onset).
         state₀ = P3.P3State(params, FT(0), N_ice, FT(0.5), ρ_rim)
-        logλ = P3.get_distribution_logλ(state₀)
-        vel_n₀ = P3.ice_terminal_velocity_number_weighted(Chen2022, ρ_a, state₀, logλ; quad = P3.GaussLegendre(FT, 12))
-        vel_m₀ = P3.ice_terminal_velocity_mass_weighted(Chen2022, ρ_a, state₀, logλ; quad = P3.GaussLegendre(FT, 12))
+        shape = P3.get_distribution_shape(state₀)
+        vel_n₀ = P3.ice_terminal_velocity_number_weighted(Chen2022, ρ_a, state₀, shape; quad = P3.GaussLegendre(FT, 12))
+        vel_m₀ = P3.ice_terminal_velocity_mass_weighted(Chen2022, ρ_a, state₀, shape; quad = P3.GaussLegendre(FT, 12))
         @test isfinite(vel_n₀) && vel_n₀ >= 0
         @test isfinite(vel_m₀) && vel_m₀ >= 0
 
         # Zero number: no particles, so both mean velocities vanish.
         state₀ = P3.P3State(params, L_ice, FT(0), FT(0.5), ρ_rim)
-        logλ = P3.get_distribution_logλ(state₀)
-        vel_n₀ = P3.ice_terminal_velocity_number_weighted(Chen2022, ρ_a, state₀, logλ; quad = P3.GaussLegendre(FT, 12))
-        vel_m₀ = P3.ice_terminal_velocity_mass_weighted(Chen2022, ρ_a, state₀, logλ; quad = P3.GaussLegendre(FT, 12))
+        shape = P3.get_distribution_shape(state₀)
+        vel_n₀ = P3.ice_terminal_velocity_number_weighted(Chen2022, ρ_a, state₀, shape; quad = P3.GaussLegendre(FT, 12))
+        vel_m₀ = P3.ice_terminal_velocity_mass_weighted(Chen2022, ρ_a, state₀, shape; quad = P3.GaussLegendre(FT, 12))
         @test iszero(vel_n₀)
         @test iszero(vel_m₀)
 
@@ -453,12 +454,12 @@ function test_bulk_terminal_velocities(FT)
         for (k, F_rim) in enumerate(F_rims)
             state = P3.P3State(params, L_ice, N_ice, F_rim, ρ_rim)
             state_noar = P3.P3State(params_noar, L_ice, N_ice, F_rim, ρ_rim)
-            logλ = P3.get_distribution_logλ(state)
+            shape = P3.get_distribution_shape(state)
             quad = P3.GaussLegendre(FT, 12)
-            vel_n = P3.ice_terminal_velocity_number_weighted(Chen2022, ρ_a, state_noar, logλ; quad)
-            vel_m = P3.ice_terminal_velocity_mass_weighted(Chen2022, ρ_a, state_noar, logλ; quad)
-            vel_n_ϕ = P3.ice_terminal_velocity_number_weighted(Chen2022, ρ_a, state, logλ; quad)
-            vel_m_ϕ = P3.ice_terminal_velocity_mass_weighted(Chen2022, ρ_a, state, logλ; quad)
+            vel_n = P3.ice_terminal_velocity_number_weighted(Chen2022, ρ_a, state_noar, shape; quad)
+            vel_m = P3.ice_terminal_velocity_mass_weighted(Chen2022, ρ_a, state_noar, shape; quad)
+            vel_n_ϕ = P3.ice_terminal_velocity_number_weighted(Chen2022, ρ_a, state, shape; quad)
+            vel_m_ϕ = P3.ice_terminal_velocity_mass_weighted(Chen2022, ρ_a, state, shape; quad)
 
             # number weighted
             @test vel_n > 0
@@ -514,8 +515,8 @@ function test_bulk_terminal_velocities(FT)
         ref_vals = [0.005397144197921535, 0.0033368960364578005]
         for (F_rim, ref_val) in zip(F_rims, ref_vals)
             state = P3.P3State(params, L_ice, N_ice, F_rim, ρ_rim)
-            logλ = P3.get_distribution_logλ(state)
-            Dₘ = P3.D_m(state, logλ)
+            shape = P3.get_distribution_shape(state)
+            Dₘ = P3.D_m(state, shape)
             @test Dₘ > 0
             @test Dₘ ≈ ref_val
         end
@@ -578,11 +579,11 @@ function test_numerical_integrals(FT)
 
             # Get shape parameters, thresholds and intergal bounds
             state = P3.P3State(params, L_ice, N_ice, F_rim, ρ_rim)
-            logλ = P3.get_distribution_logλ(state)
+            shape = P3.get_distribution_shape(state)
 
             # Number concentration comparison
-            N′ = P3.size_distribution(state, logλ)
-            bnds = P3.integral_bounds(state, logλ; p = 1e-6, moment_order = 0)
+            N′ = P3.size_distribution(state, shape)
+            bnds = P3.integral_bounds(state, shape; p = 1e-6, moment_order = 0)
             N_estim_gl = P3.integrate(N′, bnds, P3.GaussLegendre(FT, 32))
             N_tol = FT == Float32 ? 2e-5 : 1e-5  # native-FT gamma_inc slightly less precise than Float64-backed SF
             @test N_ice ≈ N_estim_gl rtol = N_tol
@@ -594,11 +595,11 @@ function test_numerical_integrals(FT)
 
             # Bulk velocity comparison
             vel_N = P3.ice_terminal_velocity_number_weighted(
-                Chen2022, ρ_a, state, logλ;
+                Chen2022, ρ_a, state, shape;
                 p, quad = P3.GaussLegendre(FT, 12),
             )
             vel_m = P3.ice_terminal_velocity_mass_weighted(
-                Chen2022, ρ_a, state, logλ;
+                Chen2022, ρ_a, state, shape;
                 p, quad = P3.GaussLegendre(FT, 12),
             )
 
@@ -619,7 +620,7 @@ function test_numerical_integrals(FT)
 
 
             # Dₘ comparisons
-            D_m = P3.D_m(state, logλ)
+            D_m = P3.D_m(state, shape)
             D_m_func(D) = D * P3.ice_mass(state, D) * N′(D) / L_ice
             D_m_estim_gl = P3.integrate(D_m_func, bnds, P3.GaussLegendre(FT, 32))
             @test D_m ≈ D_m_estim_gl rtol = 5e-4
@@ -691,17 +692,17 @@ function test_p3_melting(FT)
         ρ_rim = FT(800)
 
         state = P3.P3State(params, Lᵢ, Nᵢ, F_rim, ρ_rim)
-        logλ = P3.get_distribution_logλ(state)
+        shape = P3.get_distribution_shape(state)
 
         T_cold = FT(273.15 - 0.01)
 
-        rate = P3.ice_melt(vel, aps, tps, T_cold, ρₐ, state, logλ; quad = P3.GaussLegendre(FT, 12))
+        rate = P3.ice_melt(vel, aps, tps, T_cold, ρₐ, state, shape; quad = P3.GaussLegendre(FT, 12))
 
         @test rate.dNdt == 0
         @test rate.dLdt == 0
 
         T_warm = FT(273.15 + 0.01)
-        rate = P3.ice_melt(vel, aps, tps, T_warm, ρₐ, state, logλ; quad = P3.GaussLegendre(FT, 12))
+        rate = P3.ice_melt(vel, aps, tps, T_warm, ρₐ, state, shape; quad = P3.GaussLegendre(FT, 12))
 
         @test rate.dNdt >= 0
         @test rate.dLdt >= 0
@@ -720,7 +721,7 @@ function test_p3_melting(FT)
         @test rate.dLdt ≈ ref_dLdt
 
         T_vwarm = FT(273.15 + 0.1)
-        rate = P3.ice_melt(vel, aps, tps, T_vwarm, ρₐ, state, logλ; quad = P3.GaussLegendre(FT, 12))
+        rate = P3.ice_melt(vel, aps, tps, T_vwarm, ρₐ, state, shape; quad = P3.GaussLegendre(FT, 12))
         if FT == Float64
             ref_vwarm_dNdt = FT(1.7198680382990765e6)
             ref_vwarm_dLdt = FT(8.599340191495382e-4)
@@ -902,7 +903,7 @@ function test_p3_bulk_liquid_ice_collisions(FT)
     @testset "Bulk liquid-ice collisions" begin
         # Test the high-level interface with real P3 parameters
         state = P3.P3State(params, Lᵢ, Nᵢ, F_rim, ρ_rim)
-        logλ = P3.get_distribution_logλ(state)
+        shape = P3.get_distribution_shape(state)
 
         # Create mock particle size distributions
         toml_dict = CP.create_toml_dict(FT)
@@ -922,7 +923,7 @@ function test_p3_bulk_liquid_ice_collisions(FT)
 
         # Test the high-level interface
         rates = P3.∫liquid_ice_collisions(
-            state, logλ, psd_c, psd_r, L_c, N_c, L_r, N_r,
+            state, shape, psd_c, psd_r, L_c, N_c, L_r, N_r,
             aps, tps, vel_params, ρₐ, T, m_l;
             quad = P3.GaussLegendre(FT, 12),
         )
@@ -952,7 +953,7 @@ function test_p3_bulk_liquid_ice_collisions(FT)
         ### Test the bulk source function
         state = P3.P3State(params, Lᵢ, Nᵢ, F_rim, ρ_rim)
         rates = P3.bulk_liquid_ice_collision_sources(
-            state, logλ,
+            state, shape,
             psd_c, psd_r, L_c, N_c, L_r, N_r,
             aps, tps, vel_params, ρₐ, T;
             quad = P3.GaussLegendre(FT, 12),
@@ -973,11 +974,11 @@ function test_p3_ice_self_collection(FT)
     ρ_rim = FT(800)
 
     state = P3.P3State(params, Lᵢ, Nᵢ, F_rim, ρ_rim)
-    logλ = P3.get_distribution_logλ(state)
+    shape = P3.get_distribution_shape(state)
 
     @testset "ice self-collection rate" begin
         # Call the new ice self-collection parameterization
-        rates = P3.ice_self_collection(state, logλ, vel_params, ρₐ; quad = P3.GaussLegendre(FT, 12))
+        rates = P3.ice_self_collection(state, shape, vel_params, ρₐ; quad = P3.GaussLegendre(FT, 12))
         @test eltype(rates) == FT  # check type stability
 
         # Self-collection should represent a positive loss rate
@@ -985,18 +986,18 @@ function test_p3_ice_self_collection(FT)
 
         # Test edge case with virtually zero L_ice and N_ice
         state_zero = P3.P3State(params, FT(0), FT(0), F_rim, ρ_rim)
-        logλ_zero = P3.get_distribution_logλ(state_zero)
+        shape_zero = P3.get_distribution_shape(state_zero)
         rates_zero =
-            P3.ice_self_collection(state_zero, logλ_zero, vel_params, ρₐ; quad = P3.GaussLegendre(FT, 12))
+            P3.ice_self_collection(state_zero, shape_zero, vel_params, ρₐ; quad = P3.GaussLegendre(FT, 12))
         @test rates_zero.dNdt == 0
 
         # Cross-check the triangular domain against the full-square double
         # integral, where the ½ factor counts each unordered pair once
         quad32 = P3.GaussLegendre(FT, 32)
-        rates32 = P3.ice_self_collection(state, logλ, vel_params, ρₐ; quad = quad32)
-        n_i = DT.size_distribution(state, logλ)
+        rates32 = P3.ice_self_collection(state, shape, vel_params, ρₐ; quad = quad32)
+        n_i = DT.size_distribution(state, shape)
         v_i = P3.ice_particle_terminal_velocity(vel_params, ρₐ, state)
-        bnds = P3.velocity_integral_bounds(state, logλ, v_i; p = eps(one(ρₐ)))
+        bnds = P3.velocity_integral_bounds(state, shape, v_i; p = eps(one(ρₐ)))
         square = P3.integrate(
             D₁ -> begin
                 v₁ = v_i(D₁)
@@ -1192,7 +1193,118 @@ function test_p3_closed_form_rain_inner(FT)
     end
 end
 
+function test_p3_configuration_surface(FT)
+    @testset "Configuration surface (moment closure × liquid fraction)" begin
+        for mom in (:two_moment, :three_moment), liq in (:none, :predicted)
+            p = CMP.ParametersP3(FT; moments = mom, liquid = liq)
+            @test isbits(p)
+            @test p isa CMP.ParametersP3{FT}
+            if mom == :two_moment
+                @test p.moments isa CMP.TwoMoment
+                @test p.moments.slope isa CMP.SlopePowerLaw
+            else
+                @test p.moments isa CMP.ThreeMoment{FT}
+                @test p.moments.μ_max == FT(20)
+                @test p.moments.μ_init == FT(10)
+            end
+            if liq == :none
+                @test p.liquid isa CMP.NoLiquidFraction
+            else
+                @test p.liquid isa CMP.PredictedLiquidFraction{FT}
+                @test p.liquid.F_dry == FT(0.01)
+                @test p.liquid.F_melt == FT(0.99)
+            end
+        end
+        # slope law nests inside the two-moment closure
+        pc = CMP.ParametersP3(FT; slope_law = :constant)
+        @test pc.moments.slope isa CMP.SlopeConstant
+
+        # P3Shape is keyword-only; logλ_core defaults to logλ
+        sh = P3.P3Shape(; logλ = FT(11), μ = FT(2))
+        @test sh isa P3.P3Shape{FT}
+        @test isbits(sh)
+        @test sh.logλ_core == sh.logλ == FT(11)
+        @test_throws MethodError P3.P3Shape(FT(11), FT(2), FT(11))
+    end
+end
+
+# Bit-identity regression: a fixed sweep of seeded 2M+P3 prognostic states, with
+# `bulk_microphysics_tendencies` evaluated in the `Instantaneous` and
+# `rosenbrock_exact` modes. The golden fingerprints below were captured at the
+# foundation base commit; the foundation refactors must reproduce them exactly.
+# Transient guard for the P3 foundation commit series.
+function _p3_bit_identity_values(::Type{FT}; nstates = 50) where {FT}
+    tps = TDI.TD.Parameters.ThermodynamicsParameters(FT)
+    mp = CMP.Microphysics2MParams(FT; with_ice = true, is_limited = true)
+    T_frz = TDI.T_freeze(tps)
+    # deterministic 64-bit LCG (wrap arithmetic is version-independent)
+    s = Ref(UInt64(0x2545F4914F6CDD1D))
+    draw() = (s[] = 6364136223846793005 * s[] + 1442695040888963407; Float64(s[] >> 11) * (2.0^-53))
+    uni(lo, hi) = lo + (hi - lo) * draw()
+    vals = FT[]
+    Δt = FT(60)
+    for _ in 1:nstates
+        ρ = FT(uni(0.4, 1.3))
+        T = FT(T_frz + uni(-25, 20))
+        q_tot = FT(uni(1e-4, 2e-2))
+        q_lcl = FT(uni(0, 3e-3))
+        n_lcl = FT(uni(1e6, 1e9))
+        q_rai = FT(uni(0, 1e-3))
+        n_rai = FT(uni(1e2, 1e5))
+        empty_ice = draw() < 0.2
+        q_ice = empty_ice ? FT(0) : FT(uni(1e-6, 2e-3))
+        n_ice = empty_ice ? FT(0) : FT(uni(1e3, 1e6))
+        f_rim = FT(uni(0, 0.9))
+        q_rim = f_rim * q_ice
+        ρ_rim = FT(uni(100, 800))
+        b_rim = q_rim / ρ_rim
+        logλ = P3.get_distribution_logλ_from_prognostic(mp.ice.scheme, q_ice * ρ, n_ice * ρ, q_rim * ρ, b_rim * ρ)
+        inst = BMT.bulk_microphysics_tendencies(
+            BMT.Microphysics2Moment(), mp, tps, ρ, T, q_tot,
+            q_lcl, n_lcl, q_rai, n_rai, q_ice, n_ice, q_rim, b_rim, logλ,
+        )
+        for v in values(inst)
+            push!(vals, FT(v))
+        end
+        ros = BMT.bulk_microphysics_tendencies(
+            BMT.rosenbrock_exact(), BMT.Microphysics2Moment(), mp, tps, ρ, T, q_tot,
+            q_lcl, n_lcl, q_rai, n_rai, q_ice, n_ice, q_rim, b_rim, logλ, Δt, 4,
+        )
+        for v in values(ros)
+            push!(vals, FT(v))
+        end
+    end
+    return vals
+end
+
+# FNV-1a over the raw bit patterns.
+function _p3_bit_identity_hash(vals::Vector{FT}) where {FT}
+    h = 0xcbf29ce484222325
+    for v in vals
+        b = FT === Float64 ? reinterpret(UInt64, v) : UInt64(reinterpret(UInt32, v))
+        for k in 0:7
+            h = (h ⊻ ((b >> (8k)) % UInt8)) * 0x00000100000001b3
+        end
+    end
+    return h
+end
+
+# Captured at the foundation base commit dd26bc32.
+const _P3_BIT_IDENTITY_GOLDEN =
+    Dict{DataType, UInt64}(Float64 => 0x89c023ee67cce5b7, Float32 => 0x50df586fb4467f48)
+
+function test_p3_bit_identity(FT)
+    @testset "Bit-identity regression (default 2M+P3 config)" begin
+        vals = _p3_bit_identity_values(FT)
+        @test length(vals) == 900
+        @test _p3_bit_identity_hash(vals) == _P3_BIT_IDENTITY_GOLDEN[FT]
+    end
+end
+
 @testset "P3 tests ($FT)" for FT in (Float64, Float32)
+    # configuration surface and shape carriage
+    test_p3_configuration_surface(FT)
+
     # state creation
     test_p3_state_creation(FT)
     test_p3_nonphysical_state_bounds(FT)
@@ -1214,5 +1326,8 @@ end
     test_p3_bulk_liquid_ice_collisions(FT)
     test_p3_ice_self_collection(FT)
     test_p3_closed_form_rain_inner(FT)
+
+    # behavior-neutrality of the foundation refactors
+    test_p3_bit_identity(FT)
 end
 nothing

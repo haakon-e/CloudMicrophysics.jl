@@ -471,8 +471,8 @@ end
 )
     i = @index(Global, Linear)
     state = P3.P3State(p3_params, L_ice[i], N_ice[i], F_rim[i], ρ_rim[i])
-    logλ = P3.get_distribution_logλ(state)
-    output[i] = P3.ice_self_collection(state, logλ, vel_params, ρₐ[i]; quad)
+    shape = P3.get_distribution_shape(state)
+    output[i] = P3.ice_self_collection(state, shape, vel_params, ρₐ[i]; quad)
 end
 
 # Evaluates the fast incomplete-gamma approximations on the device. This is the

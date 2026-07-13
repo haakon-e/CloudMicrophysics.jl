@@ -45,7 +45,7 @@ function het_ice_nucleation(
 end
 
 """
-    ice_melt(velocity_params, aps, tps, Tₐ, ρₐ, state, logλ; ∫kwargs...)
+    ice_melt(velocity_params, aps, tps, Tₐ, ρₐ, state, shape; ∫kwargs...)
 
 # Arguments
  - `velocity_params`: [`CMP.Chen2022VelType`](@ref)
@@ -54,7 +54,7 @@ end
  - `Tₐ`: temperature (K)
  - `ρₐ`: air density
  - `state`: a [`P3State`](@ref) object
- - `logλ`: the log of the slope parameter [log(1/m)]
+ - `shape`: the diagnosed [`P3Shape`](@ref)
 
 # Keyword arguments
  - `quad`: quadrature rule (a `Quadrature.QuadratureRule`)
@@ -63,7 +63,7 @@ Returns the melting rate of ice (QIMLT in Morrison and Mildbrandt (2015)).
 """
 @inline function ice_melt(
     velocity_params, aps::CMP.AirProperties, tps::TDI.PS,
-    Tₐ, ρₐ, state::P3State, logλ;
+    Tₐ, ρₐ, state::P3State, shape::P3Shape;
     quad,
 )
     # Note: process not dependent on `F_liq`
@@ -77,12 +77,12 @@ Returns the melting rate of ice (QIMLT in Morrison and Mildbrandt (2015)).
 
     v_term = ice_particle_terminal_velocity(velocity_params, ρₐ, state)
     F_v = CO.ventilation_factor(vent, aps, v_term)
-    N′ = size_distribution(state, logλ)
+    N′ = size_distribution(state, shape)
 
     # Integrate; the ventilation factor carries the terminal-velocity regime
     # break, so the velocity cutoff is a subinterval boundary
     fac = 4 * K_therm / L_f * (Tₐ - T_freeze)
-    bnds = velocity_integral_bounds(state, logλ, v_term; p = 1e-6)
+    bnds = velocity_integral_bounds(state, shape, v_term; p = 1e-6)
     melt_integrand = D -> ∂ice_mass_∂D(state, D) * F_v(D) * N′(D) / D
     dLdt_unclamped = fac * integrate(melt_integrand, bnds, quad)
 
@@ -518,7 +518,7 @@ end
 
 """
     ∫liquid_ice_collisions(
-        state, logλ, psd_c, psd_r, L_c, N_c, L_r, N_r,
+        state, shape, psd_c, psd_r, L_c, N_c, L_r, N_r,
         aps, tps, vel, ρₐ, T, m_liq; [quad]
     )
 
@@ -526,7 +526,7 @@ Compute key liquid-ice collision rates and quantities. Used by [`bulk_liquid_ice
 
 # Arguments
 - `state`: [`P3State`](@ref)
-- `logλ`: the log of the slope parameter [log(1/m)]
+- `shape`: the diagnosed [`P3Shape`](@ref)
 - `psd_c`: [`CMP.CloudParticlePDF_SB2006`](@ref)
 - `psd_r`: [`CMP.RainParticlePDF_SB2006`](@ref)
 - `L_c`: cloud liquid water content [kg/m³]
@@ -557,7 +557,7 @@ A tuple `(QCFRZ, QCSHD, NCCOL, QRFRZ, QRSHD, NRCOL, ∫M_col, BCCOL, BRCOL, ∫�
 8. `∫𝟙_wet_M_col` - Wet growth indicator [kg/s]
 """
 @inline function ∫liquid_ice_collisions(
-    state, logλ,
+    state, shape::P3Shape,
     psd_c, psd_r, L_c, N_c, L_r, N_r,
     aps, tps, vel, ρₐ, T, m_liq; quad,
 )
@@ -566,7 +566,7 @@ A tuple `(QCFRZ, QCSHD, NCCOL, QRFRZ, QRSHD, NRCOL, ∫M_col, BCCOL, BRCOL, ∫�
     # Particle size distributions
     n_c = DT.size_distribution(psd_c, L_c / ρₐ, ρₐ, N_c)  # n_c(Dₗ)
     n_r = DT.size_distribution(psd_r, L_r / ρₐ, ρₐ, N_r)  # n_r(Dₗ)
-    n_i = DT.size_distribution(state, logλ)               # n_i(Dᵢ)
+    n_i = DT.size_distribution(state, shape)              # n_i(Dᵢ)
 
     # Integrand components; the collision rate carries the ice and liquid
     # terminal-velocity closures used below
@@ -577,7 +577,7 @@ A tuple `(QCFRZ, QCSHD, NCCOL, QRFRZ, QRSHD, NRCOL, ∫M_col, BCCOL, BRCOL, ∫�
     ∂ₜM_max = compute_max_freeze_rate(aps, tps, vel, ρₐ, T, state)  # ∂ₜM_max(Dᵢ)
 
     p = FT(0.00001)
-    ice_bounds = velocity_integral_bounds(state, logλ, ∂ₜV.v_i; p)
+    ice_bounds = velocity_integral_bounds(state, shape, ∂ₜV.v_i; p)
     bounds_c = CM2.get_size_distribution_bounds(psd_c, L_c / ρₐ, ρₐ, N_c, p)
     bounds_r = CM2.get_size_distribution_bounds(psd_r, L_r / ρₐ, ρₐ, N_r, p)
 
@@ -713,7 +713,7 @@ wet_growth_onset_diameter(
 
 """
     bulk_liquid_ice_collision_sources(
-        params, logλ, L_ice, F_rim, ρ_rim,
+        state, shape,
         psd_c, psd_r, L_c, N_c, L_r, N_r,
         aps, tps, vel, ρₐ, T,
     )
@@ -721,11 +721,8 @@ wet_growth_onset_diameter(
 Computes the bulk rates for ice and liquid particle collisions.
 
 # Arguments
-- `params`: the [`CMP.ParametersP3`](@ref)
-- `logλ`: the log of the slope parameter [log(1/m)]
-- `L_ice`: ice water content [kg/m³]
-- `F_rim`: riming fraction
-- `ρ_rim`: rime density [kg/m³]
+- `state`: the [`P3State`](@ref)
+- `shape`: the diagnosed [`P3Shape`](@ref)
 - `psd_c`: a [`CMP.CloudParticlePDF_SB2006`](@ref)
 - `psd_r`: a [`CMP.RainParticlePDF_SB2006`](@ref)
 - `L_c`: cloud liquid water content [kg/m³]
@@ -749,7 +746,7 @@ A `NamedTuple` of `(; ∂ₜq_c, ∂ₜq_r, ∂ₜN_c, ∂ₜN_r, ∂ₜL_rim, �
 7. `∂ₜB_rim`: rime volume tendency [m³/m³/s]
 """
 @inline function bulk_liquid_ice_collision_sources(
-    state, logλ,
+    state, shape::P3Shape,
     psd_c, psd_r, L_c, N_c, L_r, N_r,
     aps, tps, vel, ρₐ, T; quad,
 )
@@ -762,7 +759,7 @@ A `NamedTuple` of `(; ∂ₜq_c, ∂ₜq_r, ∂ₜN_c, ∂ₜN_r, ∂ₜL_rim, �
     m_liq(Dₗ) = ρw * CO.volume_sphere_D(Dₗ)
 
     rates = ∫liquid_ice_collisions(
-        state, logλ,
+        state, shape,
         psd_c, psd_r, L_c, N_c, L_r, N_r,
         aps, tps, vel, ρₐ, T, m_liq; quad,
     )
@@ -813,14 +810,14 @@ function collision_cross_section_ice_ice(state, D_1, D_2)
 end
 
 """
-    ice_self_collection(state, logλ, vel, ρₐ; [quad])
+    ice_self_collection(state, shape, vel, ρₐ; [quad])
 
 Computes the ice self-collection (aggregation) rate, which decreases the ice number concentration
 while leaving mass, rime mass, and rime volume unchanged.
 
 # Arguments
 - `state`: [`P3State`](@ref)
-- `logλ`: the log of the slope parameter [log(1/m)]
+- `shape`: the diagnosed [`P3Shape`](@ref)
 - `vel`: the velocity parameterization, e.g. [`CMP.Chen2022VelType`](@ref)
 - `ρₐ`: air density [kg/m³]
 
@@ -831,12 +828,12 @@ while leaving mass, rime mass, and rime volume unchanged.
 A `NamedTuple` of `(; dNdt)`, where:
 1. `dNdt`: ice number concentration tendency due to self-collection [1/m³/s] (always positive or zero, represents a loss rate)
 """
-@inline function ice_self_collection(state, logλ, vel, ρₐ; quad)
-    n_i = DT.size_distribution(state, logλ)
+@inline function ice_self_collection(state, shape::P3Shape, vel, ρₐ; quad)
+    n_i = DT.size_distribution(state, shape)
     v_ice = ice_particle_terminal_velocity(vel, ρₐ, state)
 
     p = eps(one(ρₐ))
-    ice_bounds = velocity_integral_bounds(state, logλ, v_ice; p)
+    ice_bounds = velocity_integral_bounds(state, shape, v_ice; p)
     D_min, D_max = ice_bounds[1], ice_bounds[end]
 
     function inner_integral(D_1)

@@ -123,6 +123,7 @@ sides `f_p` for the linear post-solve attribution and is not differentiated.
     L_rim = q_rim * ρ
     B_rim = b_rim * ρ
     state = CMP3.state_from_prognostic(mp.ice.scheme, L_ice, N_ice, L_rim, B_rim)
+    shape = CMP3.get_distribution_shape(state, logλ)
 
     aps = mp.warm_rain.air_properties
     subdep = mp.warm_rain.subdep
@@ -196,7 +197,7 @@ sides `f_p` for the linear post-solve attribution and is not differentiated.
     # liquid-ice collision, ice aggregation, ice melting
     if q_ice > ϵₘ
         coll = CMP3.bulk_liquid_ice_collision_sources(
-            state, logλ, pdf_c, pdf_r, L_lcl, N_lcl, L_rai, N_rai, aps, tps, vel, ρ, T;
+            state, shape, pdf_c, pdf_r, L_lcl, N_lcl, L_rai, N_rai, aps, tps, vel, ρ, T;
             quad,
         )
         liquid_ice_collision = MicroState2MP3(
@@ -204,12 +205,12 @@ sides `f_p` for the linear post-solve attribution and is not differentiated.
             coll.∂ₜL_ice / ρ, o, coll.∂ₜL_rim / ρ, coll.∂ₜB_rim / ρ,
         )
 
-        S_ice_agg = CMP3.ice_self_collection(state, logλ, vel, ρ; quad)
+        S_ice_agg = CMP3.ice_self_collection(state, shape, vel, ρ; quad)
         ice_aggregation = MicroState2MP3(o, o, o, o, o, -S_ice_agg.dNdt / ρ, o, o)
 
         T_freeze = TDI.TD.Parameters.T_freeze(tps)
         melt = ifelse(T > T_freeze,
-            CMP3.ice_melt(vel, aps, tps, T, ρ, state, logλ; quad),
+            CMP3.ice_melt(vel, aps, tps, T, ρ, state, shape; quad),
             (; dNdt = zero(ρ), dLdt = zero(ρ)),
         )
         ∂ₜq_ice_melt = melt.dLdt / ρ
