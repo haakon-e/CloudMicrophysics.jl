@@ -305,3 +305,39 @@ Under the default two-moment closure ``\rho z_\mathrm{ice}`` is zero,
 or transform is evaluated.
 The shape comes from the slope law as before, so the two-moment path reproduces
 its previous output byte for byte.
+
+## Joint three-moment predicted-liquid-fraction closure
+
+The three-moment and predicted-liquid-fraction features combine in one code path
+following the combined formulation of Cholette et al. (2023), which builds on the
+three-moment scheme of [Milbrandt2021](@cite).
+The whole-particle number ``N`` and sixth moment ``Z`` are pure gamma moments of
+the whole size distribution regardless of liquid, so the slope is pinned by
+``Z/N`` through the same analytic ``\log\lambda(\mu)`` as the dry three-moment
+solve.
+The shape parameter ``\mu`` solves the whole-particle mass residual: the blended
+whole-particle mass moment ([`P3.log_mixed_mass_moment`](@ref)) against
+``\log(q_\mathrm{tot}/N)`` on ``\mu \in [0, \mu_\mathrm{max}]``, with the
+in-residual ``\log\lambda`` clamp.
+The ice core shares that ``\mu`` (the C23 shared-``\mu`` closure) and its slope
+solves the frozen-core mass at the fixed ``\mu``.
+At ``F_\mathrm{liq} = 0`` the whole and core solves coincide and the shape
+reduces to the dry three-moment solve exactly.
+
+For mixed-phase reflectivity tendencies the constant-``\mu`` Group-2 closure of
+[Milbrandt2021](@cite) is retained: the per-process ``\mathrm{d}Z/\mathrm{d}t`` is the
+linear post-pass over the net ice-mass and ice-number tendencies with frozen
+coefficients built from the whole-particle shape, and the liquid processes enter
+that net through their ice-core mass and number contributions.
+Melting drains the frozen core, so its reflectivity sink enters the same net.
+
+### Joint host contract
+
+The packed per-category input carries both `q_liq_on_ice` and `z_ice`.
+The host recovers ``\rho z_\mathrm{ice}`` from the advected variable, then calls
+the seven-argument [`P3.state_from_prognostic`](@ref) with the liquid mass and
+the recovered sixth moment trailing, and finally the joint shape solve through
+`get_distribution_shape`.
+The substep Jacobian is the exact (ForwardDiff) path with the three shape scalars
+frozen; `rosenbrock_manual` does not support the predicted liquid treatment and
+throws.
