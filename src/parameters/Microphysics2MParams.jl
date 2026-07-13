@@ -59,6 +59,8 @@ builds the components:
   [`NIceProxyDepletion`](@ref).
 - `moments`: the [`MomentClosure`](@ref) selector passed to [`ParametersP3`](@ref)
   (`:two_moment` by default, or `:three_moment`).
+- `liquid`: the [`LiquidFractionTreatment`](@ref) selector passed to
+  [`ParametersP3`](@ref) (`:none` by default, or `:predicted`).
 """
 @kwdef struct P3IceParams{P3, VL, PDc, PDr, HET, RF, INPDM, Q} <: ParametersType
     "The core P3 scheme parameters"
@@ -93,8 +95,9 @@ P3IceParams(toml_dict::CP.ParamDict;
     quad = QUAD.GaussLegendre(CP.float_type(toml_dict), quadrature_order),
     inp_depletion_model = NIceProxyDepletion(τ_act = 300),
     moments = :two_moment,
+    liquid = :none,
 ) = P3IceParams(;
-    scheme = ParametersP3(toml_dict; moments),
+    scheme = ParametersP3(toml_dict; moments, liquid),
     terminal_velocity = Chen2022VelType(toml_dict),
     cloud_pdf = CloudParticlePDF_SB2006(toml_dict),
     rain_pdf = RainParticlePDF_SB2006(toml_dict; is_limited),
@@ -161,6 +164,8 @@ Create a `Microphysics2MParams` object from a ClimaParams TOML dictionary.
   [`P3IceParams`](@ref) when `with_ice`. By default, [`NIceProxyDepletion`](@ref).
 - `moments`: the [`MomentClosure`](@ref) selector passed to [`P3IceParams`](@ref)
   when `with_ice` (`:two_moment` by default, or `:three_moment`).
+- `liquid`: the [`LiquidFractionTreatment`](@ref) selector passed to
+  [`P3IceParams`](@ref) when `with_ice` (`:none` by default, or `:predicted`).
 """
 Microphysics2MParams(toml_dict::CP.ParamDict;
     with_ice = false, is_limited = true,
@@ -168,11 +173,12 @@ Microphysics2MParams(toml_dict::CP.ParamDict;
     quad = QUAD.GaussLegendre(CP.float_type(toml_dict), quadrature_order),
     inp_depletion_model = NIceProxyDepletion(τ_act = 300),
     moments = :two_moment,
+    liquid = :none,
 ) = Microphysics2MParams(;
     # Warm rain parameters (always present)
     warm_rain = WarmRainParams2M(toml_dict; is_limited),
     # Optional ice phase parameters
     ice = with_ice ?
-          P3IceParams(toml_dict; is_limited, quad, inp_depletion_model, moments) :
+          P3IceParams(toml_dict; is_limited, quad, inp_depletion_model, moments, liquid) :
           nothing,
 )

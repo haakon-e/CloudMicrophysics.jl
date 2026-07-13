@@ -917,9 +917,25 @@ A `NamedTuple` of `(; ∂ₜq_c, ∂ₜq_r, ∂ₜN_c, ∂ₜN_r, ∂ₜL_rim, �
 5. `∂ₜL_rim`: riming mass tendency [kg/m³/s]
 6. `∂ₜL_ice`: ice water content tendency [kg/m³/s]
 7. `∂ₜB_rim`: rime volume tendency [m³/m³/s]
+
+Dispatches on the liquid-fraction treatment. Under
+[`CMP.PredictedLiquidFraction`](@ref) the non-frozen collected liquid is
+retained on the ice instead of shed to rain, and the wet-growth densification
+is off; the return gains the retained-liquid source `∂ₜL_liq` [kg/m³/s]. See
+the [P3 liquid-fraction documentation](@ref P3-liquid-fraction).
 """
-@inline function bulk_liquid_ice_collision_sources(
+@inline bulk_liquid_ice_collision_sources(
     state, shape::P3Shape,
+    psd_c, psd_r, L_c, N_c, L_r, N_r,
+    aps, tps, vel, ρₐ, T; quad,
+) = _bulk_liquid_ice_collision_sources(
+    state.params.liquid, state, shape,
+    psd_c, psd_r, L_c, N_c, L_r, N_r,
+    aps, tps, vel, ρₐ, T; quad,
+)
+
+@inline function _bulk_liquid_ice_collision_sources(
+    ::CMP.NoLiquidFraction, state, shape::P3Shape,
     psd_c, psd_r, L_c, N_c, L_r, N_r,
     aps, tps, vel, ρₐ, T; quad,
 )
@@ -966,6 +982,45 @@ A `NamedTuple` of `(; ∂ₜq_c, ∂ₜq_r, ∂ₜN_c, ∂ₜN_r, ∂ₜL_rim, �
 
     return @NamedTuple{∂ₜq_c::FT, ∂ₜq_r::FT, ∂ₜN_c::FT, ∂ₜN_r::FT, ∂ₜL_rim::FT, ∂ₜL_ice::FT, ∂ₜB_rim::FT}(
         (∂ₜq_c, ∂ₜq_r, ∂ₜN_c, ∂ₜN_r, ∂ₜL_rim, ∂ₜL_ice, ∂ₜB_rim)
+    )
+end
+
+# Collection routing under predicted liquid fraction (C19 §3c): the non-frozen
+# collected liquid is retained on the ice as `∂ₜL_liq` instead of shed to rain
+# (above freezing the freeze fraction is zero, so all collected liquid is
+# retained), and the wet-growth rime densification is off (the excess resides
+# in the liquid mass).
+@inline function _bulk_liquid_ice_collision_sources(
+    ::CMP.PredictedLiquidFraction, state, shape::P3Shape,
+    psd_c, psd_r, L_c, N_c, L_r, N_r,
+    aps, tps, vel, ρₐ, T; quad,
+)
+    FT = promote_type(eltype(state), UT.promote_typeof(L_c, N_c, L_r, N_r, ρₐ, T))
+    ρw = psd_c.ρw
+    @assert ρw == psd_r.ρw "Cloud and rain should have the same liquid water density"
+    m_liq(Dₗ) = ρw * CO.volume_sphere_D(Dₗ)
+
+    rates = ∫liquid_ice_collisions(
+        state, shape,
+        psd_c, psd_r, L_c, N_c, L_r, N_r,
+        aps, tps, vel, ρₐ, T, m_liq; quad,
+    )
+    (QCFRZ, QCSHD, NCCOL, QRFRZ, QRSHD, NRCOL, _, BCCOL, BRCOL, _) = rates
+
+    # Bulk rates
+    ## Liquid phase: all collected mass and number leave cloud and rain
+    ∂ₜq_c = (-QCFRZ - QCSHD) / ρₐ
+    ∂ₜq_r = (-QRFRZ - QRSHD) / ρₐ
+    ∂ₜN_c = -NCCOL
+    ∂ₜN_r = -NRCOL
+    ## Ice phase: the frozen part rimes; the non-frozen part is retained liquid
+    ∂ₜL_rim = QCFRZ + QRFRZ
+    ∂ₜL_ice = QCFRZ + QRFRZ
+    ∂ₜB_rim = BCCOL + BRCOL
+    ∂ₜL_liq = QCSHD + QRSHD
+
+    return @NamedTuple{∂ₜq_c::FT, ∂ₜq_r::FT, ∂ₜN_c::FT, ∂ₜN_r::FT, ∂ₜL_rim::FT, ∂ₜL_ice::FT, ∂ₜB_rim::FT, ∂ₜL_liq::FT}(
+        (∂ₜq_c, ∂ₜq_r, ∂ₜN_c, ∂ₜN_r, ∂ₜL_rim, ∂ₜL_ice, ∂ₜB_rim, ∂ₜL_liq)
     )
 end
 

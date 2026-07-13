@@ -121,12 +121,20 @@ function ice_terminal_velocity_number_weighted(
     shape = get_distribution_shape(state, logλ)
     return ice_terminal_velocity_number_weighted(velocity_params, ρₐ, state, shape; kw...)
 end
-function ice_terminal_velocity_number_weighted(
+ice_terminal_velocity_number_weighted(
     velocity_params::CMP.Chen2022VelType, ρₐ, state::P3State, shape::P3Shape;
+    kw...,
+) = _terminal_velocity_number_weighted(state.params.liquid, velocity_params, ρₐ, state, shape; kw...)
+
+# The number-weighted fall speed for the two liquid treatments differs only in
+# the particle velocity: ice-core when liquid is off, the blended whole-particle
+# velocity under predicted liquid fraction (C19 Eq A9).
+function _terminal_velocity_number_weighted(
+    liquid::CMP.LiquidFractionTreatment, velocity_params, ρₐ, state::P3State, shape::P3Shape;
     p = 1e-6, quad,
 )
     (; ρn_ice) = state
-    v_term = ice_particle_terminal_velocity(velocity_params, ρₐ, state)
+    v_term = _sedimentation_velocity(liquid, velocity_params, ρₐ, state)
     n = DT.size_distribution(state, shape)
 
     # ∫n(D) v(D) dD, normalized by the number concentration. The floored
@@ -138,12 +146,24 @@ function ice_terminal_velocity_number_weighted(
     return integ / max(ρn_ice, eps(one(ρn_ice)))
 end
 
+@inline _sedimentation_velocity(::CMP.NoLiquidFraction, velocity_params, ρₐ, state) =
+    ice_particle_terminal_velocity(velocity_params, ρₐ, state)
+@inline _sedimentation_velocity(::CMP.PredictedLiquidFraction, velocity_params, ρₐ, state) =
+    mixed_particle_terminal_velocity(velocity_params, ρₐ, state)
+
 struct P3MassWeightedIntegrand{N, V, S} <: Function
     n::N
     v_term::V
     state::S
 end
 @inline (f::P3MassWeightedIntegrand)(D) = f.n(D) * f.v_term(D) * ice_mass(f.state, D)
+
+struct P3MixedMassWeightedIntegrand{N, V, S} <: Function
+    n::N
+    v_term::V
+    state::S
+end
+@inline (f::P3MixedMassWeightedIntegrand)(D) = f.n(D) * f.v_term(D) * mixed_mass(f.state, D)
 
 """
     ice_terminal_velocity_mass_weighted(
@@ -173,8 +193,13 @@ function ice_terminal_velocity_mass_weighted(
     shape = get_distribution_shape(state, logλ)
     return ice_terminal_velocity_mass_weighted(velocity_params, ρₐ, state, shape; kw...)
 end
-function ice_terminal_velocity_mass_weighted(
+ice_terminal_velocity_mass_weighted(
     velocity_params::CMP.Chen2022VelType, ρₐ, state::P3State, shape::P3Shape;
+    kw...,
+) = _terminal_velocity_mass_weighted(state.params.liquid, velocity_params, ρₐ, state, shape; kw...)
+
+function _terminal_velocity_mass_weighted(
+    ::CMP.NoLiquidFraction, velocity_params, ρₐ, state::P3State, shape::P3Shape;
     p = 1e-6, quad,
 )
     (; ρq_ice, ρn_ice) = state
@@ -256,6 +281,23 @@ function ice_terminal_velocity_reflectivity_weighted(
     return num / max(den, floatmin(FT))
 end
 
+# Mixed-phase mass-weighted fall speed (C19 Eq A8): the blended velocity and
+# the whole-particle mass over the whole PSD, normalized by the total mass.
+function _terminal_velocity_mass_weighted(
+    ::CMP.PredictedLiquidFraction, velocity_params, ρₐ, state::P3State, shape::P3Shape;
+    p = 1e-6, quad,
+)
+    (; ρn_ice, F_liq) = state
+    ρq_tot = total_mass_concentration(state)
+    v_term = mixed_particle_terminal_velocity(velocity_params, ρₐ, state)
+    n = DT.size_distribution(state, shape)
+
+    bnds = velocity_integral_bounds(state, shape, v_term; p)
+    integ = integrate(P3MixedMassWeightedIntegrand(n, v_term, state), bnds, quad)
+    represented_mass = ρn_ice * exp(logLdivN_whole(state, shape.logλ, F_liq))
+    return integ / max(ρq_tot, represented_mass, floatmin(eltype(state)))
+end
+
 """
     ice_terminal_velocity_number_weighted_from_prognostic(
         velocity_params, ρₐ, params, ρq_ice, ρn_ice, ρq_rim, ρb_rim, logλ; kw...
@@ -291,5 +333,32 @@ the per-cell `P3State` via the regularised
     velocity_params, ρₐ, params, ρq_ice, ρn_ice, ρq_rim, ρb_rim, logλ; kw...,
 )
     state = state_from_prognostic(params, ρq_ice, ρn_ice, ρq_rim, ρb_rim)
+    return ice_terminal_velocity_mass_weighted(velocity_params, ρₐ, state, logλ; kw...)
+end
+
+"""
+    ice_terminal_velocity_number_weighted_from_prognostic(
+        velocity_params, ρₐ, params, ρq_ice, ρn_ice, ρq_rim, ρb_rim, ρq_liq, logλ; kw...
+    )
+    ice_terminal_velocity_mass_weighted_from_prognostic(
+        velocity_params, ρₐ, params, ρq_ice, ρn_ice, ρq_rim, ρb_rim, ρq_liq, logλ; kw...
+    )
+
+Predicted-liquid-fraction forms of the prognostic sedimentation wrappers: the
+trailing `ρq_liq` (liquid mass on ice, [kg/m³]) enters the five-argument
+[`state_from_prognostic`](@ref), and both weighted velocities use the blended
+whole-particle mass and fall speed over the whole-particle PSD carried by
+`logλ`.
+"""
+@inline function ice_terminal_velocity_number_weighted_from_prognostic(
+    velocity_params, ρₐ, params, ρq_ice, ρn_ice, ρq_rim, ρb_rim, ρq_liq, logλ; kw...,
+)
+    state = state_from_prognostic(params, ρq_ice, ρn_ice, ρq_rim, ρb_rim, ρq_liq)
+    return ice_terminal_velocity_number_weighted(velocity_params, ρₐ, state, logλ; kw...)
+end
+@inline function ice_terminal_velocity_mass_weighted_from_prognostic(
+    velocity_params, ρₐ, params, ρq_ice, ρn_ice, ρq_rim, ρb_rim, ρq_liq, logλ; kw...,
+)
+    state = state_from_prognostic(params, ρq_ice, ρn_ice, ρq_rim, ρb_rim, ρq_liq)
     return ice_terminal_velocity_mass_weighted(velocity_params, ρₐ, state, logλ; kw...)
 end

@@ -443,31 +443,14 @@ function test_vapor_ramp(FT)
         @test FD.derivative(w, mid) > 0
 
         # band asserted strictly inside (0, F_melt) at construction
-        # (args: F_dry, ΔF_switch, F_melt, q_liq_present, D_shd_onset, D_shd_drop)
-        @test_throws AssertionError CMP.PredictedLiquidFraction{FT}(
-            FT(0.4),
-            FT(0.7),
-            FT(0.99),
-            FT(1e-10),
-            FT(9e-3),
-            FT(1e-3),
-        )
-        @test_throws AssertionError CMP.PredictedLiquidFraction{FT}(
-            FT(0),
-            FT(0.02),
-            FT(0.99),
-            FT(1e-10),
-            FT(9e-3),
-            FT(1e-3),
-        )
-        @test_throws AssertionError CMP.PredictedLiquidFraction{FT}(
-            FT(0.01),
-            FT(0),
-            FT(0.99),
-            FT(1e-10),
-            FT(9e-3),
-            FT(1e-3),
-        )
+        # (args: F_dry, ΔF_switch, F_melt, q_liq_present, D_shd_onset, D_shd_drop, τ_shd)
+        good = (FT(0.01), FT(0.02), FT(0.99), FT(1e-10), FT(9e-3), FT(1e-3), FT(1))
+        bad(i, v) = ntuple(j -> j == i ? v : good[j], length(good))
+        @test CMP.PredictedLiquidFraction{FT}(good...) isa CMP.PredictedLiquidFraction{FT}
+        @test_throws AssertionError CMP.PredictedLiquidFraction{FT}(bad(2, FT(0.99))...)  # band past F_melt
+        @test_throws AssertionError CMP.PredictedLiquidFraction{FT}(bad(1, FT(0))...)     # F_dry = 0
+        @test_throws AssertionError CMP.PredictedLiquidFraction{FT}(bad(2, FT(0))...)     # zero width
+        @test_throws AssertionError CMP.PredictedLiquidFraction{FT}(bad(7, FT(0))...)     # zero timescale
     end
 end
 

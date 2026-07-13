@@ -608,9 +608,12 @@ end
 """
     get_distribution_logλ_from_prognostic(params, ρq_ice, ρn_ice, ρq_rim, ρb_rim)
 
-Compute `log(λ)` for P3, using prognostic ice variables directly
+Compute `log(λ)` for P3, using prognostic ice variables directly.
 
-The P3 variables `F_rim` and `ρ_rim` are computed in a regularised way
+The P3 variables `F_rim` and `ρ_rim` are computed in a regularised way. This
+helper solves the dry (ice-core) slope only; under
+[`CMP.PredictedLiquidFraction`](@ref) hosts construct the state with the liquid
+mass and use [`get_distribution_shape`](@ref) for the whole-particle slope.
 """
 function get_distribution_logλ_from_prognostic(
     params, ρq_ice, ρn_ice, ρq_rim, ρb_rim, args...,

@@ -179,6 +179,11 @@ fraction is the regularised ratio `F_liq = ρq_liq/(ρq_ice + ρq_liq)`
 - `ρb_rim`: rime volume concentration [m³/m³]
 - `ρq_liq`: liquid mass on ice [kg/m³]
 """
+# Trailing-`nothing` form: the packed tendency entry passes `nothing` for the
+# liquid slot when the treatment is off.
+state_from_prognostic(params::CMP.ParametersP3, ρq_ice, ρn_ice, ρq_rim, ρb_rim, ::Nothing) =
+    state_from_prognostic(params, ρq_ice, ρn_ice, ρq_rim, ρb_rim)
+
 function state_from_prognostic(
     params::CMP.ParametersP3{FT, MOM, <:CMP.PredictedLiquidFraction},
     ρq_ice, ρn_ice, ρq_rim, ρb_rim, ρq_liq,
@@ -193,6 +198,38 @@ function state_from_prognostic(
     F_liq = UT.liquid_mass_fraction(ρq_liq, ρq_ice + ρq_liq, params.liquid.q_liq_present)
     return P3State(params, ρq_ice, ρn_ice, F_rim, ρ_rim, F_liq)
 end
+
+"""
+    state_from_prognostic(params, ρq_ice, ρn_ice, ρq_rim, ρb_rim, ρq_liq, ρz_ice)
+
+Construct a [`P3State`](@ref) from the volumetric prognostic ice variables
+carrying both the liquid mass on ice `ρq_liq` (`nothing` when the liquid
+treatment is off) and the volumetric sixth moment `ρz_ice` (`nothing` under
+two-moment ice). The liquid mass fraction is formed per the liquid treatment
+([`UT.liquid_mass_fraction`](@ref)); `ρz_ice` is admissibility-clamped in the
+[`P3State`](@ref) constructor.
+"""
+function state_from_prognostic(
+    params::CMP.ParametersP3, ρq_ice, ρn_ice, ρq_rim, ρb_rim, ρq_liq, ρz_ice,
+)
+    ρq_ice = UT.clamp_to_nonneg(ρq_ice)
+    ρn_ice = UT.clamp_to_nonneg(ρn_ice)
+    ρq_rim = UT.clamp_to_nonneg(ρq_rim)
+    ρb_rim = UT.clamp_to_nonneg(ρb_rim)
+    F_rim = UT.rime_mass_fraction(ρq_rim, ρq_ice)
+    ρ_rim = UT.rime_density(ρq_rim, ρb_rim)
+    F_liq = _liquid_fraction_from_prognostic(params.liquid, ρq_ice, ρq_liq)
+    return P3State(params, ρq_ice, ρn_ice, F_rim, ρ_rim, F_liq, ρz_ice)
+end
+
+# Liquid mass fraction from the prognostic liquid slot: zero when the treatment
+# is off (the slot is `nothing`), else the regularised ratio on the physical
+# presence scale.
+@inline _liquid_fraction_from_prognostic(::CMP.NoLiquidFraction, ρq_ice, ρq_liq) = false
+@inline _liquid_fraction_from_prognostic(liquid::CMP.PredictedLiquidFraction, ρq_ice, ρq_liq) =
+    UT.liquid_mass_fraction(
+        UT.clamp_to_nonneg(ρq_liq), ρq_ice + UT.clamp_to_nonneg(ρq_liq), liquid.q_liq_present,
+    )
 
 Base.eltype(::P3State{FT}) where {FT} = FT
 Base.broadcastable(state::P3State) = tuple(state)
