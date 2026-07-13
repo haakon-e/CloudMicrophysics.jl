@@ -104,6 +104,55 @@ Merging sums every prognostic quantity into the lower-index category and zeros t
 The reference Fortran diverges from the paper here: it reuses ``\Delta D_{init}`` as the merge diameter threshold and applies only the diameter condition, omitting the density condition.
 This implementation follows the two-condition paper form with the paper's fixed ``150 \; \mu\mathrm{m}`` and ``100 \; \mathrm{kg\,m^{-3}}`` thresholds.
 
+## Host contract for the multi-category tendency entry
+
+The packed 2M+P3 tendency entry accepts one to four ice categories: the parameter set is built with `n_categories`
+(`Microphysics2MParams(FT; with_ice = true, n_categories = N)`, carried as the leading type parameter of `P3IceParams{N}`),
+and the entry receives `N`-tuples of per-category prognostic inputs and frozen shapes.
+The host carries the per-category prognostic scalars with `_1.._N` suffixes (`ρq_ice_1`, ..., following the Fortran wrapper convention),
+builds each category's state with `state_from_prognostic` from its own `(ρq_ice, ρn_ice, ρq_rim, ρb_rim[, ρq_liq_on_ice][, ρz_ice])`,
+and solves each category's shape independently.
+For `N > 1` the returned tendency fields carry the category index before the `_dt` suffix (`dq_ice_1_dt`, ..., `dz_ice_2_dt`);
+a single category keeps the unsuffixed names byte-for-byte.
+
+Process semantics inside the entry follow the reference's per-category loop:
+
+- Every category's warm-coupled processes (collection of cloud and rain, melting, shedding) consume the same
+  step-initial cloud, rain, and vapor state; the rates are evaluated simultaneously and the warm-block sinks
+  accumulate across categories.
+  The host applies the returned rates over its step, as in the reference, where all process rates are computed
+  from the state at the beginning of the step and applied together.
+- The constant-timescale vapor exchange sees the full ice condensate in its vapor and heat budgets and is
+  partitioned among the categories by core-mass share (deposition/sublimation) and liquid-mass share
+  (shell condensation/evaporation).
+  This partition stands in for the reference's per-category ventilation-factor weighting, which requires a
+  PSD-resolved exchange; a single category keeps its unconditional relaxation.
+- Newly formed ice routes to the destination category ([`icecat_destination`](@ref CloudMicrophysics.P3Scheme.icecat_destination)):
+  deposition nucleation at the nascent-crystal diameter, and drop freezing at the mean-mass sphere diameter of the
+  frozen drops at solid-ice density.
+  The frozen-drop population is treated as monodisperse, for which that diameter coincides with the mass-weighted
+  mean diameter required by the selection metric.
+- Inter-category collection applies the source-sink double entry of
+  [`inter_category_collection`](@ref CloudMicrophysics.P3Scheme.inter_category_collection).
+  Both sides' reflectivity budgets are carried by the per-category constant-μ growth pass over the net rates:
+  by linearity, the collectee side realizes the documented ``\partial_t Z_j`` sink with the entry's frozen
+  (mean-mass-band-clamped) coefficients, and the collector side gains through its own growth term from the gained
+  mass at unchanged number, so ``Z`` is not conserved pairwise.
+
+Outside the entry, the host is responsible for:
+
+- Sedimentation per category, with each category's own number-, mass- (and reflectivity-) weighted terminal
+  velocities evaluated from its own state and shape; there is no cross-category coupling in sedimentation.
+- Calling [`merge_categories`](@ref CloudMicrophysics.P3Scheme.merge_categories) after sedimentation to collapse
+  converged categories; merging is not part of the tendency entry, which only routes sources.
+- Positivity per category: the host floors every per-category prognostic independently, exactly as for a single
+  category.
+
+The Rosenbrock substep driver supports `rosenbrock_exact()` for any category count; `rosenbrock_manual()` and
+`Verbose` throw for more than one category.
+The substep linear solve heap-allocates beyond the StaticArrays dense-solve boundary (state lengths above 14,
+e.g. two three-moment liquid-fraction categories); the instantaneous entry is allocation-free for every layout.
+
 ## API
 
 ```@docs

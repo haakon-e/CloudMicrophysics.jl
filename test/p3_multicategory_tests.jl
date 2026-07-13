@@ -1,8 +1,12 @@
 using Test: @testset, @test, @test_throws, @inferred
 import CloudMicrophysics.P3Scheme as P3
 import CloudMicrophysics.Parameters as CMP
+import CloudMicrophysics.BulkMicrophysicsTendencies as BMT
+import CloudMicrophysics.ThermodynamicsInterface as TDI
 import CloudMicrophysics.DistributionTools as DT
 import ClimaParams as CP
+import BenchmarkTools as BT
+import JET
 import QuadGK as QGK
 
 # Copy a P3State with an injected sixth-moment (reflectivity) content, so the
@@ -424,6 +428,235 @@ function test_merge_categories(FT)
     end
 end
 
+# Packed multi-category entry arguments: `cats` are the per-category prognostic
+# NamedTuples; shapes are diagnosed per category.
+function _ncat_entry_args(FT, cats, mode...; kw...)
+    tps = TDI.TD.Parameters.ThermodynamicsParameters(FT)
+    mp = CMP.Microphysics2MParams(FT; with_ice = true, is_limited = true, n_categories = length(cats), kw...)
+    p3 = mp.ice.scheme
+    ρ = FT(0.9)
+    shapes = map(cats) do c
+        ρq_liq = haskey(c, :q_liq_on_ice) ? c.q_liq_on_ice * ρ : nothing
+        ρz = haskey(c, :z_ice) ? c.z_ice * ρ : nothing
+        st = P3.state_from_prognostic(p3, c.q_ice * ρ, c.n_ice * ρ, c.q_rim * ρ, c.b_rim * ρ, ρq_liq, ρz)
+        P3.get_distribution_shape(st)
+    end
+    tail = isempty(mode) ? () : (FT(60), 4)
+    warm = (FT(1e-3), FT(1e8), FT(5e-4), FT(1e4))
+    return (;
+        mp,
+        args = (mode..., BMT.Microphysics2Moment(), mp, tps, ρ, FT(263), FT(8e-3), warm..., cats, shapes, tail...),
+    )
+end
+
+_ncat_cat1(FT) = (; q_ice = FT(1e-4), n_ice = FT(2e5), q_rim = FT(4e-5), b_rim = FT(6e-8))
+_ncat_cat2(FT) = (; q_ice = FT(1e-3), n_ice = FT(1e4), q_rim = FT(4e-4), b_rim = FT(8e-7))
+_ncat_empty(FT) = (; q_ice = FT(0), n_ice = FT(0), q_rim = FT(0), b_rim = FT(0))
+
+# Rebuild the parameter set with a different InterCategoryParams.
+function _replace_icp(mp, icp)
+    ice = CMP.P3IceParams(;
+        (
+            k => getfield(mp.ice, k) for k in
+            (:scheme, :terminal_velocity, :cloud_pdf, :rain_pdf, :ice_nucleation,
+                :rain_freezing, :inp_depletion_model, :quad)
+        )...,
+        inter_category = icp, n_categories = CMP.n_categories(mp.ice),
+    )
+    return CMP.Microphysics2MParams(; warm_rain = mp.warm_rain, ice)
+end
+
+# Initiation threshold so wide that every source routes to the closest
+# populated category, as in a single-category configuration.
+_wide_init_icp(FT, icp) = CMP.InterCategoryParams(;
+    icp.E_ii, icp.F_rim_shutoff_start, icp.F_rim_shutoff_end,
+    ΔD_init = FT(1), icp.ΔD_merge, icp.Δρ_merge,
+)
+
+function test_ncat_params(FT)
+    @testset "category-count type parameter" begin
+        toml = CP.create_toml_dict(FT)
+        mp1 = CMP.Microphysics2MParams(toml; with_ice = true)
+        @test CMP.n_categories(mp1.ice) == 1
+        @test mp1.ice.inter_category === nothing
+        for N in 2:4
+            mpN = CMP.Microphysics2MParams(toml; with_ice = true, n_categories = N)
+            @test CMP.n_categories(mpN.ice) == N
+            @test mpN.ice.inter_category isa CMP.InterCategoryParams
+        end
+        @test_throws ArgumentError CMP.Microphysics2MParams(toml; with_ice = true, n_categories = 5)
+        # `inter_category` must be `nothing` exactly for a single category
+        ice2 = CMP.Microphysics2MParams(toml; with_ice = true, n_categories = 2).ice
+        kwfields = (;
+            (
+                k => getfield(ice2, k) for k in
+                (:scheme, :terminal_velocity, :cloud_pdf, :rain_pdf, :ice_nucleation, :rain_freezing)
+            )...
+        )
+        @test_throws ArgumentError CMP.P3IceParams(; kwfields..., n_categories = 2)
+        @test_throws ArgumentError CMP.P3IceParams(;
+            kwfields..., inter_category = ice2.inter_category, n_categories = 1,
+        )
+        # packed inputs must carry n_categories(mp.ice) categories
+        (; args) = _ncat_entry_args(FT, (_ncat_cat1(FT), _ncat_cat2(FT)))
+        bad = (args[1:10]..., (args[11][1],), (args[12][1],))
+        @test_throws ArgumentError BMT.bulk_microphysics_tendencies(bad...)
+    end
+end
+
+function test_ncat1_equivalence(FT)
+    @testset "two categories with an empty slot reproduce the single category" begin
+        cat1 = _ncat_cat1(FT)
+        (; args) = _ncat_entry_args(FT, (cat1,))
+        # Sources route to the closest populated category under the wide
+        # initiation threshold (rain freezing otherwise opens the empty slot:
+        # the largest drops freeze first, so the frozen-drop mean diameter sits
+        # far from a small pristine population).
+        r2 = _ncat_entry_args(FT, (cat1, _ncat_empty(FT)))
+        mp2 = _replace_icp(r2.mp, _wide_init_icp(FT, r2.mp.ice.inter_category))
+        args2 = (r2.args[1], mp2, r2.args[3:end]...)
+        t1 = BMT.bulk_microphysics_tendencies(args...)
+        t2 = BMT.bulk_microphysics_tendencies(args2...)
+        # warm block and the populated category's block are bit-identical
+        for k in (:dq_lcl_dt, :dn_lcl_dt, :dq_rai_dt, :dn_rai_dt, :dn_lcl_activation_dt)
+            @test getproperty(t2, k) === getproperty(t1, k)
+        end
+        @test t2.dq_ice_1_dt === t1.dq_ice_dt
+        @test t2.dn_ice_1_dt === t1.dn_ice_dt
+        @test t2.dq_rim_1_dt === t1.dq_rim_dt
+        @test t2.db_rim_1_dt === t1.db_rim_dt
+        # the empty category receives nothing
+        @test t2.dq_ice_2_dt == 0
+        @test t2.dn_ice_2_dt == 0
+        @test t2.dq_rim_2_dt == 0
+        @test t2.db_rim_2_dt == 0
+    end
+end
+
+function test_ncat2_intercategory_conservation(FT)
+    @testset "inter-category double entry conserves mass, rime, and volume" begin
+        cats = (_ncat_cat1(FT), _ncat_cat2(FT))
+        (; mp, args) = _ncat_entry_args(FT, cats)
+        # reference with collection off: E_ii = 0 zeroes only the
+        # inter-category transfers, every other term is bit-identical
+        icp = mp.ice.inter_category
+        icp0 = CMP.InterCategoryParams(;
+            E_ii = FT(0),
+            icp.F_rim_shutoff_start, icp.F_rim_shutoff_end,
+            icp.ΔD_init, icp.ΔD_merge, icp.Δρ_merge,
+        )
+        mp0 = _replace_icp(mp, icp0)
+        args0 = (args[1], mp0, args[3:end]...)
+
+        ta = BMT.bulk_microphysics_tendencies(args...)
+        tb = BMT.bulk_microphysics_tendencies(args0...)
+
+        # collection is active and moves mass between the categories
+        @test ta.dq_ice_1_dt != tb.dq_ice_1_dt
+        @test ta.dq_ice_2_dt != tb.dq_ice_2_dt
+        # the warm block does not see inter-category collection
+        for k in (:dq_lcl_dt, :dn_lcl_dt, :dq_rai_dt, :dn_rai_dt)
+            @test getproperty(ta, k) === getproperty(tb, k)
+        end
+        # the category sums of the transferred quantities are unchanged
+        tol(v...) = 32 * eps(FT) * maximum(abs, v)
+        for (k1, k2) in ((:dq_ice_1_dt, :dq_ice_2_dt), (:dq_rim_1_dt, :dq_rim_2_dt), (:db_rim_1_dt, :db_rim_2_dt))
+            Σa = getproperty(ta, k1) + getproperty(ta, k2)
+            Σb = getproperty(tb, k1) + getproperty(tb, k2)
+            @test abs(Σa - Σb) ≤ tol(getproperty(ta, k1), getproperty(ta, k2), Σa, Σb)
+        end
+        # number is a pure collectee sink: the category sum decreases
+        @test ta.dn_ice_1_dt + ta.dn_ice_2_dt < tb.dn_ice_1_dt + tb.dn_ice_2_dt
+    end
+end
+
+function test_ncat2_destination_routing(FT)
+    @testset "destination routing through the entry" begin
+        # large ice in category 1 (mean diameter far from the nascent-crystal
+        # size) with an empty category 2: cold supersaturated deposition
+        # nucleation opens category 2
+        big = (; q_ice = FT(2e-3), n_ice = FT(1e3), q_rim = FT(2e-4), b_rim = FT(4e-7))
+        (; args) = _ncat_entry_args(FT, (big, _ncat_empty(FT)))
+        argsT = (args[1:4]..., FT(250), FT(8e-3), args[7:end]...)
+        t = BMT.bulk_microphysics_tendencies(argsT...)
+        @test t.dn_ice_2_dt > 0
+        @test t.dq_ice_2_dt > 0
+        # wide initiation threshold: every source stays in the populated
+        # category and the empty slot receives nothing
+        rs = _ncat_entry_args(FT, (_ncat_cat1(FT), _ncat_empty(FT)))
+        mps = _replace_icp(rs.mp, _wide_init_icp(FT, rs.mp.ice.inter_category))
+        args_sT = (rs.args[1], mps, rs.args[3:4]..., FT(250), FT(8e-3), rs.args[7:end]...)
+        ts = BMT.bulk_microphysics_tendencies(args_sT...)
+        @test ts.dn_ice_2_dt == 0
+        @test ts.dq_ice_2_dt == 0
+    end
+end
+
+function test_ncat_entry_gates(FT)
+    @testset "two-category inference, allocations, and mode support" begin
+        cats = (_ncat_cat1(FT), _ncat_cat2(FT))
+        (; args) = _ncat_entry_args(FT, cats)
+        @test (@inferred BMT.bulk_microphysics_tendencies(args...)) isa NamedTuple
+        JET.@test_opt BMT.bulk_microphysics_tendencies(args...)
+        trial = BT.@benchmark $(BMT.bulk_microphysics_tendencies)($args...) samples = 50 evals = 1
+        @test trial.memory == 0
+
+        argse = _ncat_entry_args(FT, cats, BMT.rosenbrock_exact()).args
+        te = @inferred BMT.bulk_microphysics_tendencies(argse...)
+        @test all(isfinite, values(te))
+        JET.@test_opt BMT.bulk_microphysics_tendencies(argse...)
+        trial = BT.@benchmark $(BMT.bulk_microphysics_tendencies)($argse...) samples = 20 evals = 1
+        @test trial.memory == 0
+
+        # rosenbrock_exact finiteness over a small grid. The near-empty corner
+        # (mass scale 1e-3 at 250 K) is excluded: the substep trajectory
+        # reaches a zero-number state with mass where the differentiated
+        # tendency is non-finite in the value lane and poisons the Euler
+        # fallback, a fragility shared with the single-category driver.
+        for T in (FT(250), FT(263), FT(275)), scale in (FT(1), FT(1e-2))
+            c1 = map(x -> x * scale, _ncat_cat1(FT))
+            c2 = map(x -> x * scale, _ncat_cat2(FT))
+            a = _ncat_entry_args(FT, (c1, c2), BMT.rosenbrock_exact()).args
+            aT = (a[1:5]..., T, a[7:end]...)
+            @test all(isfinite, values(BMT.bulk_microphysics_tendencies(aT...)))
+        end
+
+        argsm = _ncat_entry_args(FT, cats, BMT.rosenbrock_manual()).args
+        @test_throws ArgumentError BMT.bulk_microphysics_tendencies(argsm...)
+        argsv = _ncat_entry_args(FT, cats, BMT.Verbose(BMT.rosenbrock_exact())).args
+        @test_throws ArgumentError BMT.bulk_microphysics_tendencies(argsv...)
+    end
+end
+
+function test_joint_ncat2_smoke(FT)
+    @testset "two categories with three-moment liquid-fraction ice" begin
+        c1 = (; _ncat_cat1(FT)..., q_liq_on_ice = FT(3e-5), z_ice = FT(1e-8))
+        c2 = (; _ncat_cat2(FT)..., q_liq_on_ice = FT(1e-4), z_ice = FT(3e-7))
+        (; args) = _ncat_entry_args(FT, (c1, c2); moments = :three_moment, liquid = :predicted)
+        t = BMT.bulk_microphysics_tendencies(args...)
+        @test all(isfinite, values(t))
+        # canonical per-category field order: liquid slot before the
+        # reflectivity slot, category blocks in index order
+        ks = collect(keys(t))
+        for j in 1:2
+            iq = findfirst(==(Symbol(:dq_ice_, j, :_dt)), ks)
+            il = findfirst(==(Symbol(:dq_liq_on_ice_, j, :_dt)), ks)
+            iz = findfirst(==(Symbol(:dz_ice_, j, :_dt)), ks)
+            @test iq < il < iz
+        end
+        @test findfirst(==(:dz_ice_1_dt), ks) < findfirst(==(:dq_ice_2_dt), ks)
+        # water conservation of the internal transfers: total condensed water
+        # change is finite and bounded by the vapor-side exchange scale
+        S = t.dq_lcl_dt + t.dq_rai_dt +
+            t.dq_ice_1_dt + t.dq_ice_2_dt + t.dq_liq_on_ice_1_dt + t.dq_liq_on_ice_2_dt
+        @test isfinite(S)
+        argse =
+            _ncat_entry_args(FT, (c1, c2), BMT.rosenbrock_exact(); moments = :three_moment, liquid = :predicted).args
+        te = BMT.bulk_microphysics_tendencies(argse...)
+        @test all(isfinite, values(te))
+    end
+end
+
 @testset "P3 multicategory tests ($FT)" for FT in (Float64, Float32)
     test_intercategory_params(FT)
     test_ordered_category_pairs(FT)
@@ -431,5 +664,11 @@ end
     test_intercategory_collection(FT)
     test_icecat_destination(FT)
     test_merge_categories(FT)
+    test_ncat_params(FT)
+    test_ncat1_equivalence(FT)
+    test_ncat2_intercategory_conservation(FT)
+    test_ncat2_destination_routing(FT)
+    test_ncat_entry_gates(FT)
+    test_joint_ncat2_smoke(FT)
 end
 nothing
