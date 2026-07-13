@@ -44,7 +44,10 @@ function P3State(params::CMP.ParametersP3, q_ice, n_ice, F_rim, ρ_rim)
     FT = UT.promote_typeof(q_ice, n_ice, F_rim, ρ_rim)
     (; mass, ρ_i) = params
     ρ_d = get_ρ_d(mass, F_rim, ρ_rim)
-    ρ_g = get_ρ_g(F_rim, ρ_rim, ρ_d)
+    # Floored to a small positive value: a negative sub-domain graupel density would give a
+    # DomainError in `log(ρ_g·π/6)`, the graupel mass coefficient in the size-distribution
+    # moment integral, and a negative aspect-ratio material density.
+    ρ_g = max(get_ρ_g(F_rim, ρ_rim, ρ_d), oftype(F_rim, 1e-4))
     D_th = get_D_th(mass, ρ_i)
     D_gr = ifelse(iszero(F_rim), FT(Inf), get_D_gr(mass, ρ_g))
     D_cr = ifelse(iszero(F_rim), FT(Inf), get_D_cr(mass, F_rim, ρ_g))
