@@ -252,7 +252,10 @@ where for the different thresholds, `ρ` is:
 - `params`: [`CMP.MassPowerLaw`](@ref) parameters
 - `ρ`: (ice/graupel) density [kg/m³]
 """
-_get_threshold((; α_va, β_va)::CMP.MassPowerLaw, ρ) = (6α_va / (π * ρ))^(1 / (3 - β_va))
+# The density is floored to a small positive value: the regime threshold is a fractional
+# power of `1/ρ`, so a zero or negative sub-domain gain density would give a DomainError.
+_get_threshold((; α_va, β_va)::CMP.MassPowerLaw, ρ) =
+    (6α_va / (π * max(ρ, oftype(ρ, 1e-4))))^(1 / (3 - β_va))
 
 """
     get_D_th(mass::MassPowerLaw, ρ_i)
