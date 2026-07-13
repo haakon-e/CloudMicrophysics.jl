@@ -273,6 +273,26 @@ struct TwoMoment{SL <: SlopeLaw} <: MomentClosure
     slope::SL
 end
 
+# Numerical size bounds on log(λ) for the P3 shape solves, shared by the
+# two- and three-moment closures. `λ ∈ [e², e¹⁷] 1/m`, i.e. mean size
+# `1/λ ∈ [0.04 μm, 135 mm]`.
+const P3_LOGλ_MIN = 2
+const P3_LOGλ_MAX = 17
+
+"""
+    reflectivity_number_window(μ_max)
+
+Compute the admissible sixth-moment-to-number ratio window `(zn_lo, zn_hi)` [m⁶]
+spanned by the shape bounds `μ ∈ [0, μ_max]` and
+`logλ ∈ [P3_LOGλ_MIN, P3_LOGλ_MAX]`, from `Z/N = Γ(μ+7)/Γ(μ+1) · exp(-6 logλ)`
+at the window corners. The lower bound is floored by `floatmin`.
+"""
+function reflectivity_number_window(μ_max::FT) where {FT}
+    zn_hi = exp(SF.loggamma(μ_max + 7) - SF.loggamma(μ_max + 1) - 6 * FT(P3_LOGλ_MIN))
+    zn_lo = exp(SF.loggamma(FT(7)) - SF.loggamma(FT(1)) - 6 * FT(P3_LOGλ_MAX))
+    return (max(zn_lo, floatmin(FT)), zn_hi)
+end
+
 """
     ThreeMoment{FT}
 
@@ -287,11 +307,24 @@ $(DocStringExtensions.FIELDS)
     μ_max::FT
     "Shape parameter μ of freshly nucleated or multiplied ice [`-`]"
     μ_init::FT
+    "Lower bound on the mean ice particle mass (number adjustment and reflectivity-tendency coefficients) [`kg`]"
+    mean_mass_min::FT
+    "Upper bound on the mean ice particle mass (number adjustment and reflectivity-tendency coefficients) [`kg`]"
+    mean_mass_max::FT
+    "Number presence scale for the sixth-moment recovery from the advected variable [`m⁻³`]"
+    n_presence::FT
+    "Lower bound of the admissible sixth-moment-to-number ratio `Z/N` [`m⁶`]"
+    zn_lo::FT = reflectivity_number_window(μ_max)[1]
+    "Upper bound of the admissible sixth-moment-to-number ratio `Z/N` [`m⁶`]"
+    zn_hi::FT = reflectivity_number_window(μ_max)[2]
 end
 function ThreeMoment(toml_dict::CP.ParamDict)
     name_map = (;
         :P3_ice_shape_parameter_max => :μ_max,
         :P3_ice_shape_parameter_initial => :μ_init,
+        :P3_ice_mean_mass_min => :mean_mass_min,
+        :P3_ice_mean_mass_max => :mean_mass_max,
+        :P3_ice_number_presence_concentration => :n_presence,
     )
     params = CP.get_parameter_values(toml_dict, name_map, "CloudMicrophysics")
     return ThreeMoment{CP.float_type(toml_dict)}(; params...)

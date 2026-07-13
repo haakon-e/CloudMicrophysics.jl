@@ -43,8 +43,10 @@ Compute the integration bounds for the P3 size distribution,
     # If `F_rim` is very close to 1, `D_cr` may be greater than `D_max`, in which case it is disregarded.
     bnds = segment_boundaries(state, D_min, D_max)
     # `D_max` sits `log(1/p)` decay lengths into the size-distribution tail; a
-    # breakpoint at the decay scale keeps each subinterval resolvable at low order
-    D_e = clamp(3 / λ, D_min, D_max)
+    # breakpoint at the integrand mode keeps each subinterval resolvable at low
+    # order. For `moment_order = 0` the mode is `3/λ` (unchanged from the
+    # unweighted integrals); for a `Dⁿ`-weighted integrand it is `(μ + n)/λ`.
+    D_e = clamp(ifelse(iszero(moment_order), 3 / λ, k / λ), D_min, D_max)
     return Tuple(SA.sort(SA.SVector(bnds..., D_e)))
 end
 

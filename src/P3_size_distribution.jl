@@ -261,8 +261,11 @@ function logLdivN(state::P3State, logλ)
     return logLdivN₀ - logNdivN₀
 end
 function logLdivN(state::P3State, shape::P3Shape)
-    logLdivN₀ = logmass_gamma_moment(state, shape.μ, shape.logλ; n = 0)
-    logNdivN₀ = loggamma_moment(shape.μ, shape.logλ; k = 0)
+    return logLdivN(state, shape.μ, shape.logλ)
+end
+function logLdivN(state::P3State, μ, logλ)
+    logLdivN₀ = logmass_gamma_moment(state, μ, logλ; n = 0)
+    logNdivN₀ = loggamma_moment(μ, logλ; k = 0)
     return logLdivN₀ - logNdivN₀
 end
 
@@ -301,6 +304,15 @@ iteration count). The iteration budget itself is calibrated empirically; see
 struct FixedIterations{FT} <: RS.AbstractTolerance{FT} end
 @inline (::FixedIterations)(x1, x2, y) = false
 
+# Numerical size bounds on log(λ), shared by the two- and three-moment shape
+# solves.
+const LOGλ_MIN = CMP.P3_LOGλ_MIN
+const LOGλ_MAX = CMP.P3_LOGλ_MAX
+
+# Fixed root-solve budget for the shape solves. Calibrated empirically; see
+# `get_distribution_logλ`.
+@inline _shape_solver_maxiters(::Type{FT}) where {FT} = FT === Float32 ? 8 : 10
+
 """
     get_distribution_logλ(state, [logλ_guess, logλ_min, logλ_max])
 
@@ -332,7 +344,7 @@ where `m(D)` is the mass of a particle at diameter `D` (see [`ice_mass`](@ref)).
 - `logλ_min`: The minimum value of the search bounds [log(1/m)], default is `2`
 - `logλ_max`: The maximum value of the search bounds [log(1/m)], default is `17`
 """
-function get_distribution_logλ(state, logλ_guess = nothing, logλ_min = 2, logλ_max = 17)
+function get_distribution_logλ(state, logλ_guess = nothing, logλ_min = LOGλ_MIN, logλ_max = LOGλ_MAX)
     FT = eltype(state)
     ϵₘ = UT.ϵ_numerics_2M_M(FT)
     ϵₙ = UT.ϵ_numerics_2M_N(FT)
@@ -364,13 +376,12 @@ function get_distribution_logλ(state, logλ_guess = nothing, logλ_min = 2, log
     # `converged` flag is unused). Accuracy is guarded end-to-end by the
     # `N ≈ ∫N′ dD` integral checks in `test/p3_tests.jl`; revisit the budget if
     # those tighten or the slope law changes.
-    maxiters = FT === Float32 ? 8 : 10
     sol = RS.find_zero(
         shape_problem,
         RS.BrentsMethod(lo, hi),
         RS.CompactSolution(),
         FixedIterations{FT}(),
-        maxiters,
+        _shape_solver_maxiters(FT),
     )
     return clamp(sol.root, lo, hi)  # logλ, within the search bounds
 end
@@ -380,14 +391,79 @@ end
     get_distribution_shape(state::P3State, logλ)
     get_distribution_shape(state::P3State)
 
-Return the [`P3Shape`](@ref) for a given `logλ`; the one-argument form solves
-for `logλ` via [`get_distribution_logλ`](@ref) first. Under the two-moment
-closure, μ comes from the slope law and `logλ_core` equals `logλ`.
+Return the [`P3Shape`](@ref) for a given `logλ`; the one-argument form diagnoses
+the shape for the state's moment closure. Under [`CMP.TwoMoment`](@ref) ice, μ
+comes from the slope law with `logλ` solved via [`get_distribution_logλ`](@ref);
+under [`CMP.ThreeMoment`](@ref) ice, μ and `logλ` are solved jointly from the
+number, mass, and sixth-moment content. `logλ_core` equals `logλ` when liquid is
+off.
 """
 get_distribution_shape(params::CMP.ParametersP3{FT, <:CMP.TwoMoment}, logλ) where {FT} =
     P3Shape(; logλ, μ = get_μ(params.moments.slope, logλ))
 get_distribution_shape(state::P3State, logλ) = get_distribution_shape(state.params, logλ)
-get_distribution_shape(state::P3State) = get_distribution_shape(state, get_distribution_logλ(state))
+get_distribution_shape(state::P3State) = _distribution_shape(state.params.moments, state)
+
+_distribution_shape(::CMP.TwoMoment, state::P3State) =
+    get_distribution_shape(state, get_distribution_logλ(state))
+
+"""
+    reflectivity_number_ratio(state::P3State)
+
+Return the sixth-moment-to-number ratio `Z/N = M₆/M₀` [m⁶], clamped as one
+quantity into the admissible window `[zn_lo, zn_hi]` cached on the
+[`CMP.ThreeMoment`](@ref) closure. At the lower bound, `logλ(μ)` exceeds the
+maximum size bound for every μ, so the shape solve saturates `logλ` at that
+bound and μ follows the mass target.
+"""
+@inline function reflectivity_number_ratio(state::P3State{FT}) where {FT}
+    (; zn_lo, zn_hi) = state.params.moments
+    ratio = state.ρz_ice / max(state.ρn_ice, floatmin(FT))
+    return clamp(ratio, zn_lo, zn_hi)
+end
+
+"""
+    _distribution_shape(moments::CMP.ThreeMoment, state::P3State)
+
+Diagnose the [`P3Shape`](@ref) from `(L, N, Z)` for three-moment ice. The slope
+is pinned analytically by `Z/N`,
+
+```math
+\\log λ(μ) = \\tfrac{1}{6}\\left[\\log Γ(μ+7) − \\log Γ(μ+1) − \\log(Z/N)\\right],
+```
+
+and μ solves the piecewise mass residual `logLdivN(state, μ, logλ(μ)) − log(L/N)`
+on `μ ∈ [0, μ_max]` with Brent + [`FixedIterations`](@ref). `log(λ)` is clamped
+into `[LOGλ_MIN, LOGλ_MAX]` inside the residual, so the returned `logλ`
+reproduces the mass target when a size bound binds. The μ-clamp is the
+reflectivity limiter.
+"""
+function _distribution_shape(moments::CMP.ThreeMoment, state::P3State{FT}) where {FT}
+    (; ρn_ice, ρq_ice) = state
+    μ_max = FT(moments.μ_max)
+    lo, hi = FT(LOGλ_MIN), FT(LOGλ_MAX)
+    ϵₘ = UT.ϵ_numerics_2M_M(FT)
+    ϵₙ = UT.ϵ_numerics_2M_N(FT)
+    target_logLdN = log(max(ρq_ice, ϵₘ)) - log(max(ρn_ice, ϵₙ))
+    logZdN = log(reflectivity_number_ratio(state))
+    logλ_of_μ(μ) = (SF.loggamma(μ + 7) - SF.loggamma(μ + 1) - logZdN) / 6
+    residual(μ) = logLdivN(state, μ, clamp(logλ_of_μ(μ), lo, hi)) - target_logLdN
+    μ = _solve_shape_μ(residual, FT(0), μ_max)
+    logλ = clamp(logλ_of_μ(μ), lo, hi)
+    return P3Shape(; logλ, μ)
+end
+
+# Brent + fixed-iteration root find with a deterministic bracket (no warm start).
+@inline function _solve_shape_μ(residual::F, lo::FT, hi::FT) where {F, FT}
+    f_lo, f_hi = residual(lo), residual(hi)
+    if !isfinite(f_lo) || !isfinite(f_hi) || f_lo * f_hi > 0
+        return abs(f_lo) ≤ abs(f_hi) ? lo : hi
+    end
+    sol = RS.find_zero(
+        residual, RS.BrentsMethod(lo, hi), RS.CompactSolution(),
+        FixedIterations{FT}(), _shape_solver_maxiters(FT),
+    )
+    return clamp(sol.root, lo, hi)
+end
 
 """
     get_distribution_logλ_from_prognostic(params, ρq_ice, ρn_ice, ρq_rim, ρb_rim)

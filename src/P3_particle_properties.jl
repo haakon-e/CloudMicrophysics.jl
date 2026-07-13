@@ -43,7 +43,7 @@ struct P3State{FT, PARAMS <: CMP.ParametersP3}
     D_cr::FT
 end
 
-function P3State(params::CMP.ParametersP3, ρq_ice, ρn_ice, F_rim, ρ_rim)
+function P3State(params::CMP.ParametersP3, ρq_ice, ρn_ice, F_rim, ρ_rim, ρz_ice = nothing)
     FT = UT.promote_typeof(ρq_ice, ρn_ice, F_rim, ρ_rim)
     (; mass, ρ_i) = params
     # Clamp to the physical domain so the threshold formulas never evaluate a
@@ -59,9 +59,12 @@ function P3State(params::CMP.ParametersP3, ρq_ice, ρn_ice, F_rim, ρ_rim)
     D_th = get_D_th(mass, ρ_i)
     D_gr = ifelse(iszero(F_rim), FT(Inf), get_D_gr(mass, ρ_g))
     D_cr = ifelse(iszero(F_rim), FT(Inf), get_D_cr(mass, F_rim, ρ_g))
+    # Sixth-moment admissibility clamp; zero under two-moment ice.
+    ρz_in = ρz_ice === nothing ? zero(FT) : UT.clamp_to_nonneg(FT(ρz_ice))
+    ρz = apply_z_bounds(params.moments, ρn_ice, ρz_in)
     return P3State(
         params,
-        ρq_ice, ρn_ice, F_rim, ρ_rim, zero(FT), zero(FT),
+        ρq_ice, ρn_ice, F_rim, ρ_rim, zero(FT), ρz,
         FT(ρ_g), FT(D_th), FT(D_gr), FT(D_cr),
     )
 end
@@ -97,7 +100,7 @@ breach it.
 - `ρq_rim`: rime mass concentration [kg/m³]
 - `ρb_rim`: rime volume concentration [m³/m³]
 """
-function state_from_prognostic(params::CMP.ParametersP3, ρq_ice, ρn_ice, ρq_rim, ρb_rim)
+function state_from_prognostic(params::CMP.ParametersP3, ρq_ice, ρn_ice, ρq_rim, ρb_rim, ρz_ice = nothing)
     # Floor the prognostic moments so the regularised ratios stay non-negative;
     # F_rim and ρ_rim are bounded in the `P3State` constructor.
     ρq_ice = UT.clamp_to_nonneg(ρq_ice)
@@ -106,7 +109,36 @@ function state_from_prognostic(params::CMP.ParametersP3, ρq_ice, ρn_ice, ρq_r
     ρb_rim = UT.clamp_to_nonneg(ρb_rim)
     F_rim = UT.rime_mass_fraction(ρq_rim, ρq_ice)
     ρ_rim = UT.rime_density(ρq_rim, ρb_rim)
-    return P3State(params, ρq_ice, ρn_ice, F_rim, ρ_rim)
+    return P3State(params, ρq_ice, ρn_ice, F_rim, ρ_rim, ρz_ice)
+end
+
+"""
+    G_of_μ(μ)
+
+Compute the reflectivity-moment closure ratio
+
+```math
+G(μ) = \\frac{M₀ M₆}{M₃²} = \\frac{(μ+6)(μ+5)(μ+4)}{(μ+3)(μ+2)(μ+1)},
+```
+
+the gamma-moment identity relating the number, mass, and sixth moments of the
+ice size distribution. `G` decreases monotonically from `G(0) = 20` toward
+`G(∞) = 1`.
+"""
+@inline G_of_μ(μ) = ((6 + μ) * (5 + μ) * (4 + μ)) / ((3 + μ) * (2 + μ) * (1 + μ))
+
+"""
+    apply_z_bounds(moments, ρn_ice, ρz_ice)
+
+Clamp the volumetric sixth moment `ρz_ice` into the admissible window
+`[zn_lo, zn_hi] · ρn_ice` given by the moment closure's `Z/N` bounds. Returns
+zero under [`CMP.TwoMoment`](@ref) ice. Assumes `ρn_ice ≥ 0`. See the
+[three-moment documentation](@ref P3-three-moment-ice) for the window.
+"""
+@inline apply_z_bounds(::CMP.TwoMoment, ρn_ice, ρz_ice) = zero(ρz_ice)
+@inline function apply_z_bounds(moments::CMP.ThreeMoment, ρn_ice, ρz_ice)
+    (; zn_lo, zn_hi) = moments
+    return clamp(ρz_ice, zn_lo * ρn_ice, zn_hi * ρn_ice)
 end
 
 Base.eltype(::P3State{FT}) where {FT} = FT
