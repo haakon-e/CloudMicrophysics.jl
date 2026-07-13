@@ -277,6 +277,7 @@ P3Scheme.ice_particle_terminal_velocity
 P3Scheme.ice_terminal_velocity_number_weighted
 P3Scheme.ice_terminal_velocity_number_weighted_from_prognostic
 P3Scheme.ice_terminal_velocity_mass_weighted
+P3Scheme.ice_terminal_velocity_mass_weighted_from_prognostic
 ```
 
 ### Processes
