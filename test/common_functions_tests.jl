@@ -177,6 +177,20 @@ function test_Chen_coefficients(FT)
         )
         TT.@test all(isapprox.(ciu, [0.0, 34.820462392120504], rtol = tol))
     end
+
+    TT.@testset "Chen coefficients finite at non-positive air density" begin
+        # The ice-density exponent is negative, so a zero or negative sub-domain air
+        # density must be floored to a positive value to keep the coefficients finite.
+        for ρₐ in (FT(-0.01), FT(0), FT(1e-6))
+            for (coeffs, ρᵢ) in
+                ((Ch2022.small_ice, ice.ρᵢ), (Ch2022.large_ice, snow.ρᵢ))
+                aiu, bi, ciu = CO.Chen2022_vel_coeffs(coeffs, ρₐ, ρᵢ)
+                TT.@test all(isfinite, aiu)
+                TT.@test all(isfinite, bi)
+                TT.@test all(isfinite, ciu)
+            end
+        end
+    end
 end
 
 function test_volume_sphere(FT)
