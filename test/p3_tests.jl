@@ -66,7 +66,7 @@ function test_p3_nonphysical_state_bounds(FT)
         for (ρq_ice, ρn_ice, ρq_rim, ρb_rim) in nonphysical
             state = @inferred P3.state_from_prognostic(params, ρq_ice, ρn_ice, ρq_rim, ρb_rim)
             @test FT(0) <= state.F_rim <= FT(1)
-            @test FT(0) <= state.ρ_rim <= FT(0.8) * params.ρ_l
+            @test FT(0) <= state.ρ_rim <= params.ρ_i
             @test state.ρq_ice >= FT(0)
             @test state.ρn_ice >= FT(0)
             for D in Ds
@@ -133,12 +133,24 @@ function test_thresholds_solver(FT)
             end
         end
 
-        # For very high rimed density, the thresholds are ill-defined. TODO: Investigate this
+        # The raw thresholds invert for a rime density above solid ice: `get_D_gr`
+        # decreases with ρ_g, so ρ_g > ρ_i gives D_gr < D_th. The `P3State`
+        # constructor bounds ρ_rim ≤ ρ_i (hence ρ_g ≤ ρ_i) to prevent this.
         F_rim_bad = FT(0.93)
-        ρ_rim_bad = FT(975)
-        ρ_g_bad = P3.get_ρ_g(mass, F_rim_bad, ρ_rim_bad)
-        D_gr_bad = P3.get_D_gr(mass, ρ_g_bad)
-        @test_broken D_th < D_gr_bad
+        ρ_rim_bad = FT(975)  # unphysical: denser than solid ice ρ_i
+        D_gr_bad = P3.get_D_gr(mass, P3.get_ρ_g(mass, F_rim_bad, ρ_rim_bad))
+        @test D_gr_bad < D_th  # raw inversion for the unphysical input
+
+        # Constructor clamp: binding above ρ_i, inert below, ordering preserved.
+        mk(ρ_rim) = P3.P3State(params, FT(1e-4), FT(1e6), F_rim_bad, FT(ρ_rim))
+        @test mk(975).ρ_rim == ρ_i        # binding: clamped to ρ_i
+        @test mk(2 * ρ_i).ρ_rim == ρ_i    # binding: far above
+        @test mk(400).ρ_rim == FT(400)    # inert: physical value unchanged
+        @test mk(ρ_i).ρ_rim == ρ_i        # marginal: exactly at the bound
+        for ρ_rim in (FT(50), FT(400), FT(800), ρ_i, FT(975), 2 * ρ_i)
+            st = mk(ρ_rim)
+            @test st.D_th ≤ st.D_gr ≤ st.D_cr  # ordering never inverts
+        end
 
         # Check that the P3 scheme solution matches the published values
         # D_cr and D_gr vs Fig. 1a Morrison and Milbrandt 2015
@@ -758,19 +770,39 @@ function test_p3_bulk_liquid_ice_collisions(FT)
     end
 
     @testset "local rime density" begin
-        Tₐ = T_freeze - 1 // 10
-        ρ′_rim_func = P3.compute_local_rime_density(vel_params, ρₐ, Tₐ, state)
-        @test ρ′_rim_func(D̄, D̄) ≈ FT(159.5) rtol = 1e-6
-
         a, b, c = 51, 114, -11 // 2 # coeffs for Eq. 17 in Cober and List (1993), converted to [kg / m³]
         ρ′_rim_CL93(Rᵢ) = a + b * Rᵢ + c * Rᵢ^2  # Eq. 17 in Cober and List (1993), in [kg / m³], valid for 1 ≤ Rᵢ ≤ 8
         ρ_ice = FT(916.7)  # density of solid bulk ice
-
         ρ_rim_local = params.ρ_rim_local
 
+        # Piecewise `LocalRimeDensity`: polynomial for 1 ≤ Rᵢ ≤ 8, linear interp to ρ_ice for
+        # 8 < Rᵢ ≤ 12, clamped to [1, 12].
         @test ρ_rim_local(1) == ρ′_rim_CL93(1)
+        @test ρ_rim_local(2) == ρ′_rim_CL93(2)
+        @test ρ_rim_local(4) == ρ′_rim_CL93(4)
+        @test ρ_rim_local(6) == ρ′_rim_CL93(6)
         @test ρ_rim_local(8) == ρ′_rim_CL93(8)
+        @test ρ_rim_local(10) ≈ (ρ′_rim_CL93(8) + ρ_ice) / 2  # linear interpolation, 8 < Rᵢ ≤ 12
         @test ρ_rim_local(12) == ρ_ice
+        @test ρ_rim_local(0) == ρ′_rim_CL93(1)   # Rᵢ clamped to [1, 12]
+        @test ρ_rim_local(-5) == ρ′_rim_CL93(1)
+        @test ρ_rim_local(20) == ρ_ice
+
+        # Cober-List impact factor Rᵢ is positive for sub-freezing collisions, so ρ′_rim
+        # densifies toward ρ_ice as T → T_freeze, and stays within [ρ′_rim(1), ρ_ice].
+        Dₗ = FT(200e-6)
+        ρ′_rim(T) = P3.compute_local_rime_density(vel_params, ρₐ, FT(T), state)(D̄, Dₗ)
+        ρ_subfreezing = ρ′_rim.((240, 250, 260, 265, 270))
+        @test issorted(ρ_subfreezing)
+        @test all(ρ_subfreezing .≥ ρ′_rim_CL93(1))
+        @test all(ρ_subfreezing .≤ ρ_ice)
+
+        # At and above T_freeze, T°C is bounded strictly below 0, so Rᵢ → clamp(12) → ρ_ice;
+        # finite, no NaN.
+        for T in (T_freeze, T_freeze + 1 // 10, T_freeze + 5)
+            @test ρ′_rim(T) ≈ ρ_ice
+        end
+        @test !isnan(P3.compute_local_rime_density(vel_params, ρₐ, T_freeze, state)(D̄, D̄))
     end
 
     @testset "∫liquid_ice_collisions" begin
@@ -913,8 +945,8 @@ function test_p3_bulk_liquid_ice_collisions(FT)
         @test QRSHD ≈ 3.6526001759370415e-6 rtol = 5e-4
         @test NRCOL ≈ 172.61819652435105 rtol = 5e-4
         @test ∫M_col ≈ 7.067566695764388e-5 rtol = 5e-4
-        @test BCCOL ≈ 3.725687492783128e-9 rtol = 5e-4
-        @test BRCOL ≈ 4.164686317018988e-7 rtol = 5e-4
+        @test BCCOL ≈ 3.5089264947330093e-9 rtol = 5e-4
+        @test BRCOL ≈ 7.247197349759121e-8 rtol = 5e-4
         @test ∫𝟙_wet_M_col ≈ 1.5520362321253953e-5 rtol = 5e-4
 
         ### Test the bulk source function

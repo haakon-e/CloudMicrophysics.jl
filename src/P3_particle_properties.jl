@@ -42,13 +42,15 @@ end
 
 function P3State(params::CMP.ParametersP3, ρq_ice, ρn_ice, F_rim, ρ_rim)
     FT = UT.promote_typeof(ρq_ice, ρn_ice, F_rim, ρ_rim)
-    (; mass, ρ_i, ρ_l) = params
+    (; mass, ρ_i) = params
     # Clamp to the physical domain so the threshold formulas never evaluate a
     # power of a non-positive density. Inert on physical inputs.
     ρq_ice = UT.clamp_to_nonneg(FT(ρq_ice))
     ρn_ice = UT.clamp_to_nonneg(FT(ρn_ice))
     F_rim = clamp(FT(F_rim), FT(0), FT(1) - eps(FT))
-    ρ_rim = clamp(FT(ρ_rim), FT(0), FT(0.8) * ρ_l)
+    # Bound the rime density by the solid-ice density. Since `ρ_g ≤ ρ_rim`, this
+    # keeps `ρ_g ≤ ρ_i`, preserving the `D_th ≤ D_gr` threshold ordering.
+    ρ_rim = clamp(FT(ρ_rim), FT(0), ρ_i)
     ρ_d = get_ρ_d(mass, F_rim, ρ_rim)
     ρ_g = get_ρ_g(F_rim, ρ_rim, ρ_d)
     D_th = get_D_th(mass, ρ_i)
@@ -78,24 +80,12 @@ The regularised ratios come from [`UT.rime_mass_fraction`](@ref) and
 [`UT.rime_density`](@ref), which smoothly go to zero when their
 denominators are near machine precision, avoiding the discontinuity
 at `q_ice = ϵ` / `b_rim = ϵ`. The upper clamps `F_rim < 1 - ε` and
-`ρ_rim ≤ 0.8·ρ_l ≈ 730 kg/m³` keep the result inside the domain of validity
-of the threshold formulas evaluated by the [`P3State`](@ref) constructor.
-
-!!! note "TODO — revisit the `ρ_rim ≤ 0.8·ρ_l` cap"
-    The closed-form graupel density `ρ_g = F_rim·ρ_rim + (1-F_rim)·ρ_d`
-    can mathematically exceed `ρ_l` — `ρ_d` (the unrimed portion's
-    density, [`get_ρ_d`](@ref)) is linear in `ρ_rim` with no built-in
-    upper clamp, so feeding `ρ_rim` near `ρ_l` can produce `ρ_g > ρ_l`.
-    That breaks the threshold ordering `D_th < D_gr < D_cr` that the P3
-    partitioning assumes (`D_gr ∝ (6α_va/(π·ρ_g))^{1/(3-β_va)}` shrinks
-    as `ρ_g` grows; eventually `D_gr < D_th`). The 0.8-factor keeps
-    `ρ_g` comfortably below `ρ_l` for the realistic `(F_rim, ρ_rim)` regime.
-    Rime Density formulations structured like Macklin (1962) rarely give
-    `ρ_rim > 700 kg/m³` anyway, so the upper bound is usually inert.
-    To lift the cap to `ρ_l` we'd need to (i) explicitly bound `ρ_g` 
-    (e.g. `min(ρ_g, ρ_l)`) or rederive `ρ_d` so it's monotone-bounded by
-    `ρ_l`, and (ii) accept that bulk rime densities 800-917 kg/m³ are off
-    the calibration domain of the original P3 fit.
+`ρ_rim ≤ ρ_i` (the solid-ice density) keep the result inside the domain of the
+threshold formulas evaluated by the [`P3State`](@ref) constructor. The rime
+density bound is ordering-critical: since `ρ_g = F_rim·ρ_rim + (1-F_rim)·ρ_d`
+satisfies `ρ_g ≤ ρ_rim`, bounding `ρ_rim ≤ ρ_i` gives `ρ_g ≤ ρ_i`, which the
+`D_th ≤ D_gr` regime ordering requires. Only an unphysical `ρ_rim > ρ_i` can
+breach it.
 
 # Arguments
 - `params`: [`CMP.ParametersP3`](@ref)
