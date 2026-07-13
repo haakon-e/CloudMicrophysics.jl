@@ -50,7 +50,10 @@ function P3State(params::CMP.ParametersP3, ρq_ice, ρn_ice, F_rim, ρ_rim)
     F_rim = clamp(FT(F_rim), FT(0), FT(1) - eps(FT))
     ρ_rim = clamp(FT(ρ_rim), FT(0), FT(0.8) * ρ_l)
     ρ_d = get_ρ_d(mass, F_rim, ρ_rim)
-    ρ_g = get_ρ_g(F_rim, ρ_rim, ρ_d)
+    # Floored to a small positive value: a negative sub-domain graupel density would give a
+    # DomainError in `log(ρ_g·π/6)`, the graupel mass coefficient in the size-distribution
+    # moment integral, and a negative aspect-ratio material density.
+    ρ_g = max(get_ρ_g(F_rim, ρ_rim, ρ_d), oftype(F_rim, 1e-4))
     D_th = get_D_th(mass, ρ_i)
     D_gr = ifelse(iszero(F_rim), FT(Inf), get_D_gr(mass, ρ_g))
     D_cr = ifelse(iszero(F_rim), FT(Inf), get_D_cr(mass, F_rim, ρ_g))
