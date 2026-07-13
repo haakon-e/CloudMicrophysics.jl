@@ -5,6 +5,10 @@ import CloudMicrophysics.Common as CO
 import CloudMicrophysics.DistributionTools as DT
 import CloudMicrophysics.Utilities as UT
 import CloudMicrophysics.ThermodynamicsInterface as TDI
+import CloudMicrophysics.BulkMicrophysicsTendencies as BMT
+import CloudMicrophysics.MicrophysicsNonEq as CMNonEq
+import CloudMicrophysics.Microphysics2M as CM2
+import CloudMicrophysics.HetIceNucleation as CM_HetIce
 import SpecialFunctions as SF
 import QuadGK as QGK
 import ForwardDiff as FD
@@ -510,6 +514,460 @@ function test_no_nan_corners(FT)
     end
 end
 
+function _liq_entry_inputs(FT; F_liq = FT(0.3), q_ice = FT(8e-4))
+    tps = TDI.TD.Parameters.ThermodynamicsParameters(FT)
+    mp = CMP.Microphysics2MParams(FT; with_ice = true, is_limited = true, liquid = :predicted)
+    ρ = FT(1)
+    warm = (; q_tot = FT(8e-3), q_lcl = FT(1e-3), n_lcl = FT(1e8), q_rai = FT(5e-4), n_rai = FT(1e4))
+    q_liq = _ρq_liq_from_F(q_ice, F_liq)
+    cat = (;
+        q_ice,
+        n_ice = FT(2e5),
+        q_rim = FT(3e-4) * q_ice / FT(8e-4),
+        b_rim = FT(1e-6) * q_ice / FT(8e-4),
+        q_liq_on_ice = q_liq,
+    )
+    st = P3.state_from_prognostic(
+        mp.ice.scheme, cat.q_ice * ρ, cat.n_ice * ρ, cat.q_rim * ρ, cat.b_rim * ρ, q_liq * ρ,
+    )
+    shape = P3.get_distribution_shape(st)
+    return (; tps, mp, ρ, warm, cat, shape)
+end
+
+function _liq_entry(FT, T, inp; mode = ())
+    (; tps, mp, ρ, warm, cat, shape) = inp
+    tail = isempty(mode) ? () : (FT(60), 4)
+    return BMT.bulk_microphysics_tendencies(
+        mode..., BMT.Microphysics2Moment(), mp, tps, ρ, T, warm.q_tot,
+        warm.q_lcl, warm.n_lcl, warm.q_rai, warm.n_rai, (cat,), (shape,), tail...,
+    )
+end
+
+function test_liquid_entry_wiring(FT)
+    @testset "tendency entry wiring" begin
+        inp = _liq_entry_inputs(FT)
+        (; tps, mp, ρ, warm, cat, shape) = inp
+        T_frz = mp.ice.scheme.T_freeze
+        names10 = (
+            :dq_lcl_dt, :dn_lcl_dt, :dq_rai_dt, :dn_rai_dt,
+            :dq_ice_dt, :dn_ice_dt, :dq_rim_dt, :db_rim_dt,
+            :dq_liq_on_ice_dt, :dn_lcl_activation_dt,
+        )
+        for T in (T_frz - FT(10), T_frz + FT(2))
+            inst = _liq_entry(FT, T, inp)
+            @test keys(inst) == names10
+            @test all(isfinite, values(inst))
+            ros = _liq_entry(FT, T, inp; mode = (BMT.rosenbrock_exact(),))
+            @test keys(ros) == names10
+            @test all(isfinite, values(ros))
+        end
+
+        # warm melting and collection fill the liquid; cold refreezing drains it
+        # into rime
+        inst_warm = _liq_entry(FT, T_frz + FT(2), inp)
+        @test inst_warm.dq_liq_on_ice_dt > 0
+        inst_cold = _liq_entry(FT, T_frz - FT(10), inp)
+        @test inst_cold.dq_liq_on_ice_dt < 0
+        @test inst_cold.dq_rim_dt > 0
+
+        # unsupported paths throw
+        @test_throws ArgumentError _liq_entry(FT, T_frz + FT(2), inp; mode = (BMT.rosenbrock_manual(),))
+        @test_throws ArgumentError _liq_entry(FT, T_frz + FT(2), inp; mode = (BMT.Verbose(BMT.rosenbrock_exact()),))
+        @test_throws ArgumentError BMT.bulk_microphysics_tendencies(
+            BMT.Microphysics2Moment(), mp, tps, ρ, T_frz + FT(2), warm.q_tot,
+            warm.q_lcl, warm.n_lcl, warm.q_rai, warm.n_rai,
+            cat.q_ice, cat.n_ice, cat.q_rim, cat.b_rim, shape.logλ,
+        )
+    end
+end
+
+function test_liquid_collision_routing(FT)
+    @testset "collection routing" begin
+        p = CMP.ParametersP3(FT; liquid = :predicted)
+        pn = CMP.ParametersP3(FT)
+        vel = CMP.Chen2022VelType(FT)
+        aps = CMP.AirProperties(FT)
+        tps = TDI.TD.Parameters.ThermodynamicsParameters(FT)
+        mp = CMP.Microphysics2MParams(FT; with_ice = true, is_limited = true, liquid = :predicted)
+        pdf_c = mp.ice.cloud_pdf
+        pdf_r = mp.ice.rain_pdf
+        quad = P3.GaussLegendre(FT, 12)
+        ρₐ = FT(1)
+        T_frz = p.T_freeze
+        L_c, N_c, L_r, N_r = FT(1e-3), FT(1e8), FT(5e-4), FT(1e4)
+        ρq_ice, ρn_ice, ρq_rim, ρb_rim = FT(8e-4), FT(2e5), FT(3e-4), FT(1e-6)
+        ρq_liq = _ρq_liq_from_F(ρq_ice, FT(0.3))
+        st = P3.state_from_prognostic(p, ρq_ice, ρn_ice, ρq_rim, ρb_rim, ρq_liq)
+        sh = P3.get_distribution_shape(st)
+
+        # above freezing: no freezing, all collected liquid retained on the ice
+        cw = P3.bulk_liquid_ice_collision_sources(
+            st, sh, pdf_c, pdf_r, L_c, N_c, L_r, N_r, aps, tps, vel, ρₐ, T_frz + FT(2); quad,
+        )
+        @test cw.∂ₜL_liq > 0
+        @test cw.∂ₜL_rim == 0 && cw.∂ₜL_ice == 0 && cw.∂ₜB_rim == 0
+        @test cw.∂ₜq_c ≤ 0 && cw.∂ₜq_r ≤ 0 && cw.∂ₜN_c ≤ 0 && cw.∂ₜN_r ≤ 0
+        # mass closure of the routing: everything removed from cloud and rain
+        # arrives in the retained liquid
+        @test cw.∂ₜL_liq ≈ -(cw.∂ₜq_c + cw.∂ₜq_r) * ρₐ rtol = 1e-6
+
+        # far below freezing (dry growth): collected liquid freezes to rime
+        # exactly as under NoLiquidFraction, and nothing is retained
+        cc = P3.bulk_liquid_ice_collision_sources(
+            st, sh, pdf_c, pdf_r, L_c, N_c, L_r, N_r, aps, tps, vel, ρₐ, T_frz - FT(30); quad,
+        )
+        @test cc.∂ₜL_liq ≥ 0
+        @test cc.∂ₜL_rim > 0
+        @test cc.∂ₜL_liq < cc.∂ₜL_rim  # deep cold: freezing dominates retention
+        # mass closure below freezing: collected mass splits between rime and
+        # retained liquid
+        @test cc.∂ₜL_rim + cc.∂ₜL_liq ≈ -(cc.∂ₜq_c + cc.∂ₜq_r) * ρₐ rtol = 1e-6
+        stn = P3.P3State(pn, ρq_ice, ρn_ice, st.F_rim, st.ρ_rim)
+        shn = P3.P3Shape(; logλ = sh.logλ, μ = sh.μ)
+        cn = P3.bulk_liquid_ice_collision_sources(
+            stn, shn, pdf_c, pdf_r, L_c, N_c, L_r, N_r, aps, tps, vel, ρₐ, T_frz - FT(30); quad,
+        )
+        @test cc.∂ₜL_ice ≈ cn.∂ₜL_ice rtol = 1e-4
+    end
+end
+
+function test_liquid_entry_conservation(FT)
+    @testset "entry water conservation" begin
+        tps = TDI.TD.Parameters.ThermodynamicsParameters(FT)
+        mp = CMP.Microphysics2MParams(FT; with_ice = true, is_limited = true, liquid = :predicted)
+        p3 = mp.ice.scheme
+        liq = p3.liquid
+        sb = mp.warm_rain.seifert_beheng
+        aps = mp.warm_rain.air_properties
+        condevap = mp.warm_rain.condevap
+        subdep = mp.warm_rain.subdep
+        T_frz = p3.T_freeze
+        ρ = FT(1)
+        rtol = FT === Float32 ? 5e-4 : 1e-9
+
+        # Closure of the transfers: the vapor-exchange terms are reconstructed
+        # from the same public primitives (white-box), so this testset validates
+        # that every non-vapor process conserves the tracked water sum, not the
+        # vapor-path physics itself (see the vapor anchor testset).
+        function vapor_exchange(T, warm, cat, state)
+            (; q_tot, q_lcl, n_lcl, q_rai, n_rai) = warm
+            q_liq = cat.q_liq_on_ice
+            q_ice = cat.q_ice
+            q_icl_tot = q_ice + q_liq
+            thermo = (; ρ, T)
+            # cloud condensation/evaporation and rain evaporation (warm block)
+            cond = CMNonEq.conv_q_vap_to_q_lcl(
+                CMP.CloudLiquidFormation(condevap.τ_relax), nothing, tps,
+                (; q_tot, q_lcl, q_icl = q_icl_tot, q_rai, q_sno = zero(q_ice)), thermo,
+            )
+            evap = CM2.rain_evaporation(
+                sb, aps, tps, q_tot, q_lcl, q_icl_tot, q_rai, zero(q_ice), ρ, n_rai * ρ, T,
+            ).∂ₜq_rai
+            # deposition nucleation
+            τ_act = mp.ice.inp_depletion_model.τ_act
+            D_nuc = FT(10e-6)
+            m_nuc = p3.ρ_i * CO.volume_sphere_D(D_nuc)
+            n_active = CM_HetIce.n_active(mp.ice.inp_depletion_model, cat.n_ice)
+            dep_nuc = CM_HetIce.deposition_rate(
+                mp.ice.ice_nucleation, tps, T, ρ, q_tot, q_lcl + q_rai, q_icl_tot, n_active;
+                m_nuc, τ_act, inpc_log_shift = zero(ρ),
+            ).∂ₜq_frz
+            # ramped core deposition/sublimation and shell condensation/evaporation
+            w = P3.vapor_path_weight(liq, state.F_liq)
+            depsub = CMNonEq.conv_q_vap_to_q_icl(
+                CMP.ConstantTimescale(subdep.τ_relax), nothing, tps,
+                (; q_tot, q_lcl, q_icl = q_ice, q_rai, q_sno = q_liq), thermo,
+            )
+            depsub = ifelse(T > tps.T_freeze, min(depsub, zero(T)), depsub)
+            shell = CMNonEq.conv_q_vap_to_q_lcl(
+                CMP.CloudLiquidFormation(subdep.τ_relax), nothing, tps,
+                (; q_tot, q_lcl = q_liq, q_icl = q_ice, q_rai = q_lcl + q_rai, q_sno = zero(q_ice)), thermo,
+            )
+            return cond + evap + dep_nuc + (1 - w) * depsub + w * shell
+        end
+
+        for T in (T_frz - FT(20), T_frz - FT(5), T_frz + FT(2)),
+            F_liq in (FT(0), FT(0.005), FT(0.3), FT(0.7)),
+            q_ice in (FT(8e-4), FT(5e-5))
+
+            inp = _liq_entry_inputs(FT; F_liq, q_ice)
+            tend = _liq_entry(FT, T, inp)
+            S = tend.dq_lcl_dt + tend.dq_rai_dt + tend.dq_ice_dt + tend.dq_liq_on_ice_dt
+            st = P3.state_from_prognostic(
+                p3, inp.cat.q_ice * ρ, inp.cat.n_ice * ρ, inp.cat.q_rim * ρ, inp.cat.b_rim * ρ,
+                inp.cat.q_liq_on_ice * ρ,
+            )
+            V = vapor_exchange(T, inp.warm, inp.cat, st)
+            scale = max(abs(S), abs(V), FT(1e-8))
+            @test abs(S - V) / scale < rtol
+        end
+
+        # sub-threshold core with residual liquid: the drain to rain is a
+        # transfer and the sum still closes on the vapor terms
+        warm0 = (; q_tot = FT(1e-3), q_lcl = FT(0), n_lcl = FT(0), q_rai = FT(1e-5), n_rai = FT(1e3))
+        cat0 = (; q_ice = FT(0), n_ice = FT(0), q_rim = FT(0), b_rim = FT(0), q_liq_on_ice = FT(1e-4))
+        st0 = P3.state_from_prognostic(p3, FT(0), FT(0), FT(0), FT(0), cat0.q_liq_on_ice * ρ)
+        sh0 = P3.get_distribution_shape(st0)
+        for T in (T_frz - FT(10), T_frz + FT(2))
+            tend = _liq_entry(FT, T, (; tps, mp, ρ, warm = warm0, cat = cat0, shape = sh0))
+            S = tend.dq_lcl_dt + tend.dq_rai_dt + tend.dq_ice_dt + tend.dq_liq_on_ice_dt
+            V = vapor_exchange(T, warm0, cat0, st0)
+            scale = max(abs(S), abs(V), FT(1e-8))
+            @test abs(S - V) / scale < rtol
+        end
+    end
+end
+
+function test_residual_liquid_drain(FT)
+    @testset "residual liquid drain on an emptied core" begin
+        tps = TDI.TD.Parameters.ThermodynamicsParameters(FT)
+        mp = CMP.Microphysics2MParams(FT; with_ice = true, is_limited = true, liquid = :predicted)
+        p3 = mp.ice.scheme
+        liq = p3.liquid
+        ρ = FT(1)
+        ϵₘ = UT.ϵ_numerics_2M_M(FT)
+        m_drop = p3.ρ_l * CO.volume_sphere_D(liq.D_shd_drop)
+        q_liq = FT(1e-4)
+        z = zero(FT)
+        cat(q_ice) = (; q_ice, n_ice = FT(0), q_rim = FT(0), b_rim = FT(0), q_liq_on_ice = q_liq)
+
+        # the ramp: full drain at an empty core, zero at the presence threshold,
+        # continuous and conserving in between
+        drain_of(q_ice) = begin
+            (dq_rai, dn_rai, dq_liq) =
+                BMT._residual_liquid_to_rain(liq, p3, ρ, q_ice, cat(q_ice), z, z, z)
+            @test dq_rai + dq_liq == 0             # conserving transfer
+            @test dn_rai ≈ dq_rai / m_drop rtol = 1e-6
+            dq_rai
+        end
+        @test drain_of(FT(0)) ≈ q_liq / liq.τ_shd rtol = 1e-6
+        @test drain_of(ϵₘ / 2) ≈ q_liq / liq.τ_shd / 2 rtol = 1e-6
+        @test drain_of(ϵₘ) == 0
+        @test drain_of(FT(1e-4)) == 0              # active-core region: no-op
+        # continuity at the threshold
+        @test drain_of(ϵₘ * (1 - FT(1e-3))) < q_liq / liq.τ_shd * FT(2e-3)
+
+        # accumulation scenario through the entry: sub-threshold core, liquid
+        # above; dry air so the shell term reinforces the drain
+        warm0 = (; q_tot = FT(1e-3), q_lcl = FT(0), n_lcl = FT(0), q_rai = FT(1e-5), n_rai = FT(1e3))
+        st0 = P3.state_from_prognostic(p3, FT(0), FT(0), FT(0), FT(0), q_liq * ρ)
+        sh0 = P3.get_distribution_shape(st0)
+        T = p3.T_freeze - FT(10)
+        tend = _liq_entry(FT, T, (; tps, mp, ρ, warm = warm0, cat = cat(FT(0)), shape = sh0))
+        @test all(isfinite, values(tend))
+        @test tend.dq_liq_on_ice_dt ≤ -q_liq / liq.τ_shd * (1 - FT(1e-4))
+    end
+end
+
+function test_liquid_jacobian_sweep(FT)
+    @testset "ExactJacobian finiteness sweep" begin
+        tps = TDI.TD.Parameters.ThermodynamicsParameters(FT)
+        mp = CMP.Microphysics2MParams(FT; with_ice = true, is_limited = true, liquid = :predicted)
+        p3 = mp.ice.scheme
+        T_frz = p3.T_freeze
+        ρ = FT(1)
+        (q_lcl, n_lcl, q_rai, n_rai) = (FT(1e-3), FT(1e8), FT(5e-4), FT(1e4))
+        n_states = 0
+        n_bad_J = 0
+        for T in (T_frz - FT(20), T_frz - FT(2), T_frz + FT(2)),
+            F_liq in (FT(0), FT(0.05), FT(0.3), FT(0.7), FT(0.95)),
+            q_ice in (FT(1e-6), FT(1e-4), FT(2e-3)),
+            F_rim in (FT(0), FT(0.5), FT(0.9))
+
+            q_rim = F_rim * q_ice
+            b_rim = q_rim / FT(500)
+            # liquid capped at a physical load (the uncapped F_liq = 0.95 point
+            # at the largest ice content implies ~40 g/kg of liquid, whose
+            # latent release over a substep leaves the thermodynamic domain)
+            q_liq = min(_ρq_liq_from_F(q_ice, F_liq), FT(4e-3))
+            # total water consistent with the condensates
+            q_tot = max(FT(8e-3), 2 * (q_lcl + q_rai + q_ice + q_liq))
+            st = P3.state_from_prognostic(p3, q_ice * ρ, FT(2e5) * ρ, q_rim * ρ, b_rim * ρ, q_liq * ρ)
+            shape = P3.get_distribution_shape(st)
+            g = BMT.Instantaneous2MP3Tendency(mp, tps, ρ, T, q_tot, (shape,))
+            x = BMT.MicroState{FT, 1, true, false}((
+                q_lcl, n_lcl, q_rai, n_rai, q_ice, FT(2e5), q_rim, b_rim, q_liq,
+            ))
+            f, J = BMT._tendency_and_jacobian(BMT.ExactJacobian(), g, x)
+            n_states += 1
+            all(isfinite, J) || (n_bad_J += 1)
+            @test all(isfinite, f)
+            # the substep driver stays finite either way (Euler fallback)
+            ros = BMT.bulk_microphysics_tendencies(
+                BMT.rosenbrock_exact(), BMT.Microphysics2Moment(), mp, tps, ρ, T, q_tot,
+                q_lcl, n_lcl, q_rai, n_rai,
+                ((; q_ice, n_ice = FT(2e5), q_rim, b_rim, q_liq_on_ice = q_liq),), (shape,),
+                FT(60), 4,
+            )
+            @test all(isfinite, values(ros))
+        end
+        @info "liquid ExactJacobian sweep ($FT): non-finite J at $n_bad_J of $n_states states"
+        @test n_bad_J / n_states < 0.25
+    end
+end
+
+function test_liquid_jacobian_fd(FT)
+    @testset "ExactJacobian finite-difference cross-check" begin
+        tps = TDI.TD.Parameters.ThermodynamicsParameters(FT)
+        mp = CMP.Microphysics2MParams(FT; with_ice = true, is_limited = true, liquid = :predicted)
+        p3 = mp.ice.scheme
+        ρ = FT(1)
+        T = p3.T_freeze + FT(2)
+        q_tot = FT(8e-3)
+        (q_ice, n_ice, q_rim, b_rim) = (FT(8e-4), FT(2e5), FT(3e-4), FT(1e-6))
+        q_liq = _ρq_liq_from_F(q_ice, FT(0.3))
+        st = P3.state_from_prognostic(p3, q_ice * ρ, n_ice * ρ, q_rim * ρ, b_rim * ρ, q_liq * ρ)
+        shape = P3.get_distribution_shape(st)
+        g = BMT.Instantaneous2MP3Tendency(mp, tps, ρ, T, q_tot, (shape,))
+        x = BMT.MicroState{FT, 1, true, false}((
+            FT(1e-3), FT(1e8), FT(5e-4), FT(1e4), q_ice, n_ice, q_rim, b_rim, q_liq,
+        ))
+        _, J = BMT._tendency_and_jacobian(BMT.ExactJacobian(), g, x)
+        # Float32 central differences through the quadrature carry ~5e-3
+        # relative steps against curvature; Float64 validates the derivative
+        # tightly and Float32 coarsely
+        rtol = FT === Float32 ? 1e-1 : 1e-5
+        for j in 1:9
+            h = cbrt(eps(FT)) * abs(x[j])
+            xp = Base.setindex(x, x[j] + h, j)
+            xm = Base.setindex(x, x[j] - h, j)
+            col_fd = (g(xp) - g(xm)) / (xp[j] - xm[j])
+            atol = rtol * maximum(abs, col_fd)
+            for i in 1:9
+                @test isapprox(J[i, j], col_fd[i]; rtol, atol)
+            end
+        end
+    end
+end
+
+function test_vapor_anchor(FT)
+    @testset "vapor-path anchor" begin
+        # Independent anchor for the ramped vapor exchange: the state sits in the
+        # mass-limited sublimation/evaporation branches, where the relaxations
+        # reduce to -q/(τ Γ), with w, F_liq, and Γ recomputed from first
+        # principles rather than the entry helpers.
+        tps = TDI.TD.Parameters.ThermodynamicsParameters(FT)
+        mp = CMP.Microphysics2MParams(FT; with_ice = true, is_limited = true, liquid = :predicted)
+        p3 = mp.ice.scheme
+        liq = p3.liquid
+        subdep = mp.warm_rain.subdep
+        ρ = FT(1)
+        T = p3.T_freeze - FT(10)
+        (q_tot, q_lcl, q_rai) = (FT(5e-4), FT(0), FT(0))
+        (q_ice, n_ice, q_liq) = (FT(1e-4), FT(2e5), FT(5e-5))
+        cat = (; q_ice, n_ice, q_rim = FT(0), b_rim = FT(0), q_liq_on_ice = q_liq)
+        st = P3.state_from_prognostic(p3, q_ice * ρ, n_ice * ρ, FT(0), FT(0), q_liq * ρ)
+
+        # the deficits exceed the condensate masses, so both relaxations sit in
+        # the mass-limited branch
+        qs_ice = TDI.saturation_vapor_specific_content_over_ice(tps, T, ρ)
+        qs_liq = TDI.saturation_vapor_specific_content_over_liquid(tps, T, ρ)
+        q_vap = q_tot - q_lcl - q_rai - q_ice - q_liq
+        @test qs_ice - q_vap > q_ice
+        @test qs_liq - q_vap > q_liq
+
+        # hand-computed ramp weight and relaxation factors
+        F_liq_hand = (q_liq * ρ) / ((q_ice + q_liq) * ρ + liq.q_liq_present)
+        t = clamp((F_liq_hand - liq.F_dry) / liq.ΔF_switch, FT(0), FT(1))
+        w = t^2 * (3 - 2t)
+        Rᵥ = TDI.Rᵥ(tps)
+        Lₛ = TDI.Lₛ(tps, T)
+        Lᵥ = TDI.Lᵥ(tps, T)
+        τ = subdep.τ_relax
+        cp_core = TDI.cpₘ(tps, q_tot, q_lcl + q_rai, q_ice + q_liq)
+        cp_shell = TDI.cpₘ(tps, q_tot, q_liq, q_ice)
+        Γᵢ = 1 + (Lₛ / cp_core) * qs_ice * (Lₛ / (Rᵥ * T^2) - 1 / T)
+        Γₗ = 1 + (Lᵥ / cp_shell) * qs_liq * (Lᵥ / (Rᵥ * T^2) - 1 / T)
+        expected_core = -(1 - w) * q_ice / (τ * Γᵢ)
+        expected_shell = -w * q_liq / (τ * Γₗ)
+        expected_n =
+            (1 - w) * (n_ice / q_ice) * (-q_ice / (τ * Γᵢ)) +
+            w * (n_ice / (q_ice + q_liq)) * (-q_liq / (τ * Γₗ))
+
+        z = zero(FT)
+        (dq_ice, dn_ice, dq_rim, db_rim, dq_liq) = BMT._vapor_exchange_accumulate(
+            liq, subdep, tps, ρ, T, q_tot, q_lcl, q_rai, q_ice, n_ice, cat, st,
+            z, z, z, z, z,
+        )
+        rtol = FT === Float32 ? 1e-3 : 1e-6
+        @test dq_ice ≈ expected_core rtol = rtol
+        @test dq_liq ≈ expected_shell rtol = rtol
+        @test dn_ice ≈ expected_n rtol = rtol
+        @test dq_rim == 0 && db_rim == 0  # unrimed state
+    end
+end
+
+
+function test_liquid_entry_jacobian(FT)
+    @testset "entry ExactJacobian (liquid on)" begin
+        tps = TDI.TD.Parameters.ThermodynamicsParameters(FT)
+        mp = CMP.Microphysics2MParams(FT; with_ice = true, is_limited = true, liquid = :predicted)
+        T_frz = mp.ice.scheme.T_freeze
+        ρ = FT(1)
+        (q_tot, q_lcl, n_lcl, q_rai, n_rai) = (FT(8e-3), FT(1e-3), FT(1e8), FT(5e-4), FT(1e4))
+        (q_ice, n_ice, q_rim, b_rim) = (FT(8e-4), FT(2e5), FT(3e-4), FT(1e-6))
+
+        # primal/Jacobian lockstep at the healthy state, at F_liq → 0, and near
+        # F_melt, above and below freezing; the 3-slot shape stays frozen on the
+        # substep context
+        for T in (T_frz - FT(10), T_frz + FT(2)), F_liq in (FT(0), FT(0.3), FT(0.95))
+            q_liq = _ρq_liq_from_F(q_ice, F_liq)
+            st = P3.state_from_prognostic(
+                mp.ice.scheme, q_ice * ρ, n_ice * ρ, q_rim * ρ, b_rim * ρ, q_liq * ρ,
+            )
+            shape = P3.get_distribution_shape(st)
+            g = BMT.Instantaneous2MP3Tendency(mp, tps, ρ, T, q_tot, (shape,))
+            x = BMT.MicroState{FT, 1, true, false}((
+                q_lcl, n_lcl, q_rai, n_rai, q_ice, n_ice, q_rim, b_rim, q_liq,
+            ))
+            f, J = BMT._tendency_and_jacobian(BMT.ExactJacobian(), g, x)
+            @test all(isfinite, f)
+            @test all(isfinite, J)
+            @test f == g(x)  # primal recovered from the dual pass
+        end
+    end
+end
+
+function test_liquid_sedimentation(FT)
+    @testset "mixed-particle sedimentation velocities" begin
+        p = CMP.ParametersP3(FT; liquid = :predicted)
+        pn = CMP.ParametersP3(FT)
+        vel = CMP.Chen2022VelType(FT)
+        quad = P3.GaussLegendre(FT, 12)
+        ρₐ = FT(1)
+        ρq_ice, ρn_ice, ρq_rim, ρb_rim = FT(8e-4), FT(2e5), FT(3e-4), FT(1e-6)
+        ρq_liq = _ρq_liq_from_F(ρq_ice, FT(0.5))
+        st = P3.state_from_prognostic(p, ρq_ice, ρn_ice, ρq_rim, ρb_rim, ρq_liq)
+        sh = P3.get_distribution_shape(st)
+
+        vn = P3.ice_terminal_velocity_number_weighted(vel, ρₐ, st, sh; quad)
+        vm = P3.ice_terminal_velocity_mass_weighted(vel, ρₐ, st, sh; quad)
+        @test isfinite(vn) && vn > 0
+        @test isfinite(vm) && vm > 0
+        @test vn < vm  # mass weighting emphasizes larger, faster particles
+
+        # prognostic wrappers with the trailing liquid argument
+        vn2 = P3.ice_terminal_velocity_number_weighted_from_prognostic(
+            vel, ρₐ, p, ρq_ice, ρn_ice, ρq_rim, ρb_rim, ρq_liq, sh.logλ; quad,
+        )
+        vm2 = P3.ice_terminal_velocity_mass_weighted_from_prognostic(
+            vel, ρₐ, p, ρq_ice, ρn_ice, ρq_rim, ρb_rim, ρq_liq, sh.logλ; quad,
+        )
+        @test vn2 ≈ vn rtol = 1e-6
+        @test vm2 ≈ vm rtol = 1e-6
+
+        # F_liq = 0 under the predicted treatment equals the dry velocities
+        st0 = P3.state_from_prognostic(p, ρq_ice, ρn_ice, ρq_rim, ρb_rim, FT(0))
+        sh0 = P3.get_distribution_shape(st0)
+        stn = P3.state_from_prognostic(pn, ρq_ice, ρn_ice, ρq_rim, ρb_rim)
+        shn = P3.P3Shape(; logλ = sh0.logλ, μ = sh0.μ)
+        @test P3.ice_terminal_velocity_number_weighted(vel, ρₐ, st0, sh0; quad) ==
+              P3.ice_terminal_velocity_number_weighted(vel, ρₐ, stn, shn; quad)
+        @test P3.ice_terminal_velocity_mass_weighted(vel, ρₐ, st0, sh0; quad) ==
+              P3.ice_terminal_velocity_mass_weighted(vel, ρₐ, stn, shn; quad)
+    end
+end
+
 @testset "P3 liquid-fraction tests ($FT)" for FT in (Float64, Float32)
     test_liquid_fraction_state(FT)
     test_liquid_mass_fraction_onset(FT)
@@ -522,4 +980,15 @@ end
     test_ice_shed(FT)
     test_vapor_ramp(FT)
     test_no_nan_corners(FT)
+
+    # tendency-entry wiring
+    test_liquid_entry_wiring(FT)
+    test_liquid_collision_routing(FT)
+    test_liquid_entry_conservation(FT)
+    test_residual_liquid_drain(FT)
+    test_liquid_entry_jacobian(FT)
+    test_liquid_jacobian_sweep(FT)
+    test_liquid_jacobian_fd(FT)
+    test_vapor_anchor(FT)
+    test_liquid_sedimentation(FT)
 end

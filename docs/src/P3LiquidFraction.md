@@ -131,7 +131,9 @@ L_{shd} = F_{rim}\, F_{liq}\, \frac{π ρ_l}{6} \int_{D_{shd}}^{\infty} D^3\, n(
 evaluated through the log-space upper incomplete gamma ([`log_upper_incomplete_gamma`](@ref)).
 At ``λ D_{shd} \sim 90`` a linear-space tail is at the edge of the Float32 range; the regularised ratio ``Q`` remains representable well past that point and the log-space form stays accurate there, underflowing cleanly to zero only at extreme ``λ D_{shd}``, where shedding is negligible.
 An `eps`-floored linear-space moment would instead overestimate the tail.
-Shedding is instantaneous in the reference; [`ice_shed`](@ref) returns the shed-able mass and the corresponding rain number as drops of mean diameter ``D_{shd,drop}`` (`P3_shedding_drop_diameter`, `1e-3 m`), which the host applies limited to the available liquid.
+Shedding is instantaneous in the reference; [`ice_shed`](@ref) returns the shed-able mass and the corresponding rain number as drops of mean diameter ``D_{shd,drop}`` (`P3_shedding_drop_diameter`, `1e-3 m`).
+The tendency entry converts the shed-able mass to a rate over `P3_shedding_timescale` (1 s): the reference applies the shed-able mass as a per-step rate over one implicit second, so the default reproduces its rate; the value is the reference's numerical convention, not a physically derived relaxation.
+There is no in-scheme per-step availability limit on the shed rate; the rate self-limits as the liquid depletes, and the Rosenbrock substep and host floors bound the applied amount.
 
 ### Vapor path
 
@@ -139,3 +141,33 @@ The vapor exchange switches between deposition/sublimation on the dry core and c
 The reference discontinuous switch at ``F_{dry}`` is replaced by a ``C^1`` Hermite ramp [`vapor_path_weight`](@ref) on the band ``[F_{dry}, F_{dry} + ΔF]``, with ``F_{dry}`` from `P3_liquid_fraction_dry_threshold` (0.01) and the width ``ΔF`` from `P3_liquid_fraction_switch_width` (0.02).
 The ramp satisfies ``w(0) = 0`` and ``w'(0) = 0``, so the dry-ice deposition/sublimation baseline is untouched and the manual/exact Jacobian sees no kink in the state variable ``F_{liq}``.
 This is a modeling deviation justified by the tuning latitude of ``F_{dry}`` in the reference (0.01 up to 0.2) and by Jacobian smoothness; the band is asserted strictly inside ``(0, F_{melt})`` at construction.
+
+## Host wiring contract
+
+The predicted-liquid-fraction scheme is selected with
+`Microphysics2MParams(FT; with_ice = true, liquid = :predicted)` and enters the bulk-tendency interface through the packed 2M+P3 entry; there is no positional form (the `logλ`-based positional wrappers remain dry-only and throw under the predicted treatment).
+Per grid cell and substep, the host:
+
+ 1. builds the state from the prognostic variables including the liquid on ice,
+    `state = state_from_prognostic(params, ρq_ice, ρn_ice, ρq_rim, ρb_rim, ρq_liq_on_ice)`,
+    and solves the shape once, `shape = get_distribution_shape(state)` (the whole-particle slope, the shared ``μ``, and the frozen-core slope `logλ_core`, all frozen for the call);
+ 2. calls the packed entry with the per-category input
+    `ice = ((; q_ice, n_ice, q_rim, b_rim, q_liq_on_ice),)` (specific quantities, kg/kg) and `shapes = (shape,)`.
+
+The returned tendency `NamedTuple` gains a `dq_liq_on_ice_dt` field [kg/kg/s] after the rime-volume field, in the instantaneous entry and in the `RosenbrockAverage{ExactJacobian}` mode (`rosenbrock_exact`).
+`rosenbrock_manual` and the `Verbose` diagnostic path do not support the predicted treatment and throw; the manual-Jacobian tiers for the liquid row are deferred, and `ExactJacobian` (the validation path) differentiates the entry with the three-slot shape frozen on the substep context.
+Box A/B campaigns run `rosenbrock_exact`: a non-finite Jacobian at a corner state routes that substep to the built-in forward-Euler fallback, and the manual tiers are not a prerequisite.
+
+Every liquid source and sink has a matching entry against rain, rime, or the frozen core: melting (core to rain and to retained liquid, with the rime drain), refreezing (liquid to rime and core), shedding (liquid to rain over `P3_shedding_timescale`), and collection (collected cloud and rain to retained liquid or rime).
+The vapor exchange is the only non-transfer term: the ramp splits it between core deposition/sublimation and shell condensation/evaporation, both bulk relaxations toward ice and liquid saturation on the `SubDep2M` timescale (not PSD-resolved integrals, consistent with the dry treatment), with the liquid on ice included in the vapor and heat budgets (the reference translates every total-ice reference as core plus liquid).
+
+The sedimentation velocities for the mixed particle are
+[`ice_terminal_velocity_number_weighted`](@ref) and
+[`ice_terminal_velocity_mass_weighted`](@ref) evaluated on the predicted-liquid state: both dispatch on the liquid treatment and use the blended whole-particle fall speed over the whole-particle PSD (C19 Eqs. A8, A9), with the mass weighting on [`mixed_mass`](@ref) normalised by the total mixed-phase mass.
+The prognostic sedimentation wrappers ([`ice_terminal_velocity_number_weighted_from_prognostic`](@ref), [`ice_terminal_velocity_mass_weighted_from_prognostic`](@ref)) gain forms with a trailing `ρq_liq` argument before `logλ`.
+`ρq_liq_on_ice` sediments with the mass-weighted velocity of the whole particle, as does the frozen core.
+
+Positivity is layered: the host (ClimaAtmos) floors `ρq_liq_on_ice` alongside the other cold-moment species; the state construction clamps the regularised `F_liq` into `[0, F_melt]`; and the Rosenbrock substep floors the species vector at zero.
+For the condensate rescale, the saturation adjustment, and the energy partition, `ρq_liq_on_ice` is liquid-phase condensate (it enters with the vaporization enthalpy ``L_v``; the frozen core with ``L_s``), even though it is floored and advected with the cold-moment species.
+Residual liquid on an emptied core (frozen core below the entry's ice-presence threshold) drains to rain as ``D_{shd,drop}`` drops over `P3_shedding_timescale`; the drain ramps linearly to zero at the presence threshold, so it is continuous in the core mass and identically zero wherever the liquid transfer processes are active.
+The instantaneous complete-melt and tiny-film cleanups of the reference are represented continuously by this drain, the shedding rate, and the refreezing integral (which acts on any liquid fraction below freezing).
