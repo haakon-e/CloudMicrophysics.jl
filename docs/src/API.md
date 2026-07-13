@@ -445,6 +445,7 @@ Utilities.ϵ_numerics
 Utilities.ϵ_numerics_2M_M
 Utilities.ϵ_numerics_2M_N
 Utilities.ϵ_numerics_P3_B
+Utilities.SPECIES_PRESENCE_THRESHOLD
 Utilities.gamma_inc
 Utilities.gamma_inc_inv
 Utilities.rime_mass_fraction
