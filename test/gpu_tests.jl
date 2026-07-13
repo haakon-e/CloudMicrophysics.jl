@@ -1248,10 +1248,11 @@ function test_gpu(FT)
             TT.@test all(isfinite, tendencies)
         end
 
-        # 2M warm rain tests
+        # 2M warm rain tests (the warm-only path returns the same field set as
+        # the P3 path, with the ice fields zero)
         DT_warm = @NamedTuple{
             dq_lcl_dt::FT, dn_lcl_dt::FT, dq_rai_dt::FT, dn_rai_dt::FT,
-            dq_ice_dt::FT, dq_rim_dt::FT, db_rim_dt::FT, dn_lcl_activation_dt::FT,
+            dq_ice_dt::FT, dn_ice_dt::FT, dq_rim_dt::FT, db_rim_dt::FT, dn_lcl_activation_dt::FT,
         }
         (; output) = setup_output(ndrange, DT_warm)
         n_lcl = constant_data(FT(1e8); ndrange)
@@ -1266,7 +1267,7 @@ function test_gpu(FT)
             TT.@test iszero(tendencies.dq_ice_dt)  # Ice tendency is zero for warm-only
         end
 
-        # 2M+P3 tests (the P3 path additionally returns `dn_ice_dt`)
+        # 2M+P3 tests
         DT_p3 = @NamedTuple{
             dq_lcl_dt::FT, dn_lcl_dt::FT, dq_rai_dt::FT, dn_rai_dt::FT,
             dq_ice_dt::FT, dn_ice_dt::FT, dq_rim_dt::FT, db_rim_dt::FT, dn_lcl_activation_dt::FT,

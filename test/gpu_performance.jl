@@ -211,7 +211,7 @@ function run_gpu_performance_benchmarks(FT)
         mp_2m = CMP.Microphysics2MParams(FT)
         DT_2m_bulk = @NamedTuple{
             dq_lcl_dt::FT, dn_lcl_dt::FT, dq_rai_dt::FT, dn_rai_dt::FT,
-            dq_ice_dt::FT, dq_rim_dt::FT, db_rim_dt::FT, dn_lcl_activation_dt::FT,
+            dq_ice_dt::FT, dn_ice_dt::FT, dq_rim_dt::FT, db_rim_dt::FT, dn_lcl_activation_dt::FT,
         }
         (; output, ndrange) = setup_output(N_states, DT_2m_bulk)
 

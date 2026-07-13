@@ -812,6 +812,25 @@ end
 
 # --- 2-Moment Microphysics (Unified Warm + Optional Ice) ---
 
+"""
+    _p3_ice_tendency_fields(dq_ice_dt, dn_ice_dt, dq_rim_dt, db_rim_dt)
+
+The per-category P3 ice tendency fields, in canonical order.
+"""
+@inline _p3_ice_tendency_fields(dq_ice_dt, dn_ice_dt, dq_rim_dt, db_rim_dt) =
+    (; dq_ice_dt, dn_ice_dt, dq_rim_dt, db_rim_dt)
+
+"""
+    _bulk_2mp3_tendencies(warm, ice, dn_lcl_activation_dt)
+
+Assemble the 2M+P3 tendency `NamedTuple` from the warm-rain block `warm`
+(`dq_lcl_dt, dn_lcl_dt, dq_rai_dt, dn_rai_dt`), the ice block `ice`
+(see [`_p3_ice_tendency_fields`](@ref)), and the trailing non-species
+`dn_lcl_activation_dt` slot. Both 2M entry methods (warm-only and warm + P3 ice)
+return through this single assembler.
+"""
+@inline _bulk_2mp3_tendencies(warm, ice, dn_lcl_activation_dt) =
+    (; warm..., ice..., dn_lcl_activation_dt)
 
 """
     bulk_microphysics_tendencies(
@@ -843,6 +862,7 @@ For warm rain + P3 ice, see the method that accepts `Microphysics2MParams{FT, WR
 - `dq_rai_dt`: Rain tendency (kg/kg/s)
 - `dn_rai_dt`: Rain number tendency (1/kg/s)
 - `dq_ice_dt`: Ice tendency (always zero for warm-only)
+- `dn_ice_dt`: Ice number tendency (always zero for warm-only)
 - `dq_rim_dt`: Rime mass tendency (always zero for warm-only)
 - `db_rim_dt`: Rime volume tendency (always zero for warm-only)
 """
@@ -867,6 +887,7 @@ For warm rain + P3 ice, see the method that accepts `Microphysics2MParams{FT, WR
 
     # Initialize ice-related tendencies (always zero for warm-only)
     dq_ice_dt = zero(ρ)
+    dn_ice_dt = zero(ρ)
     dq_rim_dt = zero(ρ)
     db_rim_dt = zero(ρ)
 
@@ -878,8 +899,11 @@ For warm rain + P3 ice, see the method that accepts `Microphysics2MParams{FT, WR
     dn_rai_dt = warm.dn_rai_dt
     dn_lcl_activation_dt = warm.dn_lcl_activation_dt
 
-    return (; dq_lcl_dt, dn_lcl_dt, dq_rai_dt, dn_rai_dt,
-        dq_ice_dt, dq_rim_dt, db_rim_dt, dn_lcl_activation_dt)
+    return _bulk_2mp3_tendencies(
+        (; dq_lcl_dt, dn_lcl_dt, dq_rai_dt, dn_rai_dt),
+        _p3_ice_tendency_fields(dq_ice_dt, dn_ice_dt, dq_rim_dt, db_rim_dt),
+        dn_lcl_activation_dt,
+    )
 end
 
 """
@@ -1105,9 +1129,11 @@ to be non-Nothing, eliminating runtime type checks and dynamic dispatch.
     # Aerosol activation is folded into `warm_rain_tendencies_2m` above —
     # `dn_lcl_activation_dt` from `warm` is already included in `dn_lcl_dt`.
 
-    return (; dq_lcl_dt, dn_lcl_dt, dq_rai_dt, dn_rai_dt,
-        dq_ice_dt, dn_ice_dt, dq_rim_dt, db_rim_dt,
-        dn_lcl_activation_dt)
+    return _bulk_2mp3_tendencies(
+        (; dq_lcl_dt, dn_lcl_dt, dq_rai_dt, dn_rai_dt),
+        _p3_ice_tendency_fields(dq_ice_dt, dn_ice_dt, dq_rim_dt, db_rim_dt),
+        dn_lcl_activation_dt,
+    )
 end
 
 include("BMT_rosenbrock.jl")

@@ -1063,12 +1063,14 @@ function test_bulk_microphysics_2m_tendencies(FT)
             dq_rai_dt::FT,
             dn_rai_dt::FT,
             dq_ice_dt::FT,
+            dn_ice_dt::FT,
             dq_rim_dt::FT,
             db_rim_dt::FT,
             dn_lcl_activation_dt::FT,
         }
         # Ice tendencies should be zero for 2M mode
         @test tendencies.dq_ice_dt == FT(0)
+        @test tendencies.dn_ice_dt == FT(0)
         @test tendencies.dq_rim_dt == FT(0)
         @test tendencies.db_rim_dt == FT(0)
         # Default NoActivation scheme yields zero activation tendency
