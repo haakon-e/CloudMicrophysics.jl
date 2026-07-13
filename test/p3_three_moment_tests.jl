@@ -1,11 +1,13 @@
 using Test: @testset, @test, @test_throws, @inferred
 import CloudMicrophysics.P3Scheme as P3
 import CloudMicrophysics.Parameters as CMP
+import CloudMicrophysics.BulkMicrophysicsTendencies as BMT
+import CloudMicrophysics.Microphysics2M as CM2
+import CloudMicrophysics.ThermodynamicsInterface as TDI
 import SpecialFunctions as SF
 import ForwardDiff as FD
 
 # Model log(L/N) of the three-moment residual at (state, μ, log(Z/N)).
-# See /home/haakon/notes/p3-mmc2025/impl/3mom-monotonicity-study.md
 function _mono_φ(state, μ, logZdN)
     lλ = (SF.loggamma(μ + 7) - SF.loggamma(μ + 1) - logZdN) / 6
     return P3.logmass_gamma_moment(state, μ, lλ; n = 0) - P3.loggamma_moment(μ, lλ; k = 0)
@@ -398,6 +400,248 @@ function test_3m_onset_decoupled(FT)
     end
 end
 
+# Packed three-moment inputs with a prescribed shape, plus the entry context.
+function _bmt_3m_setup(FT; μt = FT(5), λt = FT(1e4), F_rim = FT(0.4), ρ_rim = FT(400), n_ice = FT(2e5))
+    tps = TDI.TD.Parameters.ThermodynamicsParameters(FT)
+    mp = CMP.Microphysics2MParams(FT; with_ice = true, moments = :three_moment)
+    p3 = mp.ice.scheme
+    ρ = FT(0.9)
+    (; state) = _state_from_shape(p3, μt, λt, F_rim, ρ_rim, n_ice * ρ)
+    q_ice = state.ρq_ice / ρ
+    q_rim = F_rim * q_ice
+    b_rim = q_rim / ρ_rim
+    z_ice = state.ρz_ice / ρ
+    st = P3.state_from_prognostic(p3, q_ice * ρ, n_ice * ρ, q_rim * ρ, b_rim * ρ, z_ice * ρ)
+    shape = P3.get_distribution_shape(st)
+    ice = ((; q_ice, n_ice, q_rim, b_rim, z_ice),)
+    shapes = (shape,)
+    warm = (; q_lcl = FT(2e-4), n_lcl = FT(5e7), q_rai = FT(1e-4), n_rai = FT(4e4))
+    return (; tps, mp, p3, ρ, T = FT(262), q_tot = FT(4e-3), warm, ice, shapes, st)
+end
+
+function test_3m_entry_fields(FT)
+    @testset "Three-moment entry tendency fields" begin
+        (; tps, mp, ρ, T, q_tot, warm, ice, shapes) = _bmt_3m_setup(FT)
+        t = BMT.bulk_microphysics_tendencies(
+            BMT.Microphysics2Moment(), mp, tps, ρ, T, q_tot, warm..., ice, shapes,
+        )
+        @test keys(t) == (
+            :dq_lcl_dt, :dn_lcl_dt, :dq_rai_dt, :dn_rai_dt,
+            :dq_ice_dt, :dn_ice_dt, :dq_rim_dt, :db_rim_dt, :dz_ice_dt,
+            :dn_lcl_activation_dt,
+        )
+        @test all(isfinite, values(t))
+        for mode in (BMT.rosenbrock_exact(), BMT.rosenbrock_manual())
+            r = BMT.bulk_microphysics_tendencies(
+                mode, BMT.Microphysics2Moment(), mp, tps, ρ, T, q_tot, warm..., ice, shapes,
+                FT(60), 4,
+            )
+            @test keys(r) == keys(t)
+            @test all(isfinite, values(r))
+        end
+        # Verbose does not support three-moment ice.
+        @test_throws ArgumentError BMT.bulk_microphysics_tendencies(
+            BMT.Verbose(BMT.rosenbrock_exact()), BMT.Microphysics2Moment(),
+            mp, tps, ρ, T, q_tot, warm..., ice, shapes, FT(60), 1,
+        )
+        # The logλ-based positional packer requires a slope law (two-moment only).
+        @test_throws MethodError BMT._pack_2mp3_ice(
+            mp, ice[1].q_ice, ice[1].n_ice, ice[1].q_rim, ice[1].b_rim, FT(7),
+        )
+    end
+end
+
+function test_3m_entry_z_assembly(FT)
+    @testset "Reflectivity tendency assembly in the entry" begin
+        (; mp, p3, ρ, ice, shapes) = _bmt_3m_setup(FT)
+        moments = p3.moments
+        zc = BMT._reflectivity_coefficients(moments, mp, ρ, ice, shapes, nothing)
+        @test zc isa Tuple{P3.ReflectivityCoefficients{FT}}
+        acc = (; dq_ice_dt = FT(2e-7), dn_ice_dt = FT(-3), dq_rim_dt = FT(1e-8), db_rim_dt = FT(1e-11))
+        init = (;
+            D_nuc = FT(1e-5),
+            dq_nuc = FT(1e-9), dn_nuc = FT(0.5),
+            dq_cldfrz = FT(2e-9), dn_cldfrz = FT(0.7),
+            dq_raifrz = FT(3e-9), dn_raifrz = FT(0.2),
+        )
+        out = BMT._ice_tendency_fields(moments, zc, p3, ρ, acc, init)
+        @test keys(out) == (:dq_ice_dt, :dn_ice_dt, :dq_rim_dt, :db_rim_dt, :dz_ice_dt)
+        @test (out.dq_ice_dt, out.dn_ice_dt) == (acc.dq_ice_dt, acc.dn_ice_dt)
+        dZ_init =
+            P3.reflectivity_initiation_monodisperse(moments.μ_init, init.D_nuc, init.dn_nuc * ρ) +
+            P3.reflectivity_initiation_freezing(
+                moments,
+                p3.ρ_i,
+                moments.μ_init,
+                init.dq_cldfrz * ρ,
+                init.dn_cldfrz * ρ,
+            ) +
+            P3.reflectivity_initiation_freezing(moments, p3.ρ_i, zero(FT), init.dq_raifrz * ρ, init.dn_raifrz * ρ)
+        dL_g = (acc.dq_ice_dt - init.dq_nuc - init.dq_cldfrz - init.dq_raifrz) * ρ
+        dN_g = (acc.dn_ice_dt - init.dn_nuc - init.dn_cldfrz - init.dn_raifrz) * ρ
+        expected = (P3.reflectivity_growth_tendency(zc[1], dL_g, dN_g) + dZ_init) / ρ
+        @test out.dz_ice_dt ≈ expected rtol = 10 * eps(FT)
+        # Two-moment assembly is the four-field form.
+        mom2 = CMP.ParametersP3(FT).moments
+        out2 = BMT._ice_tendency_fields(mom2, nothing, p3, ρ, acc, init)
+        @test keys(out2) == (:dq_ice_dt, :dn_ice_dt, :dq_rim_dt, :db_rim_dt)
+    end
+end
+
+function test_3m_entry_jacobians(FT)
+    @testset "Entry Jacobians: zero z column, frozen-combination z row" begin
+        (; tps, mp, p3, ρ, T, q_tot, warm, ice, shapes) = _bmt_3m_setup(FT)
+        zc = BMT._reflectivity_coefficients(p3.moments, mp, ρ, ice, shapes, nothing)
+        g = BMT.Instantaneous2MP3Tendency(mp, tps, ρ, T, q_tot, shapes, zc)
+        x = BMT.MicroState{FT, 1, false, true}((warm..., values(ice[1])...))
+
+        # ExactJacobian: the reflectivity is receiver-only; its column is zero.
+        f, J = BMT._tendency_and_jacobian(BMT.rosenbrock_exact().jacobian, g, x)
+        @test all(isfinite, f) && all(isfinite, J)
+        @test all(iszero, J[:, 9])
+        @test f ≈ g(x) rtol = 10 * eps(FT)
+
+        # ManualJacobian: eight-state block unchanged; z row is the frozen
+        # linear combination of the q_ice and n_ice rows; z column zero.
+        Jm = BMT._jacobian_2mp3_manual(g, x)
+        x8 = BMT.MicroState2MP3{FT}(ntuple(i -> x[i], Val(8)))
+        J8 = BMT._jacobian_2mp3_manual(g, x8)
+        @test Jm[1:8, 1:8] == J8
+        @test all(iszero, Jm[:, 9])
+        (; G, M3divN, M3divL) = zc[1]
+        c_q = 2 * G * M3divN * M3divL
+        c_n = -G * M3divN^2
+        @test all(Jm[9, j] == c_q * J8[5, j] + c_n * J8[6, j] for j in 1:8)
+
+        # The manual z row is a growth-only approximation: it linearizes the
+        # full q_ice/n_ice rows and omits the initiation-source derivative, so
+        # it differs from the exact z row by a bounded amount.
+        div = maximum(abs.(Float64.(Tuple(Jm[9, :] .- J[9, :]))))
+        scale = maximum(abs.(Float64.(Tuple(J[9, :]))))
+        @test div > 0
+        @test div < 3 * scale
+    end
+end
+
+function test_3m_numadj_band(FT)
+    @testset "Closure-aware number-adjustment band" begin
+        (; tps, mp, p3, ρ, T, q_tot, warm, shapes) = _bmt_3m_setup(FT)
+        band3 = BMT._ice_numadj_params(FT, p3.moments)
+        band2 = BMT._ice_numadj_params(FT, CMP.ParametersP3(FT).moments)
+        @test band2 == (; τ = FT(100), x_min = FT(1e-12), x_max = FT(1e-5))
+        @test band3.x_min == FT(p3.moments.mean_mass_min)
+        @test band3.x_max == FT(p3.moments.mean_mass_max)
+        @test band3.x_max > band2.x_max
+
+        # Mean mass between the two upper bounds: adjusted under the two-moment
+        # band, interior under the relaxed band.
+        q, n = FT(1e-4), FT(1)
+        @test CM2.number_tendency_from_mass_limits(band2, q, n) > 0
+        @test CM2.number_tendency_from_mass_limits(band3, q, n) == 0
+
+        # The per-process decomposition (the Eq-10 dN feed and the manual
+        # Jacobian) uses the same closure band as the entry.
+        ice = ((; q_ice = q, n_ice = n, q_rim = FT(0), b_rim = FT(0), z_ice = FT(1e-10)),)
+        pp = BMT._per_process_2mp3(mp, tps, ρ, T, q_tot, warm..., ice, shapes)
+        @test BMT.ice_n(pp.ice_numadj, Val(1)) ==
+              CM2.number_tendency_from_mass_limits(band3, q, n)
+        q_hi, n_hi = FT(1e-8), FT(1e6)  # mean mass below x_min: adjusted in both bands
+        ice_hi = ((; q_ice = q_hi, n_ice = n_hi, q_rim = FT(0), b_rim = FT(0), z_ice = FT(1e-10)),)
+        pp_hi = BMT._per_process_2mp3(mp, tps, ρ, T, q_tot, warm..., ice_hi, shapes)
+        ∂ₜn_adj = CM2.number_tendency_from_mass_limits(band3, q_hi, n_hi)
+        @test ∂ₜn_adj < 0
+        @test BMT.ice_n(pp_hi.ice_numadj, Val(1)) == ∂ₜn_adj
+    end
+end
+
+function test_3m_exact_jacobian_f32_fragility(FT)
+    @testset "Exact-Jacobian finiteness across the shape grid" begin
+        (; tps, mp, p3, ρ, T, q_tot, warm) = _bmt_3m_setup(FT)
+        n_states = 0
+        n_nonfinite = 0
+        for μt in FT.((0, 2, 3, 5, 10, 18)), λt in FT.((5e2, 1e3, 5e3, 1e4, 2e4, 1e5)),
+            (Fr, ρr) in ((FT(0), FT(0)), (FT(0.4), FT(400)), (FT(0.9), FT(900))),
+            n_ice in FT.((1e5, 2e5))
+
+            (; state) = _state_from_shape(p3, μt, λt, Fr, ρr, n_ice * ρ)
+            q_ice = state.ρq_ice / ρ
+            q_rim = Fr * q_ice
+            b_rim = Fr > 0 ? q_rim / ρr : FT(0)
+            z_ice = state.ρz_ice / ρ
+            ice = ((; q_ice, n_ice, q_rim, b_rim, z_ice),)
+            st = P3.state_from_prognostic(p3, q_ice * ρ, n_ice * ρ, q_rim * ρ, b_rim * ρ, z_ice * ρ)
+            shapes = (P3.get_distribution_shape(st),)
+            zc = BMT._reflectivity_coefficients(p3.moments, mp, ρ, ice, shapes, nothing)
+            g = BMT.Instantaneous2MP3Tendency(mp, tps, ρ, T, q_tot, shapes, zc)
+            x = BMT.MicroState{FT, 1, false, true}((warm..., values(ice[1])...))
+            f, J = BMT._tendency_and_jacobian(BMT.rosenbrock_exact().jacobian, g, x)
+            Jm = BMT._jacobian_2mp3_manual(g, x)
+            n_states += 1
+            all(isfinite, J) || (n_nonfinite += 1)
+            @test all(isfinite, f)
+            @test all(isfinite, Jm)
+        end
+        frac = n_nonfinite / n_states
+        @info "Exact-Jacobian non-finite fraction ($FT): $n_nonfinite / $n_states = $(round(frac; digits = 3))"
+        if FT === Float64
+            @test n_nonfinite == 0
+        else
+            # Float32 collision-quadrature differentiation sensitivity; those
+            # substeps take the forward-Euler fallback. See the three-moment
+            # documentation.
+            @test frac <= 0.5
+        end
+    end
+end
+
+function test_3m_rosenbrock_corners(FT)
+    @testset "Primal/Jacobian lockstep at empty-category and Z-window corners" begin
+        (; tps, mp, p3, ρ, T, q_tot, warm) = _bmt_3m_setup(FT)
+        (; zn_lo, zn_hi) = p3.moments
+        n_ice = FT(2e5)
+        q_ice = FT(1e-4)
+        corners = (
+            (FT(0), FT(0), FT(0)),                       # empty category
+            (q_ice, n_ice, zn_lo * n_ice),               # Z at the window lower edge
+            (q_ice, n_ice, zn_hi * n_ice),               # Z at the window upper edge
+            (q_ice, n_ice, FT(0)),                       # Z below the window
+            (q_ice, n_ice, FT(1e10)),                    # Z above the window
+        )
+        for (qi, ni, ρzi) in corners
+            q_rim = FT(0.4) * qi
+            b_rim = q_rim / FT(400)
+            z_ice = ρzi / ρ
+            st = P3.state_from_prognostic(p3, qi * ρ, ni * ρ, q_rim * ρ, b_rim * ρ, ρzi)
+            shape = P3.get_distribution_shape(st)
+            ice = ((; q_ice = qi, n_ice = ni, q_rim, b_rim, z_ice),)
+            shapes = (shape,)
+            t = BMT.bulk_microphysics_tendencies(
+                BMT.Microphysics2Moment(), mp, tps, ρ, T, q_tot, warm..., ice, shapes,
+            )
+            @test all(isfinite, values(t))
+            zc = BMT._reflectivity_coefficients(p3.moments, mp, ρ, ice, shapes, nothing)
+            g = BMT.Instantaneous2MP3Tendency(mp, tps, ρ, T, q_tot, shapes, zc)
+            x = BMT.MicroState{FT, 1, false, true}((warm..., values(ice[1])...))
+            f, J = BMT._tendency_and_jacobian(BMT.rosenbrock_exact().jacobian, g, x)
+            @test all(isfinite, f)
+            # A non-finite exact Jacobian routes the substep to the Euler
+            # fallback (pre-existing Float32 collision-quadrature sensitivity);
+            # wherever the Jacobian is defined, the reflectivity column is zero.
+            @test !all(isfinite, J) || all(iszero, J[:, 9])
+            Jm = BMT._jacobian_2mp3_manual(g, x)
+            @test all(isfinite, Jm)
+            @test all(iszero, Jm[:, 9])
+            for mode in (BMT.rosenbrock_exact(), BMT.rosenbrock_manual()), nsub in (1, 4)
+                r = BMT.bulk_microphysics_tendencies(
+                    mode, BMT.Microphysics2Moment(), mp, tps, ρ, T, q_tot, warm..., ice, shapes,
+                    FT(60), nsub,
+                )
+                @test all(isfinite, values(r))
+            end
+        end
+    end
+end
+
 @testset "P3 three-moment tests ($FT)" for FT in (Float64, Float32)
     test_3m_monotonicity(FT)
     test_3m_solve_accuracy(FT)
@@ -409,5 +653,13 @@ end
     test_3m_tendencies(FT)
     test_3m_velocity(FT)
     test_3m_corners(FT)
+
+    # tendency-entry wiring
+    test_3m_entry_fields(FT)
+    test_3m_entry_z_assembly(FT)
+    test_3m_entry_jacobians(FT)
+    test_3m_numadj_band(FT)
+    test_3m_exact_jacobian_f32_fragility(FT)
+    test_3m_rosenbrock_corners(FT)
 end
 nothing

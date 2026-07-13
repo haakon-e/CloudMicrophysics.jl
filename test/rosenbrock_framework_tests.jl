@@ -466,6 +466,40 @@ function test_framework_2mp3_inference(FT)
     end
 end
 
+function _framework_3m_args(FT, mode...)
+    tps = TDI.TD.Parameters.ThermodynamicsParameters(FT)
+    mp = CMP.Microphysics2MParams(FT; with_ice = true, is_limited = true, moments = :three_moment)
+    p3 = mp.ice.scheme
+    ρ = FT(0.78)
+    (q_ice, n_ice, q_rim, b_rim, z_ice) = (FT(1e-4), FT(2e5), FT(4e-5), FT(6e-8), FT(1e-8))
+    st = P3.state_from_prognostic(p3, q_ice * ρ, n_ice * ρ, q_rim * ρ, b_rim * ρ, z_ice * ρ)
+    shape = P3.get_distribution_shape(st)
+    ice = ((; q_ice, n_ice, q_rim, b_rim, z_ice),)
+    tail = isempty(mode) ? () : (FT(60), 4)
+    return (
+        mode..., BMT.Microphysics2Moment(), mp, tps,
+        ρ, FT(273.5), FT(0.009),
+        FT(2e-4), FT(5e7), FT(1e-4), FT(4e4), ice, (shape,),
+        tail...,
+    )
+end
+
+function test_framework_3m_inference(FT)
+    for (name, mode) in (
+        ("instantaneous", ()),
+        ("rosenbrock_exact()", (BMT.rosenbrock_exact(),)),
+        ("rosenbrock_manual()", (BMT.rosenbrock_manual(),)),
+    )
+        args = _framework_3m_args(FT, mode...)
+        @testset "$name three-moment packed inference and allocations ($FT)" begin
+            @test (@inferred BMT.bulk_microphysics_tendencies(args...)) isa NamedTuple
+            JET.@test_opt BMT.bulk_microphysics_tendencies(args...)
+            trail = BT.@benchmark $(splat(BMT.bulk_microphysics_tendencies))($args) samples = 100 evals = 1
+            @test trail.memory == 0
+        end
+    end
+end
+
 # Packed-vs-positional 2M+P3 entry parity: the positional form packs its ice
 # scalars and shape via `_pack_2mp3_ice` and must reproduce the packed form
 # bit-for-bit.
@@ -622,3 +656,6 @@ test_packed_entry_parity(Float32)
 
 test_framework_2mp3_inference(Float64)
 test_framework_2mp3_inference(Float32)
+
+test_framework_3m_inference(Float64)
+test_framework_3m_inference(Float32)

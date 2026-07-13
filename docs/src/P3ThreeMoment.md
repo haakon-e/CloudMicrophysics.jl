@@ -212,8 +212,8 @@ The sweep shows order 6 (the mass/number default) insufficient for a transport
 quantity (maximum relative error ``3 \times 10^{-4}``), the `Float32` error
 saturating at its precision limit (``\approx 10^{-6}``) from order 10, and a
 `Float64` maximum error of ``4 \times 10^{-10}`` at order 12.
-The order is a keyword argument for now and becomes a `P3IceParams` field when
-the scheme is wired into the tendency entry.
+The order is the module constant `REFLECTIVITY_QUADRATURE_ORDER`, overridable
+per call through the `order` keyword argument.
 
 ## Advection transform
 
@@ -238,6 +238,65 @@ The state construction re-imposes the admissibility window on the recovered
 transport of the number and the advected variable can produce.
 Sedimentation acts on the true ``\rho z_\mathrm{ice}`` with ``V_z``, while the
 resolved transport acts on ``\rho z_\mathrm{adv}``.
+
+## Host wiring contract
+
+The three-moment scheme is selected with
+`Microphysics2MParams(FT; with_ice = true, moments = :three_moment)` and enters
+the bulk-tendency interface through the packed 2M+P3 entry; there is no
+positional form (the `logλ`-based positional wrappers require a slope law and
+remain two-moment only).
+Per grid cell and substep, the host:
+
+ 1. recovers the volumetric sixth moment from its advected prognostic,
+    ``\rho z_\mathrm{ice} = `` [`reflectivity_from_advected`](@ref)`(ρz_adv, ρn_ice, n_presence)`,
+    with `n_presence = moments.n_presence`, the number presence scale on the
+    `ThreeMoment` closure (ClimaParams `P3_ice_number_presence_concentration`,
+    ``10^{-3}`` m``^{-3}``);
+ 2. builds the state and solves the shape once,
+    `state = state_from_prognostic(params, ρq_ice, ρn_ice, ρq_rim, ρb_rim, ρz_ice)`
+    (the construction clamps ``\rho z_\mathrm{ice}`` into the admissible window)
+    and `shape = get_distribution_shape(state)`;
+ 3. calls the packed entry with the per-category input
+    `ice = ((; q_ice, n_ice, q_rim, b_rim, z_ice),)` where
+    `z_ice = ρz_ice / ρ` [m⁶/kg], and `shapes = (shape,)`.
+
+The returned tendency `NamedTuple` gains a `dz_ice_dt` field [m⁶/kg/s] after
+the rime-volume field, both in the instantaneous entry and in the
+`RosenbrockAverage` modes (`ExactJacobian` and `ManualJacobian`; the `Verbose`
+diagnostic path does not support three-moment ice).
+The sixth-moment sedimentation velocity is
+[`ice_terminal_velocity_reflectivity_weighted`](@ref)`(velocity_params, ρ, state, shape)`,
+and the outbound transform is [`advected_reflectivity`](@ref)`(ρn_ice, ρz_ice)`.
+
+Inside the entry, the reflectivity tendency assembles as the constant-μ growth
+term over the net growth/decay ice rates plus the initiation terms:
+deposition nucleation (monodisperse at ``D_{nuc}`` with ``\mu_{init}``), cloud
+immersion freezing (drop form; the SB2006 cloud PSD is a generalized gamma in
+mass, not a gamma in diameter, so its shape parameter falls back to
+``\mu_{init}``), and rain freezing (drop form with ``\mu = 0``, the exponential
+SB2006 rain PSD).
+The growth coefficients are frozen per entry call from the input state and
+shape, so within a Rosenbrock substep the reflectivity row of the Jacobian is
+the frozen linear combination ``c_q \cdot (q_\mathrm{ice}\ \text{row}) + c_n
+\cdot (n_\mathrm{ice}\ \text{row})`` and the reflectivity column is zero
+(receiver-only; verified by a ForwardDiff test through the entry).
+
+Under three-moment ice the number-adjustment mean-size limiter reads the
+closure's ``[`` `mean_mass_min` ``,`` `mean_mass_max` ``]`` band, whose relaxed
+upper bound (the 400 mm mean-size equivalent, `P3_ice_mean_mass_max`) leaves
+size sorting to the prognostic ``\mu``; the two-moment scheme keeps its fixed
+``[10^{-12}, 10^{-5}]`` kg band.
+
+For box and column runs, use `rosenbrock_manual()`: the hand-built Jacobian is
+finite on every tested state.
+The `ForwardDiff` Jacobian of the liquid-ice collision quadrature can produce
+non-finite entries in `Float32` at some (state, shape) combinations, which
+routes those substeps to the forward-Euler fallback; three-moment shapes reach
+such combinations more often than the two-moment slope-law shapes.
+The trigger fraction is quantified in `test/p3_three_moment_tests.jl`
+(`test_3m_exact_jacobian_f32_fragility`); resolving the `Float32`
+differentiation sensitivity of the collision quadrature is open follow-up work.
 
 ## Behavior under two-moment ice
 
