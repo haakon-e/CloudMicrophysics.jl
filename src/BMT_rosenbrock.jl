@@ -12,58 +12,81 @@ const ROSENBROCK_SPECIES_PRESENCE_THRESHOLD = 1e-10
 
 """
     _instantaneous_2mp3_tendency(mp, tps, ρ, T, q_tot,
-        q_lcl, n_lcl, q_rai, n_rai, ice, shapes)
+        q_lcl, n_lcl, q_rai, n_rai, ice, shapes; zcoeffs)
 
-The raw instantaneous 2M+P3 tendency projected onto the eight prognostic
-species: the unlimited process rates of the packed `Microphysics2Moment` entry,
-without timestep-dependent clipping.
+The raw instantaneous 2M+P3 tendency projected onto the prognostic species: the
+unlimited process rates of the packed `Microphysics2Moment` entry (every field
+except the trailing `dn_lcl_activation_dt`), without timestep-dependent
+clipping. `zcoeffs` carries the frozen reflectivity coefficients under
+three-moment ice; `nothing` otherwise.
 """
 @inline function _instantaneous_2mp3_tendency(mp, tps,
     ρ, T, q_tot,
-    q_lcl, n_lcl, q_rai, n_rai, ice, shapes,
+    q_lcl, n_lcl, q_rai, n_rai, ice, shapes;
+    zcoeffs = nothing,
 )
     full = bulk_microphysics_tendencies(Microphysics2Moment(), mp, tps,
         ρ, T, q_tot,
-        q_lcl, n_lcl, q_rai, n_rai, ice, shapes,
+        q_lcl, n_lcl, q_rai, n_rai, ice, shapes;
+        zcoeffs,
     )
-    return (; full.dq_lcl_dt, full.dn_lcl_dt, full.dq_rai_dt, full.dn_rai_dt,
-        full.dq_ice_dt, full.dn_ice_dt, full.dq_rim_dt, full.db_rim_dt)
+    return NamedTuple{Base.front(keys(full))}(Base.front(values(full)))
 end
 
 """
-    Instantaneous2MP3Tendency(mp, tps, ρ, T, q_tot, shapes)
+    Instantaneous2MP3Tendency(mp, tps, ρ, T, q_tot, shapes[, zcoeffs])
 
 Callable bundling the frozen per-substep context; applying it to the species
 vector evaluates [`_instantaneous_2mp3_tendency`](@ref). `q_tot` is promoted to
-the state's element type at the call; the frozen per-category `shapes`, `T`,
-and `ρ` stay plain.
+the state's element type at the call; the frozen per-category `shapes`, the
+frozen per-category reflectivity coefficients `zcoeffs` (three-moment ice;
+`nothing` otherwise, the default), `T`, and `ρ` stay plain.
 """
-struct Instantaneous2MP3Tendency{P, H, F, S}
+struct Instantaneous2MP3Tendency{P, H, F, S, C}
     mp::P
     tps::H
     ρ::F
     T::F
     q_tot::F
     shapes::S
+    zcoeffs::C
 end
+@inline Instantaneous2MP3Tendency(mp, tps, ρ, T, q_tot, shapes) =
+    Instantaneous2MP3Tendency(mp, tps, ρ, T, q_tot, shapes, nothing)
 @inline function (g::Instantaneous2MP3Tendency)(x::SA.StaticVector{8})
     (q_lcl, n_lcl, q_rai, n_rai, q_ice, n_ice, q_rim, b_rim) = x
     tend = _instantaneous_2mp3_tendency(g.mp, g.tps,
         g.ρ, g.T, eltype(x)(g.q_tot),
-        q_lcl, n_lcl, q_rai, n_rai, ((; q_ice, n_ice, q_rim, b_rim),), g.shapes,
+        q_lcl, n_lcl, q_rai, n_rai, ((; q_ice, n_ice, q_rim, b_rim),), g.shapes;
+        zcoeffs = g.zcoeffs,
+    )
+    return SA.similar_type(typeof(x), eltype(x))(values(tend))
+end
+@inline function (g::Instantaneous2MP3Tendency)(x::SA.StaticVector{9})
+    (q_lcl, n_lcl, q_rai, n_rai, q_ice, n_ice, q_rim, b_rim, z_ice) = x
+    tend = _instantaneous_2mp3_tendency(g.mp, g.tps,
+        g.ρ, g.T, eltype(x)(g.q_tot),
+        q_lcl, n_lcl, q_rai, n_rai, ((; q_ice, n_ice, q_rim, b_rim, z_ice),), g.shapes;
+        zcoeffs = g.zcoeffs,
     )
     return SA.similar_type(typeof(x), eltype(x))(values(tend))
 end
 
 """
-    _ice_numadj_params(FT)
+    _ice_numadj_params(FT, moments)
 
 The `(τ, x_min, x_max)` bounds for the ice number adjustment, shared between
-the primal tendency ([`_per_process_2mp3`](@ref)) and its Jacobian
-([`_jacobian_2mp3_manual`](@ref)).
+the tendency entry, the per-process decomposition
+([`_per_process_2mp3`](@ref)), and the hand-built Jacobian
+([`_jacobian_2mp3_manual`](@ref)). Under [`CMP.ThreeMoment`](@ref) ice the
+bounds are the closure's mean-mass band (relaxed upper bound; prognostic μ
+controls size sorting); under [`CMP.TwoMoment`](@ref) the band is fixed at
+`[1e-12, 1e-5]` kg (~10 μm crystal to ~5 mm aggregate).
 """
-@inline _ice_numadj_params(::Type{FT}) where {FT} =
-    (; τ = FT(100), x_min = FT(1e-12), x_max = FT(1e-5))
+@inline _ice_numadj_params(::Type{FT}, ::CMP.TwoMoment) where {FT} =
+    (; τ = FT(100), x_min = FT(1e-12), x_max = FT(1e-5))  # TODO: put into ClimaParams
+@inline _ice_numadj_params(::Type{FT}, moments::CMP.ThreeMoment) where {FT} =
+    (; τ = FT(100), x_min = FT(moments.mean_mass_min), x_max = FT(moments.mean_mass_max))
 
 """
     _per_process_2mp3(mp, tps, ρ, T, q_tot,
@@ -254,7 +277,7 @@ sides `f_p` for the linear post-solve attribution and is not differentiated.
     ice_depsub = MicroState2MP3{FT}((o, o, o, o, ∂ₜq_ice_dep, ∂ₜn_ice_dep, ∂ₜq_rim_sub, ∂ₜb_rim_sub))
 
     # ice number adjustment for mass limits
-    numadj = _ice_numadj_params(FT)
+    numadj = _ice_numadj_params(FT, _moments(mp))
     ∂ₜn_ice_numadj = CM2.number_tendency_from_mass_limits(numadj, q_ice, n_ice)
     ice_numadj = MicroState2MP3{FT}((o, o, o, o, o, ∂ₜn_ice_numadj, o, o))
 
@@ -449,7 +472,7 @@ tendency cache (droplet activation is added by the host, not the substep loop).
     Δt, nsub = 1,
 ) where {WR, ICE <: CMP.P3IceParams, NCAT}
     _validate_packed_categories(mp, ice)
-    (; q_ice, n_ice, q_rim, b_rim) = ice[1]
+    moments = _moments(mp)
     FT = typeof(q_tot)
     nsub_eff = max(Int(nsub), 1)
     h = Δt / FT(nsub_eff)
@@ -457,11 +480,12 @@ tendency cache (droplet activation is added by the host, not the substep loop).
     Lv_over_cp = TDI.TD.Parameters.LH_v0(tps) / cp_d
     Ls_over_cp = TDI.TD.Parameters.LH_s0(tps) / cp_d
 
-    x = MicroState2MP3{FT}((q_lcl, n_lcl, q_rai, n_rai, q_ice, n_ice, q_rim, b_rim))
+    x = _rosenbrock_initial_state(moments, FT, (q_lcl, n_lcl, q_rai, n_rai), ice[1])
+    zcoeffs = _reflectivity_coefficients(moments, mp, ρ, ice, shapes, nothing)
     x₀ = x
     Tsub = T
     for _ in 1:nsub_eff
-        g = Instantaneous2MP3Tendency(mp, tps, ρ, Tsub, q_tot, shapes)
+        g = Instantaneous2MP3Tendency(mp, tps, ρ, Tsub, q_tot, shapes, zcoeffs)
         x_prev = x
         if all(isfinite, x)
             f, J_raw = _tendency_and_jacobian(mode.jacobian, g, x)
@@ -485,13 +509,39 @@ tendency cache (droplet activation is added by the host, not the substep loop).
     end
 
     rates = (x - x₀) / Δt
-    return NamedTuple{(
-        :dq_lcl_dt, :dn_lcl_dt, :dq_rai_dt, :dn_rai_dt,
-        :dq_ice_dt, :dn_ice_dt, :dq_rim_dt, :db_rim_dt, :dn_lcl_activation_dt,
-    )}(
-        (Tuple(rates)..., zero(FT)),
+    return _bulk_2mp3_tendencies(
+        (; dq_lcl_dt = rates[IQ_LCL], dn_lcl_dt = rates[IN_LCL],
+            dq_rai_dt = rates[IQ_RAI], dn_rai_dt = rates[IN_RAI]),
+        _rosenbrock_ice_rates(moments, rates),
+        zero(FT),
     )
 end
+
+"""
+    _rosenbrock_initial_state(moments, FT, warm, cat)
+
+The initial [`MicroState`](@ref) of the 2M+P3 substep loop for the warm block
+`warm` and the packed ice-category input `cat`, with the reflectivity slot
+present under [`CMP.ThreeMoment`](@ref) ice.
+"""
+@inline _rosenbrock_initial_state(::CMP.TwoMoment, ::Type{FT}, warm, cat) where {FT} =
+    MicroState{FT, 1, false, false}((warm..., cat.q_ice, cat.n_ice, cat.q_rim, cat.b_rim))
+@inline _rosenbrock_initial_state(::CMP.ThreeMoment, ::Type{FT}, warm, cat) where {FT} =
+    MicroState{FT, 1, false, true}((warm..., cat.q_ice, cat.n_ice, cat.q_rim, cat.b_rim, cat.z_ice))
+
+"""
+    _rosenbrock_ice_rates(moments, rates)
+
+The per-category ice tendency fields of the averaged substep rates `rates`, via
+[`_p3_ice_tendency_fields`](@ref).
+"""
+@inline _rosenbrock_ice_rates(::CMP.TwoMoment, rates) = _p3_ice_tendency_fields(
+    ice_q(rates, Val(1)), ice_n(rates, Val(1)), ice_qrim(rates, Val(1)), ice_brim(rates, Val(1)),
+)
+@inline _rosenbrock_ice_rates(::CMP.ThreeMoment, rates) = _p3_ice_tendency_fields(
+    ice_q(rates, Val(1)), ice_n(rates, Val(1)), ice_qrim(rates, Val(1)), ice_brim(rates, Val(1)),
+    ice_zice(rates, Val(1)),
+)
 
 @inline _tendency_and_jacobian(::ManualJacobian, g::Instantaneous2MP3Tendency, x) =
     (g(x), _jacobian_2mp3_manual(g, x))
@@ -726,7 +776,7 @@ The entries are tiered:
         _numadj_derivs(FT, q_lcl, n_lcl, sb.pdf_c.xc_min, sb.pdf_c.xc_max, sb.numadj.τ, qmin)
     (nrai_rai, nrai_nrai) =
         _numadj_derivs(FT, q_rai, n_rai, sb.pdf_r.xr_min, sb.pdf_r.xr_max, sb.numadj.τ, qmin)
-    numadj_ice = _ice_numadj_params(FT)
+    numadj_ice = _ice_numadj_params(FT, _moments(mp))
     (nice_ice_adj, nice_nice_adj) =
         _numadj_derivs(FT, q_ice, n_ice, numadj_ice.x_min, numadj_ice.x_max, numadj_ice.τ, qmin)
     nice_ice += nice_ice_adj
@@ -834,6 +884,46 @@ The entries are tiered:
         nice_lcl, nice_nlcl, nice_rai, nice_nrai, nice_ice, nice_nice,
         rim_lcl, rim_rai, rim_ice, rim_rim,
         brim_lcl, brim_rai, brim_ice, brim_brim,
+    )
+end
+
+"""
+    _jacobian_2mp3_manual(g, x::MicroState{FT, 1, false, true, 9})
+
+Three-moment extension of the hand-built 2M+P3 substep Jacobian: the eight-state
+block is [`_jacobian_2mp3_manual`](@ref) unchanged; the `z_ice` row is the frozen
+linear combination `c_q · (q_ice row) + c_n · (n_ice row)` of the constant-μ
+reflectivity closure, with `c_q = 2 G (M₃/N)(M₃/L)` and `c_n = -G (M₃/N)²` from
+the frozen coefficients `g.zcoeffs`; the `z_ice` column is zero (no tendency
+reads the reflectivity within a substep).
+
+The row is a growth-only approximation and differs from the `ExactJacobian`
+`z_ice` row: it linearizes the full `q_ice`/`n_ice` rows (including their
+initiation parts) and omits the derivative of the initiation source `dZ_init`.
+The fixed point of the substep is set by the exact tendency, so the
+approximation affects only the implicit damping.
+"""
+@inline function _jacobian_2mp3_manual(
+    g::Instantaneous2MP3Tendency, x::MicroState{FT, 1, false, true, 9},
+) where {FT}
+    x8 = MicroState2MP3{FT}(ntuple(i -> x[i], Val(8)))
+    J = _jacobian_2mp3_manual(g, x8)
+    (; G, M3divN, M3divL) = g.zcoeffs[1]
+    c_q = 2 * G * M3divN * M3divL
+    c_n = -G * M3divN^2
+    # q_ice and n_ice occupy rows 5 and 6 of the eight-state block.
+    return SA.SMatrix{9, 9, FT}(
+        ntuple(Val(81)) do k
+            i = (k - 1) % 9 + 1
+            j = (k - 1) ÷ 9 + 1
+            if j == 9
+                zero(FT)
+            elseif i == 9
+                c_q * J[5, j] + c_n * J[6, j]
+            else
+                J[i, j]
+            end
+        end,
     )
 end
 
@@ -1136,7 +1226,7 @@ end
 end
 
 @inline function _apply_limiter(::EndStateSaturationAdjustment,
-    x::MicroState2MP3{FT}, d::MicroState2MP3{FT},
+    x::MicroState{FT, 1}, d::MicroState{FT, 1},
     ρ, Tsub, q_tot, Lv_over_cp, Ls_over_cp, tps,
 ) where {FT}
     Ssat(xx, TT) = max(
@@ -1451,6 +1541,9 @@ This is a diagnostic path, separate from the non-verbose entry.
     Δt, nsub = 1,
 ) where {WR, ICE <: CMP.P3IceParams, NCAT}
     _validate_packed_categories(mp, ice)
+    _moments(mp) isa CMP.ThreeMoment && throw(
+        ArgumentError("Verbose on the 2M+P3 model does not support three-moment ice"),
+    )
     (; q_ice, n_ice, q_rim, b_rim) = ice[1]
     FT = typeof(q_tot)
     mode = v.mode

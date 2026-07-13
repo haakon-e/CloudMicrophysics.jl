@@ -57,6 +57,8 @@ builds the components:
   than Gauss-Legendre.
 - `inp_depletion_model`: the F23 INP-activation depletion model. By default,
   [`NIceProxyDepletion`](@ref).
+- `moments`: the [`MomentClosure`](@ref) selector passed to [`ParametersP3`](@ref)
+  (`:two_moment` by default, or `:three_moment`).
 """
 @kwdef struct P3IceParams{P3, VL, PDc, PDr, HET, RF, INPDM, Q} <: ParametersType
     "The core P3 scheme parameters"
@@ -90,8 +92,9 @@ P3IceParams(toml_dict::CP.ParamDict;
     quadrature_order = 6,
     quad = QUAD.GaussLegendre(CP.float_type(toml_dict), quadrature_order),
     inp_depletion_model = NIceProxyDepletion(τ_act = 300),
+    moments = :two_moment,
 ) = P3IceParams(;
-    scheme = ParametersP3(toml_dict),
+    scheme = ParametersP3(toml_dict; moments),
     terminal_velocity = Chen2022VelType(toml_dict),
     cloud_pdf = CloudParticlePDF_SB2006(toml_dict),
     rain_pdf = RainParticlePDF_SB2006(toml_dict; is_limited),
@@ -156,17 +159,20 @@ Create a `Microphysics2MParams` object from a ClimaParams TOML dictionary.
   `Quadrature.GaussLegendre(FT, quadrature_order)`.
 - `inp_depletion_model`: the F23 INP-activation depletion model passed to
   [`P3IceParams`](@ref) when `with_ice`. By default, [`NIceProxyDepletion`](@ref).
+- `moments`: the [`MomentClosure`](@ref) selector passed to [`P3IceParams`](@ref)
+  when `with_ice` (`:two_moment` by default, or `:three_moment`).
 """
 Microphysics2MParams(toml_dict::CP.ParamDict;
     with_ice = false, is_limited = true,
     quadrature_order = 6,
     quad = QUAD.GaussLegendre(CP.float_type(toml_dict), quadrature_order),
     inp_depletion_model = NIceProxyDepletion(τ_act = 300),
+    moments = :two_moment,
 ) = Microphysics2MParams(;
     # Warm rain parameters (always present)
     warm_rain = WarmRainParams2M(toml_dict; is_limited),
     # Optional ice phase parameters
     ice = with_ice ?
-          P3IceParams(toml_dict; is_limited, quad, inp_depletion_model) :
+          P3IceParams(toml_dict; is_limited, quad, inp_depletion_model, moments) :
           nothing,
 )

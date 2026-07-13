@@ -813,12 +813,81 @@ end
 # --- 2-Moment Microphysics (Unified Warm + Optional Ice) ---
 
 """
-    _p3_ice_tendency_fields(dq_ice_dt, dn_ice_dt, dq_rim_dt, db_rim_dt)
+    _p3_ice_tendency_fields(dq_ice_dt, dn_ice_dt, dq_rim_dt, db_rim_dt[, dz_ice_dt])
 
-The per-category P3 ice tendency fields, in canonical order.
+The per-category P3 ice tendency fields, in canonical order. The five-argument
+form appends the reflectivity tendency of three-moment ice.
 """
 @inline _p3_ice_tendency_fields(dq_ice_dt, dn_ice_dt, dq_rim_dt, db_rim_dt) =
     (; dq_ice_dt, dn_ice_dt, dq_rim_dt, db_rim_dt)
+@inline _p3_ice_tendency_fields(dq_ice_dt, dn_ice_dt, dq_rim_dt, db_rim_dt, dz_ice_dt) =
+    (; dq_ice_dt, dn_ice_dt, dq_rim_dt, db_rim_dt, dz_ice_dt)
+
+"""
+    _moments(mp::Microphysics2MParams)
+
+The [`CMP.MomentClosure`](@ref) of the P3 ice scheme carried by `mp`.
+"""
+@inline _moments(mp::CMP.Microphysics2MParams) = mp.ice.scheme.moments
+
+"""
+    _cat_ρz(moments, cat, ρ)
+
+Volumetric sixth moment of the packed ice-category input `cat`: `cat.z_ice · ρ`
+under [`CMP.ThreeMoment`](@ref) ice, `nothing` under [`CMP.TwoMoment`](@ref)
+(the input carries no `z_ice` field).
+"""
+@inline _cat_ρz(::CMP.TwoMoment, cat, ρ) = nothing
+@inline _cat_ρz(::CMP.ThreeMoment, cat, ρ) = UT.clamp_to_nonneg(cat.z_ice) * ρ
+
+"""
+    _reflectivity_coefficients(moments, mp, ρ, ice, shapes, zcoeffs)
+
+Per-category frozen [`CMP3.ReflectivityCoefficients`](@ref) of the constant-μ
+reflectivity closure: `nothing` under [`CMP.TwoMoment`](@ref) ice; under
+[`CMP.ThreeMoment`](@ref), the passed `zcoeffs` when provided, else computed
+from the packed inputs and the frozen shapes. Callers inside a differentiated
+region must pass coefficients precomputed from the primal state.
+"""
+@inline _reflectivity_coefficients(::CMP.TwoMoment, mp, ρ, ice, shapes, zcoeffs) = nothing
+@inline _reflectivity_coefficients(::CMP.ThreeMoment, mp, ρ, ice, shapes, zcoeffs) = zcoeffs
+@inline function _reflectivity_coefficients(
+    moments::CMP.ThreeMoment, mp, ρ, ice::NTuple{NCAT, <:NamedTuple}, shapes, ::Nothing,
+) where {NCAT}
+    return ntuple(Val(NCAT)) do j
+        (; q_ice, n_ice, q_rim, b_rim) = ice[j]
+        state = CMP3.state_from_prognostic(
+            mp.ice.scheme, q_ice * ρ, n_ice * ρ, q_rim * ρ, b_rim * ρ, _cat_ρz(moments, ice[j], ρ),
+        )
+        CMP3.reflectivity_growth_coefficients(state, shapes[j])
+    end
+end
+
+"""
+    _ice_tendency_fields(moments, zcoeffs, p3, ρ, acc, init)
+
+Assemble the per-category ice tendency fields from the accumulated specific
+rates `acc`. Under [`CMP.ThreeMoment`](@ref) ice, append `dz_ice_dt`: the
+constant-μ growth term over the net-of-initiation rates with the frozen
+`zcoeffs`, plus the initiation terms of the rates in `init`. See the
+[three-moment documentation](@ref P3-three-moment-ice) for the term forms.
+"""
+@inline _ice_tendency_fields(::CMP.TwoMoment, zcoeffs, p3, ρ, acc, init) =
+    _p3_ice_tendency_fields(acc.dq_ice_dt, acc.dn_ice_dt, acc.dq_rim_dt, acc.db_rim_dt)
+@inline function _ice_tendency_fields(moments::CMP.ThreeMoment, zcoeffs, p3, ρ, acc, init)
+    μ_init = moments.μ_init
+    dq_init = init.dq_nuc + init.dq_cldfrz + init.dq_raifrz
+    dn_init = init.dn_nuc + init.dn_cldfrz + init.dn_raifrz
+    dZ_init =
+        CMP3.reflectivity_initiation_monodisperse(μ_init, init.D_nuc, init.dn_nuc * ρ) +
+        CMP3.reflectivity_initiation_freezing(moments, p3.ρ_i, μ_init, init.dq_cldfrz * ρ, init.dn_cldfrz * ρ) +
+        CMP3.reflectivity_initiation_freezing(moments, p3.ρ_i, zero(μ_init), init.dq_raifrz * ρ, init.dn_raifrz * ρ)
+    dL_growth = (acc.dq_ice_dt - dq_init) * ρ
+    dN_growth = (acc.dn_ice_dt - dn_init) * ρ
+    dz_ice_dt =
+        (CMP3.reflectivity_growth_tendency(zcoeffs[1], dL_growth, dN_growth) + dZ_init) / ρ
+    return _p3_ice_tendency_fields(acc.dq_ice_dt, acc.dn_ice_dt, acc.dq_rim_dt, acc.db_rim_dt, dz_ice_dt)
+end
 
 """
     _bulk_2mp3_tendencies(warm, ice, dn_lcl_activation_dt)
@@ -982,8 +1051,15 @@ per-category ice inputs.
 - `q_rai`: Rain specific content (kg/kg)
 - `n_rai`: Rain number per kg air (1/kg)
 - `ice`: per-category prognostic inputs, each a `NamedTuple` with fields
-  `q_ice` (kg/kg), `n_ice` (1/kg), `q_rim` (kg/kg), `b_rim` (m³/kg)
+  `q_ice` (kg/kg), `n_ice` (1/kg), `q_rim` (kg/kg), `b_rim` (m³/kg), and,
+  under [`CMP.ThreeMoment`](@ref) ice, `z_ice` (m⁶/kg)
 - `shapes`: per-category frozen distribution shapes ([`CMP3.P3Shape`](@ref))
+
+# Keyword Arguments
+- `zcoeffs`: per-category frozen [`CMP3.ReflectivityCoefficients`](@ref) under
+  [`CMP.ThreeMoment`](@ref) ice; computed from the packed inputs when not
+  provided. Differentiated callers must pass coefficients precomputed from the
+  primal state.
 
 `NCAT` must equal `n_categories(mp.ice)`; only one category is currently
 supported.
@@ -998,6 +1074,7 @@ supported.
 - `dn_ice_dt`: Ice number tendency (1/kg/s)
 - `dq_rim_dt`: Rime mass tendency (kg/kg/s)
 - `db_rim_dt`: Rime volume tendency (m³/kg/s)
+- `dz_ice_dt`: Reflectivity tendency (m⁶/kg/s), under [`CMP.ThreeMoment`](@ref) ice only
 - `dn_lcl_activation_dt`: Droplet activation tendency (1/kg/s)
 """
 @inline function bulk_microphysics_tendencies(
@@ -1006,11 +1083,14 @@ supported.
     q_lcl, n_lcl, q_rai, n_rai,
     ice::NTuple{NCAT, <:NamedTuple}, shapes::NTuple{NCAT, <:CMP3.P3Shape},
     inpc_log_shift = zero(ρ),
-    w = zero(ρ), p = zero(ρ),
+    w = zero(ρ), p = zero(ρ);
+    zcoeffs = nothing,
 ) where {WR, ICE <: CMP.P3IceParams, NCAT}
     _validate_packed_categories(mp, ice)
     (; q_ice, n_ice, q_rim, b_rim) = ice[1]
     shape = shapes[1]
+    moments = _moments(mp)
+    zc = _reflectivity_coefficients(moments, mp, ρ, ice, shapes, zcoeffs)
     FT = eltype(ρ)
     ϵₘ = UT.ϵ_numerics_2M_M(FT)
     ϵB = UT.ϵ_numerics_P3_B(FT)
@@ -1035,7 +1115,9 @@ supported.
     N_ice = n_ice * ρ  # [1 / m³ air]
     L_rim = q_rim * ρ  # [kg rim / m³ air]
     B_rim = b_rim * ρ  # [m³ rim / m³ air]
-    state = CMP3.state_from_prognostic(mp.ice.scheme, L_ice, N_ice, L_rim, B_rim)
+    state = CMP3.state_from_prognostic(
+        mp.ice.scheme, L_ice, N_ice, L_rim, B_rim, _cat_ρz(moments, ice[1], ρ),
+    )
 
     # Unpack warm rain parameters
     aps = mp.warm_rain.air_properties
@@ -1162,11 +1244,7 @@ supported.
 
     # --- Ice number adjustment for mass limits
     # Nudges n_ice toward [q_ice / x_max, q_ice / x_min] over timescale τ.
-    numadj = (;  # TODO: put into ClimaParams
-        τ = FT(100),
-        x_min = FT(1e-12),  # min mean ice particle mass [kg] (~10 μm crystal)
-        x_max = FT(1e-5),   # max mean ice particle mass [kg] (~5 mm aggregate)
-    )
+    numadj = _ice_numadj_params(FT, moments)
     ∂ₜn_ice_numadj = CM2.number_tendency_from_mass_limits(numadj, q_ice, n_ice)
     dn_ice_dt += ∂ₜn_ice_numadj
 
@@ -1184,9 +1262,22 @@ supported.
     # Aerosol activation is folded into `warm_rain_tendencies_2m` above —
     # `dn_lcl_activation_dt` from `warm` is already included in `dn_lcl_dt`.
 
+    # Initiation rates, in the accumulator element type.
+    init = (;
+        D_nuc,
+        dq_nuc = oftype(dq_ice_dt, dep.∂ₜq_frz),
+        dn_nuc = oftype(dq_ice_dt, dep.∂ₜn_frz),
+        dq_cldfrz = oftype(dq_ice_dt, ∂ₜq_imm),
+        dn_cldfrz = oftype(dq_ice_dt, ∂ₜn_imm),
+        dq_raifrz = oftype(dq_ice_dt, rain_frz.∂ₜq_frz),
+        dn_raifrz = oftype(dq_ice_dt, rain_frz.∂ₜn_frz),
+    )
     return _bulk_2mp3_tendencies(
         (; dq_lcl_dt, dn_lcl_dt, dq_rai_dt, dn_rai_dt),
-        _p3_ice_tendency_fields(dq_ice_dt, dn_ice_dt, dq_rim_dt, db_rim_dt),
+        _ice_tendency_fields(
+            moments, zc, p3, ρ,
+            (; dq_ice_dt, dn_ice_dt, dq_rim_dt, db_rim_dt), init,
+        ),
         dn_lcl_activation_dt,
     )
 end
