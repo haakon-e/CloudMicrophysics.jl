@@ -26,8 +26,7 @@ without timestep-dependent clipping.
         ρ, T, q_tot,
         q_lcl, n_lcl, q_rai, n_rai, ice, shapes,
     )
-    return (; full.dq_lcl_dt, full.dn_lcl_dt, full.dq_rai_dt, full.dn_rai_dt,
-        full.dq_ice_dt, full.dn_ice_dt, full.dq_rim_dt, full.db_rim_dt)
+    return NamedTuple{Base.front(keys(full))}(Base.front(values(full)))
 end
 
 """
@@ -51,6 +50,14 @@ end
     tend = _instantaneous_2mp3_tendency(g.mp, g.tps,
         g.ρ, g.T, eltype(x)(g.q_tot),
         q_lcl, n_lcl, q_rai, n_rai, ((; q_ice, n_ice, q_rim, b_rim),), g.shapes,
+    )
+    return SA.similar_type(typeof(x), eltype(x))(values(tend))
+end
+@inline function (g::Instantaneous2MP3Tendency)(x::SA.StaticVector{9})
+    (q_lcl, n_lcl, q_rai, n_rai, q_ice, n_ice, q_rim, b_rim, q_liq_on_ice) = x
+    tend = _instantaneous_2mp3_tendency(g.mp, g.tps,
+        g.ρ, g.T, eltype(x)(g.q_tot),
+        q_lcl, n_lcl, q_rai, n_rai, ((; q_ice, n_ice, q_rim, b_rim, q_liq_on_ice),), g.shapes,
     )
     return SA.similar_type(typeof(x), eltype(x))(values(tend))
 end
@@ -449,7 +456,13 @@ tendency cache (droplet activation is added by the host, not the substep loop).
     Δt, nsub = 1,
 ) where {WR, ICE <: CMP.P3IceParams, NCAT}
     _validate_packed_categories(mp, ice)
-    (; q_ice, n_ice, q_rim, b_rim) = ice[1]
+    liquid = _liquid(mp)
+    liquid isa CMP.PredictedLiquidFraction && mode.jacobian isa ManualJacobian &&
+        throw(
+            ArgumentError(
+                "rosenbrock_manual on the 2M+P3 model does not support predicted liquid fraction; use rosenbrock_exact()",
+            ),
+        )
     FT = typeof(q_tot)
     nsub_eff = max(Int(nsub), 1)
     h = Δt / FT(nsub_eff)
@@ -457,7 +470,7 @@ tendency cache (droplet activation is added by the host, not the substep loop).
     Lv_over_cp = TDI.TD.Parameters.LH_v0(tps) / cp_d
     Ls_over_cp = TDI.TD.Parameters.LH_s0(tps) / cp_d
 
-    x = MicroState2MP3{FT}((q_lcl, n_lcl, q_rai, n_rai, q_ice, n_ice, q_rim, b_rim))
+    x = _rosenbrock_initial_state(liquid, FT, (q_lcl, n_lcl, q_rai, n_rai), ice[1])
     x₀ = x
     Tsub = T
     for _ in 1:nsub_eff
@@ -481,17 +494,55 @@ tendency cache (droplet activation is added by the host, not the substep loop).
         Δ = x - x_prev
         T_safe = max(150, Tsub)
         Tsub +=
-            (TDI.Lᵥ(tps, T_safe) * (Δ[IQ_LCL] + Δ[IQ_RAI]) + TDI.Lₛ(tps, T_safe) * ice_q(Δ, Val(1))) / cp_d
+            (
+                TDI.Lᵥ(tps, T_safe) * (Δ[IQ_LCL] + Δ[IQ_RAI] + _q_liq_on_ice_slot(Δ)) +
+                TDI.Lₛ(tps, T_safe) * ice_q(Δ, Val(1))
+            ) / cp_d
     end
 
     rates = (x - x₀) / Δt
-    return NamedTuple{(
-        :dq_lcl_dt, :dn_lcl_dt, :dq_rai_dt, :dn_rai_dt,
-        :dq_ice_dt, :dn_ice_dt, :dq_rim_dt, :db_rim_dt, :dn_lcl_activation_dt,
-    )}(
-        (Tuple(rates)..., zero(FT)),
+    return _bulk_2mp3_tendencies(
+        (; dq_lcl_dt = rates[IQ_LCL], dn_lcl_dt = rates[IN_LCL],
+            dq_rai_dt = rates[IQ_RAI], dn_rai_dt = rates[IN_RAI]),
+        _rosenbrock_ice_rates(liquid, rates),
+        zero(FT),
     )
 end
+
+"""
+    _rosenbrock_initial_state(liquid, FT, warm, cat)
+
+The initial [`MicroState`](@ref) of the 2M+P3 substep loop for the warm block
+`warm` and the packed ice-category input `cat`, with the liquid-on-ice slot
+present under [`CMP.PredictedLiquidFraction`](@ref).
+"""
+@inline _rosenbrock_initial_state(::CMP.NoLiquidFraction, ::Type{FT}, warm, cat) where {FT} =
+    MicroState{FT, 1, false, false}((warm..., cat.q_ice, cat.n_ice, cat.q_rim, cat.b_rim))
+@inline _rosenbrock_initial_state(::CMP.PredictedLiquidFraction, ::Type{FT}, warm, cat) where {FT} =
+    MicroState{FT, 1, true, false}((warm..., cat.q_ice, cat.n_ice, cat.q_rim, cat.b_rim, cat.q_liq_on_ice))
+
+"""
+    _rosenbrock_ice_rates(liquid, rates)
+
+The per-category ice tendency fields of the averaged substep rates `rates`, via
+[`_p3_ice_tendency_fields`](@ref).
+"""
+@inline _rosenbrock_ice_rates(::CMP.NoLiquidFraction, rates) = _p3_ice_tendency_fields(
+    ice_q(rates, Val(1)), ice_n(rates, Val(1)), ice_qrim(rates, Val(1)), ice_brim(rates, Val(1)),
+)
+@inline _rosenbrock_ice_rates(::CMP.PredictedLiquidFraction, rates) = _p3_ice_tendency_fields(
+    ice_q(rates, Val(1)), ice_n(rates, Val(1)), ice_qrim(rates, Val(1)), ice_brim(rates, Val(1)),
+    ice_qliq(rates, Val(1)),
+)
+
+"""
+    _q_liq_on_ice_slot(x)
+
+The liquid-on-ice entry of a [`MicroState`](@ref)-typed vector: zero for layouts
+without the liquid slot.
+"""
+@inline _q_liq_on_ice_slot(x::MicroState{FT, NCAT, false}) where {FT, NCAT} = zero(FT)
+@inline _q_liq_on_ice_slot(x::MicroState{FT, NCAT, true}) where {FT, NCAT} = ice_qliq(x, Val(1))
 
 @inline _tendency_and_jacobian(::ManualJacobian, g::Instantaneous2MP3Tendency, x) =
     (g(x), _jacobian_2mp3_manual(g, x))
@@ -1136,14 +1187,15 @@ end
 end
 
 @inline function _apply_limiter(::EndStateSaturationAdjustment,
-    x::MicroState2MP3{FT}, d::MicroState2MP3{FT},
+    x::MicroState{FT, 1}, d::MicroState{FT, 1},
     ρ, Tsub, q_tot, Lv_over_cp, Ls_over_cp, tps,
 ) where {FT}
+    liq(xx) = xx[IQ_LCL] + xx[IQ_RAI] + _q_liq_on_ice_slot(xx)
     Ssat(xx, TT) = max(
-        TDI.supersaturation_over_ice(tps, q_tot, xx[IQ_LCL] + xx[IQ_RAI], ice_q(xx, Val(1)), ρ, TT),
-        TDI.supersaturation_over_liquid(tps, q_tot, xx[IQ_LCL] + xx[IQ_RAI], ice_q(xx, Val(1)), ρ, TT),
+        TDI.supersaturation_over_ice(tps, q_tot, liq(xx), ice_q(xx, Val(1)), ρ, TT),
+        TDI.supersaturation_over_liquid(tps, q_tot, liq(xx), ice_q(xx, Val(1)), ρ, TT),
     )
-    latent(dd) = Lv_over_cp * (dd[IQ_LCL] + dd[IQ_RAI]) + Ls_over_cp * ice_q(dd, Val(1))
+    latent(dd) = Lv_over_cp * liq(dd) + Ls_over_cp * ice_q(dd, Val(1))
     return _saturation_bisection(Ssat, latent, x, d, Tsub)
 end
 
@@ -1451,6 +1503,9 @@ This is a diagnostic path, separate from the non-verbose entry.
     Δt, nsub = 1,
 ) where {WR, ICE <: CMP.P3IceParams, NCAT}
     _validate_packed_categories(mp, ice)
+    _liquid(mp) isa CMP.PredictedLiquidFraction && throw(
+        ArgumentError("Verbose on the 2M+P3 model does not support predicted liquid fraction"),
+    )
     (; q_ice, n_ice, q_rim, b_rim) = ice[1]
     FT = typeof(q_tot)
     mode = v.mode

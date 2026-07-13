@@ -333,7 +333,17 @@ $(DocStringExtensions.FIELDS)
     D_shd_onset::FT
     "Mean diameter of drops shed from ice into rain [`m`]"
     D_shd_drop::FT
-    function PredictedLiquidFraction{FT}(F_dry, ΔF_switch, F_melt, q_liq_present, D_shd_onset, D_shd_drop) where {FT}
+    "Relaxation timescale converting the shed-able liquid mass into a rate [`s`]"
+    τ_shd::FT
+    function PredictedLiquidFraction{FT}(
+        F_dry,
+        ΔF_switch,
+        F_melt,
+        q_liq_present,
+        D_shd_onset,
+        D_shd_drop,
+        τ_shd,
+    ) where {FT}
         # The vapor-path ramp band is [F_dry, F_dry + ΔF_switch]; keep it strictly
         # inside (0, F_melt) so the ramp weight is zero at F_liq = 0 and saturates
         # below the complete-melt threshold.
@@ -342,7 +352,8 @@ $(DocStringExtensions.FIELDS)
         @assert F_dry + ΔF_switch < F_melt < 1
         @assert q_liq_present > 0
         @assert D_shd_drop < D_shd_onset
-        return new{FT}(F_dry, ΔF_switch, F_melt, q_liq_present, D_shd_onset, D_shd_drop)
+        @assert τ_shd > 0
+        return new{FT}(F_dry, ΔF_switch, F_melt, q_liq_present, D_shd_onset, D_shd_drop, τ_shd)
     end
 end
 function PredictedLiquidFraction(toml_dict::CP.ParamDict)
@@ -353,6 +364,7 @@ function PredictedLiquidFraction(toml_dict::CP.ParamDict)
         :P3_liquid_presence_mass_concentration => :q_liq_present,
         :P3_shedding_onset_diameter => :D_shd_onset,
         :P3_shedding_drop_diameter => :D_shd_drop,
+        :P3_shedding_timescale => :τ_shd,
     )
     params = CP.get_parameter_values(toml_dict, name_map, "CloudMicrophysics")
     return PredictedLiquidFraction{CP.float_type(toml_dict)}(; params...)

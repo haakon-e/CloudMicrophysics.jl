@@ -59,14 +59,23 @@ function P3State(params::CMP.ParametersP3, ρq_ice, ρn_ice, F_rim, ρ_rim, F_li
     ρ_d = get_ρ_d(mass, F_rim, ρ_rim)
     ρ_g = get_ρ_g(F_rim, ρ_rim, ρ_d)
     D_th = get_D_th(mass, ρ_i)
-    D_gr = ifelse(iszero(F_rim), FT(Inf), get_D_gr(mass, ρ_g))
-    D_cr = ifelse(iszero(F_rim), FT(Inf), get_D_cr(mass, F_rim, ρ_g))
+    unrimed = _unrimed_threshold_test(params.liquid, F_rim)
+    D_gr = ifelse(unrimed, FT(Inf), get_D_gr(mass, ρ_g))
+    D_cr = ifelse(unrimed, FT(Inf), get_D_cr(mass, F_rim, ρ_g))
     return P3State(
         params,
         ρq_ice, ρn_ice, F_rim, ρ_rim, F_liq, zero(FT),
         FT(ρ_g), FT(D_th), FT(D_gr), FT(D_cr),
     )
 end
+
+# Unrimed selector for the threshold sentinels. Under the predicted liquid
+# treatment the test reads the value of `F_rim`, so a differentiated zero (a
+# `Dual` with nonzero partials at `q_rim = 0`) selects the same branch as the
+# plain zero and the `ρ_g = NaN` sentinel does not enter the thresholds under
+# ForwardDiff; the exact Jacobian is the only substep Jacobian on that path.
+_unrimed_threshold_test(::CMP.NoLiquidFraction, F_rim) = iszero(F_rim)
+_unrimed_threshold_test(::CMP.PredictedLiquidFraction, F_rim) = iszero(FD.value(F_rim))
 
 # Upper bound on the clamped liquid mass fraction: F_melt under the predicted
 # treatment, zero when liquid is off (F_liq is forced to zero).
@@ -136,6 +145,11 @@ fraction is the regularised ratio `F_liq = ρq_liq/(ρq_ice + ρq_liq)`
 - `ρb_rim`: rime volume concentration [m³/m³]
 - `ρq_liq`: liquid mass on ice [kg/m³]
 """
+# Trailing-`nothing` form: the packed tendency entry passes `nothing` for the
+# liquid slot when the treatment is off.
+state_from_prognostic(params::CMP.ParametersP3, ρq_ice, ρn_ice, ρq_rim, ρb_rim, ::Nothing) =
+    state_from_prognostic(params, ρq_ice, ρn_ice, ρq_rim, ρb_rim)
+
 function state_from_prognostic(
     params::CMP.ParametersP3{FT, MOM, <:CMP.PredictedLiquidFraction},
     ρq_ice, ρn_ice, ρq_rim, ρb_rim, ρq_liq,
