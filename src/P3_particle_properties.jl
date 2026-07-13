@@ -43,9 +43,20 @@ struct P3State{FT, PARAMS <: CMP.ParametersP3}
     D_cr::FT
 end
 
-function P3State(
-    params::CMP.ParametersP3, ρq_ice, ρn_ice, F_rim, ρ_rim, F_liq = false, ρz_ice = nothing,
-)
+# The trailing positional slots differ by liquid treatment so each feature's
+# constructor call stays unchanged: under `NoLiquidFraction` the sixth slot is
+# `ρz_ice` (`F_liq` is identically zero), while under `PredictedLiquidFraction`
+# the sixth slot is `F_liq` and the seventh is `ρz_ice`. Both route to the shared
+# `_p3state` workhorse.
+@inline P3State(
+    params::CMP.ParametersP3{FT, MOM, <:CMP.NoLiquidFraction}, ρq_ice, ρn_ice, F_rim, ρ_rim, ρz_ice = nothing,
+) where {FT, MOM} = _p3state(params, ρq_ice, ρn_ice, F_rim, ρ_rim, false, ρz_ice)
+@inline P3State(
+    params::CMP.ParametersP3{FT, MOM, <:CMP.PredictedLiquidFraction}, ρq_ice, ρn_ice, F_rim, ρ_rim, F_liq = false,
+    ρz_ice = nothing,
+) where {FT, MOM} = _p3state(params, ρq_ice, ρn_ice, F_rim, ρ_rim, F_liq, ρz_ice)
+
+function _p3state(params::CMP.ParametersP3, ρq_ice, ρn_ice, F_rim, ρ_rim, F_liq, ρz_ice)
     FT = UT.promote_typeof(ρq_ice, ρn_ice, F_rim, ρ_rim, F_liq)
     (; mass, ρ_i) = params
     # Clamp to the physical domain so the threshold formulas never evaluate a
@@ -118,7 +129,7 @@ breach it.
 - `ρq_rim`: rime mass concentration [kg/m³]
 - `ρb_rim`: rime volume concentration [m³/m³]
 """
-function state_from_prognostic(params::CMP.ParametersP3, ρq_ice, ρn_ice, ρq_rim, ρb_rim, ρz_ice = nothing)
+function state_from_prognostic(params::CMP.ParametersP3, ρq_ice, ρn_ice, ρq_rim, ρb_rim)
     # Floor the prognostic moments so the regularised ratios stay non-negative;
     # F_rim and ρ_rim are bounded in the `P3State` constructor.
     ρq_ice = UT.clamp_to_nonneg(ρq_ice)
@@ -127,7 +138,23 @@ function state_from_prognostic(params::CMP.ParametersP3, ρq_ice, ρn_ice, ρq_r
     ρb_rim = UT.clamp_to_nonneg(ρb_rim)
     F_rim = UT.rime_mass_fraction(ρq_rim, ρq_ice)
     ρ_rim = UT.rime_density(ρq_rim, ρb_rim)
-    return P3State(params, ρq_ice, ρn_ice, F_rim, ρ_rim, false, ρz_ice)
+    return P3State(params, ρq_ice, ρn_ice, F_rim, ρ_rim)
+end
+
+# Six-argument form under two-moment or three-moment ice without liquid: the
+# trailing slot is the volumetric sixth moment `ρz_ice` (`nothing` under
+# two-moment). The predicted-liquid treatment dispatches to the `ρq_liq` method.
+function state_from_prognostic(
+    params::CMP.ParametersP3{FT, MOM, <:CMP.NoLiquidFraction},
+    ρq_ice, ρn_ice, ρq_rim, ρb_rim, ρz_ice,
+) where {FT, MOM}
+    ρq_ice = UT.clamp_to_nonneg(ρq_ice)
+    ρn_ice = UT.clamp_to_nonneg(ρn_ice)
+    ρq_rim = UT.clamp_to_nonneg(ρq_rim)
+    ρb_rim = UT.clamp_to_nonneg(ρb_rim)
+    F_rim = UT.rime_mass_fraction(ρq_rim, ρq_ice)
+    ρ_rim = UT.rime_density(ρq_rim, ρb_rim)
+    return _p3state(params, ρq_ice, ρn_ice, F_rim, ρ_rim, false, ρz_ice)
 end
 
 """
@@ -179,11 +206,6 @@ fraction is the regularised ratio `F_liq = ρq_liq/(ρq_ice + ρq_liq)`
 - `ρb_rim`: rime volume concentration [m³/m³]
 - `ρq_liq`: liquid mass on ice [kg/m³]
 """
-# Trailing-`nothing` form: the packed tendency entry passes `nothing` for the
-# liquid slot when the treatment is off.
-state_from_prognostic(params::CMP.ParametersP3, ρq_ice, ρn_ice, ρq_rim, ρb_rim, ::Nothing) =
-    state_from_prognostic(params, ρq_ice, ρn_ice, ρq_rim, ρb_rim)
-
 function state_from_prognostic(
     params::CMP.ParametersP3{FT, MOM, <:CMP.PredictedLiquidFraction},
     ρq_ice, ρn_ice, ρq_rim, ρb_rim, ρq_liq,
@@ -196,7 +218,7 @@ function state_from_prognostic(
     F_rim = UT.rime_mass_fraction(ρq_rim, ρq_ice)
     ρ_rim = UT.rime_density(ρq_rim, ρb_rim)
     F_liq = UT.liquid_mass_fraction(ρq_liq, ρq_ice + ρq_liq, params.liquid.q_liq_present)
-    return P3State(params, ρq_ice, ρn_ice, F_rim, ρ_rim, F_liq)
+    return _p3state(params, ρq_ice, ρn_ice, F_rim, ρ_rim, F_liq, nothing)
 end
 
 """
@@ -219,7 +241,7 @@ function state_from_prognostic(
     F_rim = UT.rime_mass_fraction(ρq_rim, ρq_ice)
     ρ_rim = UT.rime_density(ρq_rim, ρb_rim)
     F_liq = _liquid_fraction_from_prognostic(params.liquid, ρq_ice, ρq_liq)
-    return P3State(params, ρq_ice, ρn_ice, F_rim, ρ_rim, F_liq, ρz_ice)
+    return _p3state(params, ρq_ice, ρn_ice, F_rim, ρ_rim, F_liq, ρz_ice)
 end
 
 # Liquid mass fraction from the prognostic liquid slot: zero when the treatment

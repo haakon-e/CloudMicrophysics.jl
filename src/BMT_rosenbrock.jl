@@ -53,32 +53,31 @@ struct Instantaneous2MP3Tendency{P, H, F, S, C}
 end
 @inline Instantaneous2MP3Tendency(mp, tps, ρ, T, q_tot, shapes) =
     Instantaneous2MP3Tendency(mp, tps, ρ, T, q_tot, shapes, nothing)
-@inline function (g::Instantaneous2MP3Tendency)(x::SA.StaticVector{8})
-    (q_lcl, n_lcl, q_rai, n_rai, q_ice, n_ice, q_rim, b_rim) = x
+# The per-category slots (liquid on ice, reflectivity) are read from the state
+# layout selected by `mp`, so one method covers every single-category layout,
+# including the plain `StaticVector` that ForwardDiff seeds for the exact
+# Jacobian (which does not carry the `MicroState` type parameters).
+@inline function (g::Instantaneous2MP3Tendency)(x::SA.StaticVector)
+    warm = (x[IQ_LCL], x[IN_LCL], x[IQ_RAI], x[IN_RAI])
+    cat = _entry_cat(_moments(g.mp), _liquid(g.mp), x)
     tend = _instantaneous_2mp3_tendency(g.mp, g.tps,
         g.ρ, g.T, eltype(x)(g.q_tot),
-        q_lcl, n_lcl, q_rai, n_rai, ((; q_ice, n_ice, q_rim, b_rim),), g.shapes;
+        warm..., (cat,), g.shapes;
         zcoeffs = g.zcoeffs,
     )
     return SA.similar_type(typeof(x), eltype(x))(values(tend))
 end
-@inline function (g::Instantaneous2MP3Tendency)(x::SA.StaticVector{9})
-    (q_lcl, n_lcl, q_rai, n_rai, q_ice, n_ice, q_rim, b_rim, z_ice) = x
-    tend = _instantaneous_2mp3_tendency(g.mp, g.tps,
-        g.ρ, g.T, eltype(x)(g.q_tot),
-        q_lcl, n_lcl, q_rai, n_rai, ((; q_ice, n_ice, q_rim, b_rim, z_ice),), g.shapes;
-        zcoeffs = g.zcoeffs,
-    )
-    return SA.similar_type(typeof(x), eltype(x))(values(tend))
-end
-@inline function (g::Instantaneous2MP3Tendency)(x::SA.StaticVector{9})
-    (q_lcl, n_lcl, q_rai, n_rai, q_ice, n_ice, q_rim, b_rim, q_liq_on_ice) = x
-    tend = _instantaneous_2mp3_tendency(g.mp, g.tps,
-        g.ρ, g.T, eltype(x)(g.q_tot),
-        q_lcl, n_lcl, q_rai, n_rai, ((; q_ice, n_ice, q_rim, b_rim, q_liq_on_ice),), g.shapes,
-    )
-    return SA.similar_type(typeof(x), eltype(x))(values(tend))
-end
+
+# Per-category input view of a packed single-category state vector, selecting
+# the liquid-on-ice and reflectivity slots by treatment in the canonical order.
+@inline _entry_cat(::CMP.TwoMoment, ::CMP.NoLiquidFraction, x) =
+    (; q_ice = x[5], n_ice = x[6], q_rim = x[7], b_rim = x[8])
+@inline _entry_cat(::CMP.ThreeMoment, ::CMP.NoLiquidFraction, x) =
+    (; q_ice = x[5], n_ice = x[6], q_rim = x[7], b_rim = x[8], z_ice = x[9])
+@inline _entry_cat(::CMP.TwoMoment, ::CMP.PredictedLiquidFraction, x) =
+    (; q_ice = x[5], n_ice = x[6], q_rim = x[7], b_rim = x[8], q_liq_on_ice = x[9])
+@inline _entry_cat(::CMP.ThreeMoment, ::CMP.PredictedLiquidFraction, x) =
+    (; q_ice = x[5], n_ice = x[6], q_rim = x[7], b_rim = x[8], q_liq_on_ice = x[9], z_ice = x[10])
 
 """
     _ice_numadj_params(FT, moments)

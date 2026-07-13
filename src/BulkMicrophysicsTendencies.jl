@@ -935,6 +935,14 @@ end
     return (CMP3.reflectivity_growth_tendency(zcoeffs[1], dL_growth, dN_growth) + dZ_init) / ρ
 end
 
+# Moment-closure-only assembly: appends `dz_ice_dt` under three-moment ice. The
+# liquid-off entry point of the reflectivity assembly.
+@inline _ice_tendency_fields(moments::CMP.MomentClosure, zcoeffs, p3, ρ, acc, init) =
+    _p3_ice_tendency_fields(
+        acc.dq_ice_dt, acc.dn_ice_dt, acc.dq_rim_dt, acc.db_rim_dt,
+        nothing, _reflectivity_tendency_slot(moments, zcoeffs, p3, ρ, acc, init),
+    )
+
 """
     _collision_liquid_source(liquid, coll)
 
