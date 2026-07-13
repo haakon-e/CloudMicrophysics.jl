@@ -62,7 +62,7 @@ builds the components:
 - `liquid`: the [`LiquidFractionTreatment`](@ref) selector passed to
   [`ParametersP3`](@ref) (`:none` by default, or `:predicted`).
 """
-@kwdef struct P3IceParams{P3, VL, PDc, PDr, HET, RF, INPDM, Q} <: ParametersType
+@kwdef struct P3IceParams{P3, VL, PDc, PDr, HET, RF, INPDM, Q, IC} <: ParametersType
     "The core P3 scheme parameters"
     scheme::P3
     "The terminal velocity parameterization"
@@ -75,6 +75,9 @@ builds the components:
     ice_nucleation::HET
     "The rain freezing parameters (Bigg-type immersion freezing)"
     rain_freezing::RF
+    "Inter-category interaction parameters ([`InterCategoryParams`](@ref)), or
+    `nothing` for a single ice category"
+    inter_category::IC = nothing
     "Model for F23 INP-activation depletion. Currently only
     [`NIceProxyDepletion`](@ref) (legacy n_ice-as-proxy form) is provided;
     it sets the value subtracted from `INPC(T)/ρ` in the F23 deposition +
@@ -96,6 +99,7 @@ P3IceParams(toml_dict::CP.ParamDict;
     inp_depletion_model = NIceProxyDepletion(τ_act = 300),
     moments = :two_moment,
     liquid = :none,
+    inter_category = nothing,
 ) = P3IceParams(;
     scheme = ParametersP3(toml_dict; moments, liquid),
     terminal_velocity = Chen2022VelType(toml_dict),
@@ -105,12 +109,16 @@ P3IceParams(toml_dict::CP.ParamDict;
     rain_freezing = RainFreezing(toml_dict),
     inp_depletion_model,
     quad,
+    inter_category,
 )
 
 """
     n_categories(ice::P3IceParams)
 
-Number of P3 ice categories represented by `ice`.
+Number of P3 ice categories represented by `ice`. Generalizing this beyond a
+single category is the responsibility of the tendency-entry wiring phase; the
+`inter_category` field carries the multi-category interaction parameters
+([`InterCategoryParams`](@ref)) independently of this accessor.
 """
 n_categories(::P3IceParams) = 1
 

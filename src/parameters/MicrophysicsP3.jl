@@ -2,6 +2,7 @@ export ParametersP3
 export MassPowerLaw, AreaPowerLaw, SlopePowerLaw, SlopeConstant, VentilationFactor
 export MomentClosure, TwoMoment, ThreeMoment
 export LiquidFractionTreatment, NoLiquidFraction, PredictedLiquidFraction
+export InterCategoryParams
 
 ### ----------------------------- ###
 ### --- SUB-PARAMETERIZATIONS --- ###
@@ -402,6 +403,87 @@ function PredictedLiquidFraction(toml_dict::CP.ParamDict)
     params = CP.get_parameter_values(toml_dict, name_map, "CloudMicrophysics")
     return PredictedLiquidFraction{CP.float_type(toml_dict)}(; params...)
 end
+
+"""
+    InterCategoryParams{FT}
+
+Parameters for interactions between distinct P3 ice categories: inter-category
+collection, destination selection for newly formed ice, and category merging.
+Present only for a multi-category configuration (`nothing` when there is a single
+ice category).
+
+The initiation threshold `ΔD_init` is selected at construction from five
+category-count-specific ClimaParams keys via `Val(N)`; see
+[Milbrandt and Morrison (2016)](@cite MilbrandtMorrison2016).
+
+# Fields
+$(DocStringExtensions.FIELDS)
+"""
+@kwdef struct InterCategoryParams{FT} <: ParametersType
+    "Base ice-ice collection efficiency [`-`]"
+    E_ii::FT
+    "Collector rime mass fraction at which the collection-efficiency shutoff ramp starts [`-`]"
+    F_rim_shutoff_start::FT
+    "Collector rime mass fraction at which collection is fully shut off [`-`]"
+    F_rim_shutoff_end::FT
+    "Mean-mass-diameter difference threshold for initiating ice into a separate category [`m`]"
+    ΔD_init::FT
+    "Mean-mass-diameter difference below which two categories are merged [`m`]"
+    ΔD_merge::FT
+    "Bulk-density difference below which two categories are merged [`kg m⁻³`]"
+    Δρ_merge::FT
+end
+
+# Select the initiation threshold for `N` categories from the five ClimaParams
+# values via `Val(N)` dispatch; `N ≥ 6` uses the six-category value.
+@inline _select_ΔD_init(::Val{2}, d2, d3, d4, d5, d6) = d2
+@inline _select_ΔD_init(::Val{3}, d2, d3, d4, d5, d6) = d3
+@inline _select_ΔD_init(::Val{4}, d2, d3, d4, d5, d6) = d4
+@inline _select_ΔD_init(::Val{5}, d2, d3, d4, d5, d6) = d5
+@inline _select_ΔD_init(::Val{N}, d2, d3, d4, d5, d6) where {N} = d6
+
+"""
+    InterCategoryParams(toml_dict, ::Val{N})
+    InterCategoryParams(toml_dict; n_categories)
+
+Construct [`InterCategoryParams`](@ref) for an `N`-category configuration,
+selecting `ΔD_init` for `N` from the five per-category-count ClimaParams keys.
+`N` must be at least 2.
+"""
+function InterCategoryParams(toml_dict::CP.ParamDict, ::Val{N}) where {N}
+    N ≥ 2 || throw(ArgumentError("InterCategoryParams requires at least 2 categories, got $N"))
+    p = CP.get_parameter_values(
+        toml_dict,
+        (;
+            :P3_intercategory_collection_efficiency => :E_ii,
+            :P3_intercategory_rime_shutoff_start => :F_rim_shutoff_start,
+            :P3_intercategory_rime_shutoff_end => :F_rim_shutoff_end,
+            :P3_category_merge_diameter_difference => :ΔD_merge,
+            :P3_category_merge_density_difference => :Δρ_merge,
+            :P3_category_initiation_diameter_difference_ncat2 => :d2,
+            :P3_category_initiation_diameter_difference_ncat3 => :d3,
+            :P3_category_initiation_diameter_difference_ncat4 => :d4,
+            :P3_category_initiation_diameter_difference_ncat5 => :d5,
+            :P3_category_initiation_diameter_difference_ncat6 => :d6,
+        ),
+        "CloudMicrophysics",
+    )
+    ΔD_init = _select_ΔD_init(Val(N), p.d2, p.d3, p.d4, p.d5, p.d6)
+    FT = CP.float_type(toml_dict)
+    return InterCategoryParams{FT}(;
+        E_ii = p.E_ii,
+        F_rim_shutoff_start = p.F_rim_shutoff_start,
+        F_rim_shutoff_end = p.F_rim_shutoff_end,
+        ΔD_init,
+        ΔD_merge = p.ΔD_merge,
+        Δρ_merge = p.Δρ_merge,
+    )
+end
+InterCategoryParams(toml_dict::CP.ParamDict; n_categories::Int) =
+    InterCategoryParams(toml_dict, Val(n_categories))
+
+ShowMethods.field_units(::InterCategoryParams) =
+    (; ΔD_init = "m", ΔD_merge = "m", Δρ_merge = "kg m⁻³")
 
 ### ----------------------------- ###
 ### --- TOP-LEVEL CONSTRUCTOR --- ###
