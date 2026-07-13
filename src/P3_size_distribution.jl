@@ -376,15 +376,17 @@ function get_distribution_logλ(state, logλ_guess = nothing, logλ_min = 2, log
 end
 
 """
+    get_distribution_shape(params::ParametersP3{FT, <:TwoMoment}, logλ)
     get_distribution_shape(state::P3State, logλ)
     get_distribution_shape(state::P3State)
 
-Return the [`P3Shape`](@ref) for `state`. The two-argument form builds the shape
-from a given (host-frozen or solved) `logλ`; the one-argument form solves for
-`logλ` via [`get_distribution_logλ`](@ref) first. Under the two-moment closure,
-μ comes from the slope law and `logλ_core` equals `logλ`.
+Return the [`P3Shape`](@ref) for a given `logλ`; the one-argument form solves
+for `logλ` via [`get_distribution_logλ`](@ref) first. Under the two-moment
+closure, μ comes from the slope law and `logλ_core` equals `logλ`.
 """
-get_distribution_shape(state::P3State, logλ) = P3Shape(; logλ, μ = get_μ(state, logλ))
+get_distribution_shape(params::CMP.ParametersP3{FT, <:CMP.TwoMoment}, logλ) where {FT} =
+    P3Shape(; logλ, μ = get_μ(params.moments.slope, logλ))
+get_distribution_shape(state::P3State, logλ) = get_distribution_shape(state.params, logλ)
 get_distribution_shape(state::P3State) = get_distribution_shape(state, get_distribution_logλ(state))
 
 """

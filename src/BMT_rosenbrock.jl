@@ -12,44 +12,45 @@ const ROSENBROCK_SPECIES_PRESENCE_THRESHOLD = 1e-10
 
 """
     _instantaneous_2mp3_tendency(mp, tps, ρ, T, q_tot,
-        q_lcl, n_lcl, q_rai, n_rai, q_ice, n_ice, q_rim, b_rim, logλ)
+        q_lcl, n_lcl, q_rai, n_rai, ice, shapes)
 
 The raw instantaneous 2M+P3 tendency projected onto the eight prognostic
-species: the unlimited process rates of the `Microphysics2Moment` entry,
+species: the unlimited process rates of the packed `Microphysics2Moment` entry,
 without timestep-dependent clipping.
 """
 @inline function _instantaneous_2mp3_tendency(mp, tps,
     ρ, T, q_tot,
-    q_lcl, n_lcl, q_rai, n_rai, q_ice, n_ice, q_rim, b_rim, logλ,
+    q_lcl, n_lcl, q_rai, n_rai, ice, shapes,
 )
     full = bulk_microphysics_tendencies(Microphysics2Moment(), mp, tps,
         ρ, T, q_tot,
-        q_lcl, n_lcl, q_rai, n_rai, q_ice, n_ice, q_rim, b_rim, logλ,
+        q_lcl, n_lcl, q_rai, n_rai, ice, shapes,
     )
     return (; full.dq_lcl_dt, full.dn_lcl_dt, full.dq_rai_dt, full.dn_rai_dt,
         full.dq_ice_dt, full.dn_ice_dt, full.dq_rim_dt, full.db_rim_dt)
 end
 
 """
-    Instantaneous2MP3Tendency(mp, tps, ρ, T, q_tot, logλ)
+    Instantaneous2MP3Tendency(mp, tps, ρ, T, q_tot, shapes)
 
 Callable bundling the frozen per-substep context; applying it to the species
 vector evaluates [`_instantaneous_2mp3_tendency`](@ref). `q_tot` is promoted to
-the state's element type at the call; `logλ`, `T`, and `ρ` stay plain.
+the state's element type at the call; the frozen per-category `shapes`, `T`,
+and `ρ` stay plain.
 """
-struct Instantaneous2MP3Tendency{P, H, F}
+struct Instantaneous2MP3Tendency{P, H, F, S}
     mp::P
     tps::H
     ρ::F
     T::F
     q_tot::F
-    logλ::F
+    shapes::S
 end
 @inline function (g::Instantaneous2MP3Tendency)(x::SA.StaticVector{8})
     (q_lcl, n_lcl, q_rai, n_rai, q_ice, n_ice, q_rim, b_rim) = x
     tend = _instantaneous_2mp3_tendency(g.mp, g.tps,
         g.ρ, g.T, eltype(x)(g.q_tot),
-        q_lcl, n_lcl, q_rai, n_rai, q_ice, n_ice, q_rim, b_rim, g.logλ,
+        q_lcl, n_lcl, q_rai, n_rai, ((; q_ice, n_ice, q_rim, b_rim),), g.shapes,
     )
     return SA.similar_type(typeof(x), eltype(x))(values(tend))
 end
@@ -66,7 +67,7 @@ the primal tendency ([`_per_process_2mp3`](@ref)) and its Jacobian
 
 """
     _per_process_2mp3(mp, tps, ρ, T, q_tot,
-        q_lcl, n_lcl, q_rai, n_rai, q_ice, n_ice, q_rim, b_rim, logλ)
+        q_lcl, n_lcl, q_rai, n_rai, ice, shapes)
 
 Decompose the raw instantaneous 2M+P3 tendency into per-process contributions,
 each a [`MicroState2MP3`](@ref) over the eight prognostic species, returned as a
@@ -81,8 +82,9 @@ sides `f_p` for the linear post-solve attribution and is not differentiated.
 """
 @inline function _per_process_2mp3(mp::CMP.Microphysics2MParams{WR, ICE}, tps,
     ρ, T, q_tot,
-    q_lcl, n_lcl, q_rai, n_rai, q_ice, n_ice, q_rim, b_rim, logλ,
+    q_lcl, n_lcl, q_rai, n_rai, ice, shapes,
 ) where {WR, ICE <: CMP.P3IceParams}
+    (; q_ice, n_ice, q_rim, b_rim) = ice[1]
     FT = eltype(ρ)
     ϵₘ = UT.ϵ_numerics_2M_M(FT)
     # Clamp negative inputs to zero, matching the entry.
@@ -112,7 +114,7 @@ sides `f_p` for the linear post-solve attribution and is not differentiated.
     L_rim = q_rim * ρ
     B_rim = b_rim * ρ
     state = CMP3.state_from_prognostic(mp.ice.scheme, L_ice, N_ice, L_rim, B_rim)
-    shape = CMP3.get_distribution_shape(state, logλ)
+    shape = shapes[1]
 
     aps = mp.warm_rain.air_properties
     subdep = mp.warm_rain.subdep
@@ -272,7 +274,7 @@ sides `f_p` for the linear post-solve attribution and is not differentiated.
 end
 
 """
-    Verbose2MP3Tendency(mp, tps, ρ, T, q_tot, logλ)
+    Verbose2MP3Tendency(mp, tps, ρ, T, q_tot, shapes)
 
 Per-process companion to [`Instantaneous2MP3Tendency`](@ref): applying it to
 the species vector returns a `NamedTuple` of per-process tendency contributions
@@ -280,19 +282,19 @@ the species vector returns a `NamedTuple` of per-process tendency contributions
 only their sum. Evaluated at the primal state only, it supplies the right-hand
 sides `f_p` for the linear post-solve attribution.
 """
-struct Verbose2MP3Tendency{P, H, F}
+struct Verbose2MP3Tendency{P, H, F, S}
     mp::P
     tps::H
     ρ::F
     T::F
     q_tot::F
-    logλ::F
+    shapes::S
 end
 @inline function (g::Verbose2MP3Tendency)(x::SA.StaticVector{8, FT}) where {FT}
     (q_lcl, n_lcl, q_rai, n_rai, q_ice, n_ice, q_rim, b_rim) = x
     return _per_process_2mp3(g.mp, g.tps,
         g.ρ, g.T, FT(g.q_tot),
-        q_lcl, n_lcl, q_rai, n_rai, q_ice, n_ice, q_rim, b_rim, g.logλ,
+        q_lcl, n_lcl, q_rai, n_rai, ((; q_ice, n_ice, q_rim, b_rim),), g.shapes,
     )
 end
 
@@ -405,7 +407,7 @@ bulk_microphysics_tendencies(
 """
     bulk_microphysics_tendencies(::RosenbrockAverage, ::Microphysics2Moment,
         mp, tps, ρ, T, q_tot,
-        q_lcl, n_lcl, q_rai, n_rai, q_ice, n_ice, q_rim, b_rim, logλ,
+        q_lcl, n_lcl, q_rai, n_rai, ice, shapes,
         Δt, nsub = 1)
 
 Compute average 2M+P3 microphysics tendencies over `Δt` using `nsub`
@@ -413,21 +415,41 @@ linearized-implicit (Rosenbrock-Euler) substeps of the raw instantaneous
 tendency. See the [Rosenbrock-average microphysics substepping](@ref)
 documentation page for the substep algorithm.
 
-`logλ` and `q_tot` are held fixed across substeps. The 2M+P3 model supports
-[`ExactJacobian`](@ref) and [`ManualJacobian`](@ref); the donor-based matrix
+`ice` and `shapes` are the packed per-category inputs of the
+`Microphysics2Moment` entry; a positional single-category method
+(`q_ice, n_ice, q_rim, b_rim, logλ` in place of `ice, shapes`) packs them via
+[`_pack_2mp3_ice`](@ref). The frozen `shapes` and `q_tot` are held fixed across
+substeps. The 2M+P3 model supports [`ExactJacobian`](@ref) and
+[`ManualJacobian`](@ref); the donor-based matrix
 ([`DonorJacobian`](@ref)/[`CoupledDonorJacobian`](@ref)) is 1M-only.
 
 Returns the net change in the species over `Δt` divided by `Δt`, followed by a
 zero `dn_lcl_activation_dt` slot, matching the field layout of the microphysics
 tendency cache (droplet activation is added by the host, not the substep loop).
 """
-@inline function bulk_microphysics_tendencies(
+@inline bulk_microphysics_tendencies(
     mode::RosenbrockAverage{<:Union{ExactJacobian, ManualJacobian}}, cm::Microphysics2Moment,
     mp::CMP.Microphysics2MParams{WR, ICE}, tps,
     ρ, T, q_tot,
     q_lcl, n_lcl, q_rai, n_rai, q_ice, n_ice, q_rim, b_rim, logλ,
     Δt, nsub = 1,
-) where {WR, ICE <: CMP.P3IceParams}
+) where {WR, ICE <: CMP.P3IceParams} = bulk_microphysics_tendencies(
+    mode, cm, mp, tps, ρ, T, q_tot,
+    q_lcl, n_lcl, q_rai, n_rai,
+    _pack_2mp3_ice(mp, q_ice, n_ice, q_rim, b_rim, logλ)...,
+    Δt, nsub,
+)
+
+@inline function bulk_microphysics_tendencies(
+    mode::RosenbrockAverage{<:Union{ExactJacobian, ManualJacobian}}, cm::Microphysics2Moment,
+    mp::CMP.Microphysics2MParams{WR, ICE}, tps,
+    ρ, T, q_tot,
+    q_lcl, n_lcl, q_rai, n_rai,
+    ice::NTuple{NCAT, <:NamedTuple}, shapes::NTuple{NCAT, <:CMP3.P3Shape},
+    Δt, nsub = 1,
+) where {WR, ICE <: CMP.P3IceParams, NCAT}
+    _validate_packed_categories(mp, ice)
+    (; q_ice, n_ice, q_rim, b_rim) = ice[1]
     FT = typeof(q_tot)
     nsub_eff = max(Int(nsub), 1)
     h = Δt / FT(nsub_eff)
@@ -439,7 +461,7 @@ tendency cache (droplet activation is added by the host, not the substep loop).
     x₀ = x
     Tsub = T
     for _ in 1:nsub_eff
-        g = Instantaneous2MP3Tendency(mp, tps, ρ, Tsub, q_tot, logλ)
+        g = Instantaneous2MP3Tendency(mp, tps, ρ, Tsub, q_tot, shapes)
         x_prev = x
         if all(isfinite, x)
             f, J_raw = _tendency_and_jacobian(mode.jacobian, g, x)
@@ -576,7 +598,7 @@ b_rim)`.
     _jacobian_2mp3_manual(g::Instantaneous2MP3Tendency, x::MicroState2MP3)
 
 The hand-built 2M+P3 substep Jacobian for [`ManualJacobian`](@ref), evaluated at
-the same `(ρ, Tsub, q_tot, logλ, x)` as the raw tendency `f = g(x)`.
+the same `(ρ, Tsub, q_tot, shapes, x)` as the raw tendency `f = g(x)`.
 
 The entries are tiered:
 
@@ -608,7 +630,6 @@ The entries are tiered:
     ρ = g.ρ
     T = g.T
     q_tot = FT(g.q_tot)
-    logλ = g.logλ
 
     (q_lcl, n_lcl, q_rai, n_rai, q_ice, n_ice, q_rim, b_rim) = x
     o = zero(FT)
@@ -623,7 +644,7 @@ The entries are tiered:
     pp = map(
         _named_species,
         _per_process_2mp3(mp, tps, ρ, T, q_tot,
-            q_lcl, n_lcl, q_rai, n_rai, q_ice, n_ice, q_rim, b_rim, logλ),
+            q_lcl, n_lcl, q_rai, n_rai, ((; q_ice, n_ice, q_rim, b_rim),), g.shapes),
     )
 
     # --- shared thermodynamic constants (T, ρ, q_tot frozen in the substep) ---
@@ -1383,7 +1404,7 @@ bulk_microphysics_tendencies(::Verbose{<:RosenbrockAverage}, ::Microphysics2Mome
 """
     bulk_microphysics_tendencies(v::Verbose, ::Microphysics2Moment,
         mp, tps, ρ, T, q_tot,
-        q_lcl, n_lcl, q_rai, n_rai, q_ice, n_ice, q_rim, b_rim, logλ,
+        q_lcl, n_lcl, q_rai, n_rai, ice, shapes,
         Δt, nsub = 1)
 
 Diagnostic 2M+P3 Rosenbrock averaged tendency with post-solve per-process
@@ -1391,7 +1412,9 @@ attribution. Runs the substep loop of the wrapped
 [`RosenbrockAverage`](@ref) mode and accumulates the per-process realized
 increments ([`_per_process_2mp3`](@ref)) and the positivity clamp correction
 through [`_rosenbrock_substep_verbose`](@ref). The per-process attribution uses
-the unlimited solve; the increment limiter is not applied here.
+the unlimited solve; the increment limiter is not applied here. `ice` and
+`shapes` are the packed per-category inputs; a positional single-category
+method packs them via [`_pack_2mp3_ice`](@ref).
 
 Returns a `NamedTuple` with:
 
@@ -1406,13 +1429,29 @@ By construction `Σ_p processes_p + clamp_correction` equals the net averaged
 state change `(x − x₀) / Δt` to the roundoff of the per-substep linear solve.
 This is a diagnostic path, separate from the non-verbose entry.
 """
-@inline function bulk_microphysics_tendencies(
+@inline bulk_microphysics_tendencies(
     v::Verbose{<:RosenbrockAverage{ExactJacobian}}, cm::Microphysics2Moment,
     mp::CMP.Microphysics2MParams{WR, ICE}, tps,
     ρ, T, q_tot,
     q_lcl, n_lcl, q_rai, n_rai, q_ice, n_ice, q_rim, b_rim, logλ,
     Δt, nsub = 1,
-) where {WR, ICE <: CMP.P3IceParams}
+) where {WR, ICE <: CMP.P3IceParams} = bulk_microphysics_tendencies(
+    v, cm, mp, tps, ρ, T, q_tot,
+    q_lcl, n_lcl, q_rai, n_rai,
+    _pack_2mp3_ice(mp, q_ice, n_ice, q_rim, b_rim, logλ)...,
+    Δt, nsub,
+)
+
+@inline function bulk_microphysics_tendencies(
+    v::Verbose{<:RosenbrockAverage{ExactJacobian}}, cm::Microphysics2Moment,
+    mp::CMP.Microphysics2MParams{WR, ICE}, tps,
+    ρ, T, q_tot,
+    q_lcl, n_lcl, q_rai, n_rai,
+    ice::NTuple{NCAT, <:NamedTuple}, shapes::NTuple{NCAT, <:CMP3.P3Shape},
+    Δt, nsub = 1,
+) where {WR, ICE <: CMP.P3IceParams, NCAT}
+    _validate_packed_categories(mp, ice)
+    (; q_ice, n_ice, q_rim, b_rim) = ice[1]
     FT = typeof(q_tot)
     mode = v.mode
     nsub_eff = max(Int(nsub), 1)
@@ -1422,11 +1461,11 @@ This is a diagnostic path, separate from the non-verbose entry.
     x = MicroState2MP3{FT}((q_lcl, n_lcl, q_rai, n_rai, q_ice, n_ice, q_rim, b_rim))
     x₀ = x
     Tsub = T
-    Δxp_sum = _per_process_zero_accumulator(Verbose2MP3Tendency(mp, tps, ρ, Tsub, q_tot, logλ), x)
+    Δxp_sum = _per_process_zero_accumulator(Verbose2MP3Tendency(mp, tps, ρ, Tsub, q_tot, shapes), x)
     Δx_clamp_sum = zero(x)
     for _ in 1:nsub_eff
-        g = Instantaneous2MP3Tendency(mp, tps, ρ, Tsub, q_tot, logλ)
-        gv = Verbose2MP3Tendency(mp, tps, ρ, Tsub, q_tot, logλ)
+        g = Instantaneous2MP3Tendency(mp, tps, ρ, Tsub, q_tot, shapes)
+        gv = Verbose2MP3Tendency(mp, tps, ρ, Tsub, q_tot, shapes)
         # Match the wrapped mode: differentiate only at a finite state; a
         # non-finite Jacobian routes the substep to the Euler fallback.
         J = if all(isfinite, x)

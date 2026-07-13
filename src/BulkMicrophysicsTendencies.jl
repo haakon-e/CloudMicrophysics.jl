@@ -907,20 +907,71 @@ For warm rain + P3 ice, see the method that accepts `Microphysics2MParams{FT, WR
 end
 
 """
+    _pack_2mp3_ice(mp, q_ice, n_ice, q_rim, b_rim, logλ)
+
+Pack single-category positional ice arguments into the `(ice, shapes)` pair of
+the packed 2M+P3 entry: a one-tuple of the prognostic `NamedTuple`
+`(; q_ice, n_ice, q_rim, b_rim)` and a one-tuple of the [`CMP3.P3Shape`](@ref)
+diagnosed from `logλ`.
+"""
+@inline _pack_2mp3_ice(mp, q_ice, n_ice, q_rim, b_rim, logλ) = (
+    ((; q_ice, n_ice, q_rim, b_rim),),
+    (CMP3.get_distribution_shape(mp.ice.scheme, logλ),),
+)
+
+"""
+    _validate_packed_categories(mp, ice::NTuple{NCAT})
+
+Throw an `ArgumentError` unless `NCAT` equals `n_categories(mp.ice)`.
+"""
+@inline function _validate_packed_categories(mp, ice::NTuple{NCAT}) where {NCAT}
+    NCAT == CMP.n_categories(mp.ice) || throw(
+        ArgumentError(
+            "packed ice inputs carry $NCAT categories; `mp.ice` represents $(CMP.n_categories(mp.ice))",
+        ),
+    )
+    return nothing
+end
+
+"""
     bulk_microphysics_tendencies(
         ::Microphysics2Moment,
-        mp::Microphysics2MParams{FT, WR, <:P3IceParams},
+        mp::Microphysics2MParams{WR, <:P3IceParams}, tps,
         ρ, T, q_tot, q_lcl, n_lcl, q_rai, n_rai,
         q_ice, n_ice, q_rim, b_rim, logλ,
     )
 
-Compute 2-moment **warm rain + P3 ice** microphysics tendencies.
+Single-category positional form of the packed warm rain + P3 ice entry: pack the
+ice scalars and the shape diagnosed from `logλ` ([`_pack_2mp3_ice`](@ref)) and
+delegate to the packed method.
+"""
+@inline bulk_microphysics_tendencies(
+    cm::Microphysics2Moment, mp::CMP.Microphysics2MParams{WR, ICE}, tps,
+    ρ, T, q_tot,
+    q_lcl, n_lcl, q_rai, n_rai,
+    q_ice, n_ice, q_rim, b_rim, logλ,
+    inpc_log_shift = zero(ρ),
+    w = zero(ρ), p = zero(ρ),
+) where {WR, ICE <: CMP.P3IceParams} = bulk_microphysics_tendencies(
+    cm, mp, tps, ρ, T, q_tot,
+    q_lcl, n_lcl, q_rai, n_rai,
+    _pack_2mp3_ice(mp, q_ice, n_ice, q_rim, b_rim, logλ)...,
+    inpc_log_shift, w, p,
+)
 
-This method is type-stable and GPU-optimized. The P3 ice parameters are guaranteed
-to be non-Nothing, eliminating runtime type checks and dynamic dispatch.
+"""
+    bulk_microphysics_tendencies(
+        ::Microphysics2Moment,
+        mp::Microphysics2MParams{WR, <:P3IceParams}, tps,
+        ρ, T, q_tot, q_lcl, n_lcl, q_rai, n_rai,
+        ice::NTuple{NCAT, <:NamedTuple}, shapes::NTuple{NCAT, <:P3Shape},
+        inpc_log_shift = zero(ρ), w = zero(ρ), p = zero(ρ),
+    )
+
+Compute 2-moment warm rain + P3 ice microphysics tendencies from packed
+per-category ice inputs.
 
 # Arguments
-## Required
 - `mp`: Microphysics2MParams with P3 ice parameters present
 - `tps`: Thermodynamics parameters
 - `ρ`: Air density (kg/m³)
@@ -930,13 +981,12 @@ to be non-Nothing, eliminating runtime type checks and dynamic dispatch.
 - `n_lcl`: Cloud droplet number per kg air (1/kg)
 - `q_rai`: Rain specific content (kg/kg)
 - `n_rai`: Rain number per kg air (1/kg)
+- `ice`: per-category prognostic inputs, each a `NamedTuple` with fields
+  `q_ice` (kg/kg), `n_ice` (1/kg), `q_rim` (kg/kg), `b_rim` (m³/kg)
+- `shapes`: per-category frozen distribution shapes ([`CMP3.P3Shape`](@ref))
 
-## Optional (P3 ice state)
-- `q_ice`: Ice specific content (kg/kg), default = 0
-- `n_ice`: Ice number per kg air (1/kg), default = 0
-- `q_rim`: Rime mass (kg/kg), default = 0
-- `b_rim`: Rime volume (m³/kg), default = 0
-- `logλ`: Log of P3 distribution slope parameter, log(1/m), default = 0
+`NCAT` must equal `n_categories(mp.ice)`; only one category is currently
+supported.
 
 # Returns
 `NamedTuple` with all tendency fields:
@@ -945,17 +995,22 @@ to be non-Nothing, eliminating runtime type checks and dynamic dispatch.
 - `dq_rai_dt`: Rain tendency (kg/kg/s)
 - `dn_rai_dt`: Rain number tendency (1/kg/s)
 - `dq_ice_dt`: Ice tendency (kg/kg/s)
+- `dn_ice_dt`: Ice number tendency (1/kg/s)
 - `dq_rim_dt`: Rime mass tendency (kg/kg/s)
 - `db_rim_dt`: Rime volume tendency (m³/kg/s)
+- `dn_lcl_activation_dt`: Droplet activation tendency (1/kg/s)
 """
 @inline function bulk_microphysics_tendencies(
     ::Microphysics2Moment, mp::CMP.Microphysics2MParams{WR, ICE}, tps,
     ρ, T, q_tot,
     q_lcl, n_lcl, q_rai, n_rai,
-    q_ice, n_ice, q_rim, b_rim, logλ,
+    ice::NTuple{NCAT, <:NamedTuple}, shapes::NTuple{NCAT, <:CMP3.P3Shape},
     inpc_log_shift = zero(ρ),
     w = zero(ρ), p = zero(ρ),
-) where {WR, ICE <: CMP.P3IceParams}
+) where {WR, ICE <: CMP.P3IceParams, NCAT}
+    _validate_packed_categories(mp, ice)
+    (; q_ice, n_ice, q_rim, b_rim) = ice[1]
+    shape = shapes[1]
     FT = eltype(ρ)
     ϵₘ = UT.ϵ_numerics_2M_M(FT)
     ϵB = UT.ϵ_numerics_P3_B(FT)
@@ -981,8 +1036,6 @@ to be non-Nothing, eliminating runtime type checks and dynamic dispatch.
     L_rim = q_rim * ρ  # [kg rim / m³ air]
     B_rim = b_rim * ρ  # [m³ rim / m³ air]
     state = CMP3.state_from_prognostic(mp.ice.scheme, L_ice, N_ice, L_rim, B_rim)
-    # Diagnosed shape frozen from the host-provided logλ; passed to every P3 process.
-    shape = CMP3.get_distribution_shape(state, logλ)
 
     # Unpack warm rain parameters
     aps = mp.warm_rain.air_properties

@@ -178,7 +178,7 @@ function test_framework_2m(FT)
         # against ForwardDiff of the primal functions they linearize, across the
         # branches `_jacobian_2mp3_manual` selects between. Full-matrix agreement
         # is not asserted here: Tier 2 (donor-diagonal) and Tier 3 (dropped
-        # quadrature couplings) are approximations by design. See #743 EVIDENCE.
+        # quadrature couplings) are approximations by design. See #743.
         rtol = FT == Float64 ? FT(1e-9) : FT(1e-2)
         atol = FT == Float64 ? FT(1e-12) : FT(1e-6)
         qmin = UT.ϵ_numerics_2M_M(FT)
@@ -412,17 +412,6 @@ function test_framework_2m(FT)
                 @test all(isapprox.(manual, fd; rtol, atol))
             end
         end
-
-        # The full 8×8 `_jacobian_2mp3_manual(g, x)` does not match
-        # `FD.jacobian(g, x)` to the commit's stated ~3e-12: whenever ice,
-        # cloud, and rain are simultaneously present, the dropped Tier-3
-        # quadrature collision couplings and the approximate Tier-2
-        # donor-diagonal couplings dominate the disagreement (measured up to
-        # ~2e13 absolute in the base regime below). See EVIDENCE.md (#743).
-        # g = BMT.Instantaneous2MP3Tendency(mp, tps, ρ, T, q_tot, logλ)
-        # Jm = BMT._jacobian_2mp3_manual(g, BMT.MicroState2MP3{FT}(x...))
-        # Jf = FD.jacobian(g, BMT.MicroState2MP3{FT}(x...))
-        # @test isapprox(Jm, Jf; rtol, atol)
     end
 
     @testset "non-Exact RosenbrockAverage on Microphysics2Moment throws ($FT)" begin
@@ -443,7 +432,7 @@ function test_framework_2m(FT)
     end
 end
 
-function _framework_2mp3_args(FT, mode)
+function _framework_2mp3_args(FT, mode; packed = false)
     tps = TDI.TD.Parameters.ThermodynamicsParameters(FT)
     mp = CMP.Microphysics2MParams(FT; with_ice = true, is_limited = true)
     p3 = mp.ice.scheme
@@ -451,24 +440,104 @@ function _framework_2mp3_args(FT, mode)
         p3, FT(0.78) * FT(1e-4), FT(0.78) * FT(2e5), FT(0.78) * FT(4e-5), FT(0.78) * FT(6e-8),
     )
     logλ = P3.get_distribution_logλ(st)
+    ice_args = (FT(1e-4), FT(2e5), FT(4e-5), FT(6e-8), logλ)
+    ice_tail = packed ? BMT._pack_2mp3_ice(mp, ice_args...) : ice_args
     return (
         mode, BMT.Microphysics2Moment(), mp, tps,
         FT(0.78), FT(273.5), FT(0.009),
-        FT(2e-4), FT(5e7), FT(1e-4), FT(4e4), FT(1e-4), FT(2e5), FT(4e-5), FT(6e-8),
-        logλ, FT(60), 4,
+        FT(2e-4), FT(5e7), FT(1e-4), FT(4e4), ice_tail...,
+        FT(60), 4,
     )
 end
 
 function test_framework_2mp3_inference(FT)
     for (name, mode) in
-        (("rosenbrock_exact()", BMT.rosenbrock_exact()), ("rosenbrock_manual()", BMT.rosenbrock_manual()))
-        args = _framework_2mp3_args(FT, mode)
-        @testset "$name inference and allocations ($FT)" begin
+        (("rosenbrock_exact()", BMT.rosenbrock_exact()), ("rosenbrock_manual()", BMT.rosenbrock_manual())),
+        packed in (false, true)
+
+        args = _framework_2mp3_args(FT, mode; packed)
+        form = packed ? "packed" : "positional"
+        @testset "$name $form inference and allocations ($FT)" begin
             @test (@inferred BMT.bulk_microphysics_tendencies(args...)) isa NamedTuple
             JET.@test_opt BMT.bulk_microphysics_tendencies(args...)
             trail = BT.@benchmark $(splat(BMT.bulk_microphysics_tendencies))($args) samples = 100 evals = 1
             @test trail.memory == 0
         end
+    end
+end
+
+# Packed-vs-positional 2M+P3 entry parity: the positional form packs its ice
+# scalars and shape via `_pack_2mp3_ice` and must reproduce the packed form
+# bit-for-bit.
+function test_packed_entry_parity(FT)
+    tps = TDI.TD.Parameters.ThermodynamicsParameters(FT)
+    mp = CMP.Microphysics2MParams(FT; with_ice = true, is_limited = true)
+    p3 = mp.ice.scheme
+    Δt = FT(60)
+
+    # deterministic 64-bit LCG state sweep
+    s = Ref(UInt64(0x9E3779B97F4A7C15))
+    draw() = (s[] = 6364136223846793005 * s[] + 1442695040888963407; Float64(s[] >> 11) * (2.0^-53))
+    uni(lo, hi) = lo + (hi - lo) * draw()
+
+    @testset "packed vs positional 2M+P3 entries ($FT)" begin
+        for _ in 1:5
+            ρ = FT(uni(0.4, 1.3))
+            T = FT(TDI.T_freeze(tps) + uni(-25, 20))
+            q_tot = FT(uni(1e-4, 2e-2))
+            q_lcl = FT(uni(0, 3e-3))
+            n_lcl = FT(uni(1e6, 1e9))
+            q_rai = FT(uni(0, 1e-3))
+            n_rai = FT(uni(1e2, 1e5))
+            q_ice = FT(uni(1e-6, 2e-3))
+            n_ice = FT(uni(1e3, 1e6))
+            q_rim = FT(uni(0, 0.9)) * q_ice
+            b_rim = q_rim / FT(uni(100, 800))
+            logλ = P3.get_distribution_logλ_from_prognostic(p3, q_ice * ρ, n_ice * ρ, q_rim * ρ, b_rim * ρ)
+            ice, shapes = BMT._pack_2mp3_ice(mp, q_ice, n_ice, q_rim, b_rim, logλ)
+            common = (mp, tps, ρ, T, q_tot, q_lcl, n_lcl, q_rai, n_rai)
+            inst_pos = BMT.bulk_microphysics_tendencies(
+                BMT.Microphysics2Moment(), common..., q_ice, n_ice, q_rim, b_rim, logλ,
+            )
+            inst_pack = BMT.bulk_microphysics_tendencies(BMT.Microphysics2Moment(), common..., ice, shapes)
+            @test all(map(===, values(inst_pos), values(inst_pack)))
+            for mode in (BMT.rosenbrock_exact(), BMT.rosenbrock_manual()), nsub in (1, 4)
+                r_pos = BMT.bulk_microphysics_tendencies(
+                    mode, BMT.Microphysics2Moment(), common..., q_ice, n_ice, q_rim, b_rim, logλ, Δt, nsub,
+                )
+                r_pack = BMT.bulk_microphysics_tendencies(
+                    mode, BMT.Microphysics2Moment(), common..., ice, shapes, Δt, nsub,
+                )
+                @test all(map(===, values(r_pos), values(r_pack)))
+            end
+        end
+    end
+
+    @testset "packed ice input round-trip and category count ($FT)" begin
+        @test CMP.n_categories(mp.ice) == 1
+        q_ice = FT(1e-4)
+        n_ice = FT(2e5)
+        q_rim = FT(4e-5)
+        b_rim = FT(6e-8)
+        logλ = P3.get_distribution_logλ_from_prognostic(p3, q_ice, n_ice, q_rim, b_rim)
+        ice, shapes = BMT._pack_2mp3_ice(mp, q_ice, n_ice, q_rim, b_rim, logλ)
+        @test ice === ((; q_ice, n_ice, q_rim, b_rim),)
+        @test shapes === (P3.get_distribution_shape(p3, logλ),)
+        @test isbits(ice) && isbits(shapes)
+        @test shapes[1].logλ === logλ === shapes[1].logλ_core
+        # category count mismatch throws
+        args = (mp, tps, FT(1), FT(273), FT(0.01), FT(1e-4), FT(1e8), FT(1e-4), FT(1e4))
+        ice2 = (ice[1], ice[1])
+        shapes2 = (shapes[1], shapes[1])
+        @test_throws ArgumentError BMT.bulk_microphysics_tendencies(
+            BMT.Microphysics2Moment(), args..., ice2, shapes2,
+        )
+        @test_throws ArgumentError BMT.bulk_microphysics_tendencies(
+            BMT.rosenbrock_exact(), BMT.Microphysics2Moment(), args..., ice2, shapes2, FT(60), 1,
+        )
+        @test_throws ArgumentError BMT.bulk_microphysics_tendencies(
+            BMT.Verbose(BMT.rosenbrock_exact()), BMT.Microphysics2Moment(), args..., ice2, shapes2, FT(60), 1,
+        )
     end
 end
 
@@ -547,6 +616,9 @@ test_framework_2m(Float32)
 
 test_microstate_layout(Float64)
 test_microstate_layout(Float32)
+
+test_packed_entry_parity(Float64)
+test_packed_entry_parity(Float32)
 
 test_framework_2mp3_inference(Float64)
 test_framework_2mp3_inference(Float32)

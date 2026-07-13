@@ -46,8 +46,9 @@ function test_rosenbrock_verbose_2m(FT)
         for r in regimes
             logλ = isnothing(r.logλ) ? consistent_logλ(r.ρ, r.x) : r.logλ
             x = SVector{8, FT}(r.x...)
-            g = BMT.Instantaneous2MP3Tendency(mp, tps, r.ρ, r.T, r.q_tot, logλ)
-            gv = BMT.Verbose2MP3Tendency(mp, tps, r.ρ, r.T, r.q_tot, logλ)
+            shapes = (P3.get_distribution_shape(mp.ice.scheme, logλ),)
+            g = BMT.Instantaneous2MP3Tendency(mp, tps, r.ρ, r.T, r.q_tot, shapes)
+            gv = BMT.Verbose2MP3Tendency(mp, tps, r.ρ, r.T, r.q_tot, shapes)
             full = SVector(g(x)...)
             psum = SVector(sum(values(gv(x)))...)
             @test all(isfinite, psum)

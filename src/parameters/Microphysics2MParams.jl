@@ -102,6 +102,13 @@ P3IceParams(toml_dict::CP.ParamDict;
 )
 
 """
+    n_categories(ice::P3IceParams)
+
+Number of P3 ice categories represented by `ice`.
+"""
+n_categories(::P3IceParams) = 1
+
+"""
 
 Unified parameter container for 2-moment microphysics.
 

@@ -21,8 +21,9 @@ function explicit_reference(mp, tps, ρ, T, q_tot, x0, logλ, Δt, nsub)
     x = SVector{8, FT}(x0...)
     Tsub = T
     cp_d = TDI.TD.Parameters.cp_d(tps)
+    shapes = (P3.get_distribution_shape(mp.ice.scheme, logλ),)
     for _ in 1:nsub
-        g = BMT.Instantaneous2MP3Tendency(mp, tps, ρ, Tsub, q_tot, logλ)
+        g = BMT.Instantaneous2MP3Tendency(mp, tps, ρ, Tsub, q_tot, shapes)
         f = g(x)
         xp = x
         x = max.(x .+ h .* f, zero(FT))
