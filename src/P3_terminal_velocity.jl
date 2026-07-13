@@ -64,7 +64,7 @@ end
 """
     ice_terminal_velocity_number_weighted(
         velocity_params::CMP.Chen2022VelType, ρₐ, state::P3State, shape;
-        [p], [quad],
+        p = 1e-6, quad,
     )
 
 Return the terminal velocity of the number-weighted mean ice particle size.
@@ -73,7 +73,8 @@ Return the terminal velocity of the number-weighted mean ice particle size.
 - `velocity_params`: A [`CMP.Chen2022VelType`](@ref) with terminal velocity parameters
 - `ρₐ`: Air density [kg/m³]
 - `state`: A [`P3State`](@ref)
-- `shape`: The diagnosed [`P3Shape`](@ref)
+- `shape`: The diagnosed [`P3Shape`](@ref), or a real `logλ` from which the
+  shape is diagnosed via [`get_distribution_shape`](@ref)
 
 # Keyword arguments
  - `p`: Tolerance parameter for the integral bounds. Default is 1e-6.
@@ -81,6 +82,13 @@ Return the terminal velocity of the number-weighted mean ice particle size.
 
 See also [`ice_terminal_velocity_mass_weighted`](@ref)
 """
+function ice_terminal_velocity_number_weighted(
+    velocity_params::CMP.Chen2022VelType, ρₐ, state::P3State, logλ::Real;
+    kw...,
+)
+    shape = get_distribution_shape(state, logλ)
+    return ice_terminal_velocity_number_weighted(velocity_params, ρₐ, state, shape; kw...)
+end
 function ice_terminal_velocity_number_weighted(
     velocity_params::CMP.Chen2022VelType, ρₐ, state::P3State, shape::P3Shape;
     p = 1e-6, quad,
@@ -106,7 +114,10 @@ end
 @inline (f::P3MassWeightedIntegrand)(D) = f.n(D) * f.v_term(D) * ice_mass(f.state, D)
 
 """
-    ice_terminal_velocity_mass_weighted(velocity_params::CMP.Chen2022VelType, ρₐ, state::P3State, shape; [∫kwargs...])
+    ice_terminal_velocity_mass_weighted(
+        velocity_params::CMP.Chen2022VelType, ρₐ, state::P3State, shape;
+        p = 1e-6, quad,
+    )
 
 Return the terminal velocity of the mass-weighted mean ice particle size.
 
@@ -114,7 +125,8 @@ Return the terminal velocity of the mass-weighted mean ice particle size.
 - `velocity_params`: A [`CMP.Chen2022VelType`](@ref) with terminal velocity parameters
 - `ρₐ`: Air density [kg/m³]
 - `state`: A [`P3State`](@ref)
-- `shape`: The diagnosed [`P3Shape`](@ref)
+- `shape`: The diagnosed [`P3Shape`](@ref), or a real `logλ` from which the
+  shape is diagnosed via [`get_distribution_shape`](@ref)
 
 # Keyword arguments
  - `p`: Tolerance parameter for the integral bounds. Default is 1e-6.
@@ -122,6 +134,13 @@ Return the terminal velocity of the mass-weighted mean ice particle size.
 
 See also [`ice_terminal_velocity_number_weighted`](@ref)
 """
+function ice_terminal_velocity_mass_weighted(
+    velocity_params::CMP.Chen2022VelType, ρₐ, state::P3State, logλ::Real;
+    kw...,
+)
+    shape = get_distribution_shape(state, logλ)
+    return ice_terminal_velocity_mass_weighted(velocity_params, ρₐ, state, shape; kw...)
+end
 function ice_terminal_velocity_mass_weighted(
     velocity_params::CMP.Chen2022VelType, ρₐ, state::P3State, shape::P3Shape;
     p = 1e-6, quad,
@@ -160,8 +179,7 @@ state must be reconstructed from prognostic variables every cell.
     velocity_params, ρₐ, params, ρq_ice, ρn_ice, ρq_rim, ρb_rim, logλ; kw...,
 )
     state = state_from_prognostic(params, ρq_ice, ρn_ice, ρq_rim, ρb_rim)
-    shape = get_distribution_shape(state, logλ)
-    return ice_terminal_velocity_number_weighted(velocity_params, ρₐ, state, shape; kw...)
+    return ice_terminal_velocity_number_weighted(velocity_params, ρₐ, state, logλ; kw...)
 end
 
 """
@@ -178,6 +196,5 @@ the per-cell `P3State` via the regularised
     velocity_params, ρₐ, params, ρq_ice, ρn_ice, ρq_rim, ρb_rim, logλ; kw...,
 )
     state = state_from_prognostic(params, ρq_ice, ρn_ice, ρq_rim, ρb_rim)
-    shape = get_distribution_shape(state, logλ)
-    return ice_terminal_velocity_mass_weighted(velocity_params, ρₐ, state, shape; kw...)
+    return ice_terminal_velocity_mass_weighted(velocity_params, ρₐ, state, logλ; kw...)
 end

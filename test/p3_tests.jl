@@ -1301,6 +1301,96 @@ function test_p3_bit_identity(FT)
     end
 end
 
+# Host call-signature compatibility: each call below mirrors a ClimaAtmos
+# `microphysics_cache.jl` / `microphysics_wrappers.jl` call site argument for
+# argument (same positional arity and scalar types).
+function test_host_call_signatures(FT)
+    tps = TDI.TD.Parameters.ThermodynamicsParameters(FT)
+    mp = CMP.Microphysics2MParams(FT; with_ice = true, is_limited = true)
+    p3_ice = mp.ice
+
+    ρ = FT(0.78)
+    T = FT(273.5)
+    q_tot = FT(0.009)
+    q_lcl = FT(2e-4)
+    n_lcl = FT(5e7)
+    q_rai = FT(1e-4)
+    n_rai = FT(4e4)
+    q_ice = FT(1e-4)
+    n_ice = FT(2e5)
+    q_rim = FT(4e-5)
+    b_rim = FT(6e-8)
+    dt = FT(2)
+    n_substeps = 1
+
+    @testset "P3 ice velocity host call signatures" begin
+        # microphysics_cache.jl: grid mean (splatted argument tuple) and EDMF
+        # environment and updrafts (explicit arguments)
+        state = P3.state_from_prognostic(
+            p3_ice.scheme,
+            max(0, ρ * q_ice), max(0, ρ * n_ice), max(0, ρ * q_rim), max(0, ρ * b_rim),
+        )
+        logλ = P3.get_distribution_logλ(state)
+        @test logλ isa FT
+        args = (p3_ice.terminal_velocity, ρ, state, logλ)
+        wnᵢ = P3.ice_terminal_velocity_number_weighted(args...; quad = p3_ice.quad)
+        wᵢ = P3.ice_terminal_velocity_mass_weighted(args...; quad = p3_ice.quad)
+        wᵢ′ = P3.ice_terminal_velocity_mass_weighted(
+            p3_ice.terminal_velocity, ρ, state, logλ;
+            quad = p3_ice.quad,
+        )
+        wnᵢ′ = P3.ice_terminal_velocity_number_weighted(
+            p3_ice.terminal_velocity, ρ, state, logλ;
+            quad = p3_ice.quad,
+        )
+        shape = P3.get_distribution_shape(state, logλ)
+        @test wnᵢ === wnᵢ′ ===
+              P3.ice_terminal_velocity_number_weighted(
+                  p3_ice.terminal_velocity, ρ, state, shape;
+                  quad = p3_ice.quad,
+              )
+        @test wᵢ === wᵢ′ ===
+              P3.ice_terminal_velocity_mass_weighted(
+                  p3_ice.terminal_velocity, ρ, state, shape;
+                  quad = p3_ice.quad,
+              )
+    end
+
+    @testset "2M+P3 tendency host call signatures" begin
+        # microphysics_cache.jl: updraft, environment, and grid-mean fills, one
+        # flat 18-argument signature
+        logλ = P3.get_distribution_logλ_from_prognostic(
+            p3_ice.scheme, ρ * q_ice, ρ * n_ice, ρ * q_rim, ρ * b_rim,
+        )
+        ice, shapes = BMT._pack_2mp3_ice(mp, q_ice, n_ice, q_rim, b_rim, logλ)
+        for mode in (BMT.rosenbrock_manual(), BMT.rosenbrock_exact())
+            flat = BMT.bulk_microphysics_tendencies(
+                mode, BMT.Microphysics2Moment(), mp, tps,
+                ρ, T, q_tot,
+                q_lcl, n_lcl, q_rai, n_rai,
+                q_ice, n_ice, q_rim, b_rim,
+                logλ, dt, n_substeps,
+            )
+            packed = BMT.bulk_microphysics_tendencies(
+                mode, BMT.Microphysics2Moment(), mp, tps,
+                ρ, T, q_tot,
+                q_lcl, n_lcl, q_rai, n_rai,
+                ice, shapes, dt, n_substeps,
+            )
+            @test all(map(===, values(flat), values(packed)))
+        end
+    end
+
+    @testset "2M warm-rain host call signature" begin
+        # microphysics_wrappers.jl: the ten-argument warm-rain form
+        mp_warm = CMP.Microphysics2MParams(FT; with_ice = false)
+        t = BMT.bulk_microphysics_tendencies(
+            BMT.Microphysics2Moment(), mp_warm, tps, ρ, T, q_tot, q_lcl, n_lcl, q_rai, n_rai,
+        )
+        @test all(isfinite, values(t))
+    end
+end
+
 @testset "P3 tests ($FT)" for FT in (Float64, Float32)
     # configuration surface and shape carriage
     test_p3_configuration_surface(FT)
@@ -1329,5 +1419,6 @@ end
 
     # behavior-neutrality of the foundation refactors
     test_p3_bit_identity(FT)
+    test_host_call_signatures(FT)
 end
 nothing
