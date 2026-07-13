@@ -124,27 +124,32 @@ function P3IceParams(;
     )
 end
 
-P3IceParams(toml_dict::CP.ParamDict;
+function P3IceParams(toml_dict::CP.ParamDict;
     is_limited = true,
     quadrature_order = 6,
     quad = QUAD.GaussLegendre(CP.float_type(toml_dict), quadrature_order),
     inp_depletion_model = NIceProxyDepletion(τ_act = 300),
     moments = :two_moment,
     liquid = :none,
-    n_categories = 1,
-    inter_category = n_categories == 1 ? nothing : InterCategoryParams(toml_dict, Val(n_categories)),
-) = P3IceParams(;
-    scheme = ParametersP3(toml_dict; moments, liquid),
-    terminal_velocity = Chen2022VelType(toml_dict),
-    cloud_pdf = CloudParticlePDF_SB2006(toml_dict),
-    rain_pdf = RainParticlePDF_SB2006(toml_dict; is_limited),
-    ice_nucleation = Frostenberg2023(toml_dict),
-    rain_freezing = RainFreezing(toml_dict),
-    inp_depletion_model,
-    quad,
-    inter_category,
-    n_categories,
+    inter_category = nothing,
+    n_categories = inter_category === nothing ? 1 : 2,
 )
+    icp =
+        inter_category === nothing && n_categories > 1 ?
+        InterCategoryParams(toml_dict, Val(n_categories)) : inter_category
+    return P3IceParams(;
+        scheme = ParametersP3(toml_dict; moments, liquid),
+        terminal_velocity = Chen2022VelType(toml_dict),
+        cloud_pdf = CloudParticlePDF_SB2006(toml_dict),
+        rain_pdf = RainParticlePDF_SB2006(toml_dict; is_limited),
+        ice_nucleation = Frostenberg2023(toml_dict),
+        rain_freezing = RainFreezing(toml_dict),
+        inp_depletion_model,
+        quad,
+        inter_category = icp,
+        n_categories,
+    )
+end
 
 """
     n_categories(ice::P3IceParams{N})

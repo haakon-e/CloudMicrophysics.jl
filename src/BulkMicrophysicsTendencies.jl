@@ -831,6 +831,38 @@ slots are appended when present; pass `nothing` to omit either.
 @inline _append_z_field(nt, dz_ice_dt) = (; nt..., dz_ice_dt)
 
 """
+    _categories_tendency_fields(blocks::NTuple{NCAT, <:NamedTuple})
+
+Merge the per-category ice tendency blocks into the flat tendency fields. A
+single category keeps the unsuffixed names; for `NCAT > 1` each block's fields
+carry the category index before the `_dt` suffix (`dq_ice_dt` of category 2
+becomes `dq_ice_2_dt`, matching the `_1.._N` suffixes of the host's per-category
+prognostic scalars).
+"""
+@inline _categories_tendency_fields(b::NTuple{1, <:NamedTuple}) = b[1]
+@inline _categories_tendency_fields(b::NTuple{2, <:NamedTuple}) =
+    merge(_suffixed_category_fields(b[1], Val(1)), _suffixed_category_fields(b[2], Val(2)))
+@inline _categories_tendency_fields(b::NTuple{3, <:NamedTuple}) = merge(
+    _categories_tendency_fields((b[1], b[2])),
+    _suffixed_category_fields(b[3], Val(3)),
+)
+@inline _categories_tendency_fields(b::NTuple{4, <:NamedTuple}) = merge(
+    _categories_tendency_fields((b[1], b[2], b[3])),
+    _suffixed_category_fields(b[4], Val(4)),
+)
+
+# Generated so the suffixed field names are compile-time constants (symbol
+# construction cannot constant-fold through `ntuple`).
+@generated function _suffixed_category_fields(nt::NamedTuple{names}, ::Val{j}) where {names, j}
+    suffixed = map(names) do n
+        s = String(n)
+        endswith(s, "_dt") || error("tendency field `$n` does not end in `_dt`")
+        Symbol(s[1:(end - 3)], :_, j, :_dt)
+    end
+    return :(NamedTuple{$suffixed}(values(nt)))
+end
+
+"""
     _moments(mp::Microphysics2MParams)
 
 The [`CMP.MomentClosure`](@ref) of the P3 ice scheme carried by `mp`.
@@ -902,19 +934,19 @@ reference total ice mass includes the liquid).
     q_ice + UT.clamp_to_nonneg(cat.q_liq_on_ice)
 
 """
-    _ice_tendency_fields(moments, liquid, zcoeffs, p3, ρ, acc, init, dq_liq_dt)
+    _ice_tendency_fields(moments, liquid, zc_cat, p3, ρ, acc, init, dq_liq_dt)
 
-Assemble the per-category ice tendency fields from the accumulated specific
-rates `acc`, in the canonical order. Appends `dq_liq_on_ice_dt` under
+Assemble one category's ice tendency fields from its accumulated specific rates
+`acc`, in the canonical order. Appends `dq_liq_on_ice_dt` under
 [`CMP.PredictedLiquidFraction`](@ref) and `dz_ice_dt` under
 [`CMP.ThreeMoment`](@ref). The reflectivity term is the constant-μ growth over
-the net-of-initiation rates with the frozen `zcoeffs`, plus the initiation terms
-of the rates in `init`. See the [three-moment documentation](@ref
-P3-three-moment-ice) for the term forms.
+the category's net-of-initiation rates with its frozen coefficient `zc_cat`,
+plus the initiation terms of the rates in `init`. See the [three-moment
+documentation](@ref P3-three-moment-ice) for the term forms.
 """
-@inline function _ice_tendency_fields(moments, liquid, zcoeffs, p3, ρ, acc, init, dq_liq_dt)
+@inline function _ice_tendency_fields(moments, liquid, zc_cat, p3, ρ, acc, init, dq_liq_dt)
     dq_liq = _liquid_tendency_slot(liquid, dq_liq_dt)
-    dz = _reflectivity_tendency_slot(moments, zcoeffs, p3, ρ, acc, init)
+    dz = _reflectivity_tendency_slot(moments, zc_cat, p3, ρ, acc, init)
     return _p3_ice_tendency_fields(
         acc.dq_ice_dt, acc.dn_ice_dt, acc.dq_rim_dt, acc.db_rim_dt, dq_liq, dz,
     )
@@ -923,8 +955,8 @@ end
 @inline _liquid_tendency_slot(::CMP.NoLiquidFraction, dq_liq_dt) = nothing
 @inline _liquid_tendency_slot(::CMP.PredictedLiquidFraction, dq_liq_dt) = dq_liq_dt
 
-@inline _reflectivity_tendency_slot(::CMP.TwoMoment, zcoeffs, p3, ρ, acc, init) = nothing
-@inline function _reflectivity_tendency_slot(moments::CMP.ThreeMoment, zcoeffs, p3, ρ, acc, init)
+@inline _reflectivity_tendency_slot(::CMP.TwoMoment, zc_cat, p3, ρ, acc, init) = nothing
+@inline function _reflectivity_tendency_slot(moments::CMP.ThreeMoment, zc_cat, p3, ρ, acc, init)
     μ_init = moments.μ_init
     dq_init = init.dq_nuc + init.dq_cldfrz + init.dq_raifrz
     dn_init = init.dn_nuc + init.dn_cldfrz + init.dn_raifrz
@@ -934,15 +966,20 @@ end
         CMP3.reflectivity_initiation_freezing(moments, p3.ρ_i, zero(μ_init), init.dq_raifrz * ρ, init.dn_raifrz * ρ)
     dL_growth = (acc.dq_ice_dt - dq_init) * ρ
     dN_growth = (acc.dn_ice_dt - dn_init) * ρ
-    return (CMP3.reflectivity_growth_tendency(zcoeffs[1], dL_growth, dN_growth) + dZ_init) / ρ
+    return (CMP3.reflectivity_growth_tendency(zc_cat, dL_growth, dN_growth) + dZ_init) / ρ
 end
+
+# Per-category reflectivity coefficient of the frozen tuple; `nothing` under
+# two-moment ice.
+@inline _cat_zcoeff(::Nothing, j::Integer) = nothing
+@inline _cat_zcoeff(zc::Tuple, j::Integer) = zc[j]
 
 # Moment-closure-only assembly: appends `dz_ice_dt` under three-moment ice. The
 # liquid-off entry point of the reflectivity assembly.
 @inline _ice_tendency_fields(moments::CMP.MomentClosure, zcoeffs, p3, ρ, acc, init) =
     _p3_ice_tendency_fields(
         acc.dq_ice_dt, acc.dn_ice_dt, acc.dq_rim_dt, acc.db_rim_dt,
-        nothing, _reflectivity_tendency_slot(moments, zcoeffs, p3, ρ, acc, init),
+        nothing, _reflectivity_tendency_slot(moments, _cat_zcoeff(zcoeffs, 1), p3, ρ, acc, init),
     )
 
 """
@@ -1066,10 +1103,10 @@ end
 
 """
     _vapor_exchange_accumulate(liquid, subdep, tps, ρ, T, q_tot, q_lcl, q_rai,
-        q_ice, n_ice, cat, state,
+        q_ice, n_ice, cat, state, q_other, share_core, share_liq,
         dq_ice_dt, dn_ice_dt, dq_rim_dt, db_rim_dt, dq_liq_dt)
 
-Accumulate the ice-phase vapor exchange onto the passed specific-rate
+Accumulate one ice category's vapor exchange onto the passed specific-rate
 accumulators and return them. Under [`CMP.NoLiquidFraction`](@ref) this is the
 core deposition/sublimation relaxation with its number and rime pathways. Under
 [`CMP.PredictedLiquidFraction`](@ref) the exchange splits by the
@@ -1080,16 +1117,24 @@ sublimation limited to the core) and the liquid-shell condensation/evaporation
 the ice number in proportion to the whole mass). Both paths are bulk
 relaxations toward ice and liquid saturation on the `SubDep2M` timescale, not
 PSD-resolved integrals, consistent with the `NoLiquidFraction` treatment.
+
+For multiple ice categories `q_other` carries the other categories' ice
+condensate (so the vapor and heat budgets see the full condensate), and the
+constant-timescale relaxation is partitioned among the categories by the mass
+shares `share_core` (deposition/sublimation) and `share_liq` (shell
+condensation/evaporation); see [`_category_share`](@ref). Both are one for a
+single category.
 """
 @inline function _vapor_exchange_accumulate(
     ::CMP.NoLiquidFraction, subdep, tps, ρ, T, q_tot, q_lcl, q_rai, q_ice, n_ice, cat, state,
+    q_other, share_core, share_liq,
     dq_ice_dt, dn_ice_dt, dq_rim_dt, db_rim_dt, dq_liq_dt,
 )
     FT = eltype(ρ)
     ϵₘ = UT.ϵ_numerics_2M_M(FT)
     n_per_q_ice = ifelse(q_ice > ϵₘ, n_ice / q_ice, zero(n_ice))
     # Deposition/sublimation of cloud ice
-    micro_mock = (; q_tot, q_lcl, q_icl = q_ice, q_rai, q_sno = zero(q_ice))
+    micro_mock = (; q_tot, q_lcl, q_icl = q_ice, q_rai, q_sno = q_other)
     thermo_mock = (; ρ, T)
     ∂ₜq_ice_dep = CMNonEq.conv_q_vap_to_q_icl(
         CMP.ConstantTimescale(subdep.τ_relax), nothing, tps, micro_mock, thermo_mock,
@@ -1099,15 +1144,16 @@ PSD-resolved integrals, consistent with the `NoLiquidFraction` treatment.
     # During sublimation, the number of ice particles decreases in proportion to the mean ice mass
     # During deposition, the number of ice particles remain unchanged
     ∂ₜn_ice_dep = ifelse(∂ₜq_ice_dep < 0, n_per_q_ice * ∂ₜq_ice_dep, zero(∂ₜq_ice_dep))
-    dq_ice_dt += ∂ₜq_ice_dep
-    dn_ice_dt += ∂ₜn_ice_dep
+    dq_ice_dt += share_core * ∂ₜq_ice_dep
+    dn_ice_dt += share_core * ∂ₜn_ice_dep
     ∂ₜq_ice_sub = min(∂ₜq_ice_dep, 0)   # ≤ 0; zero on the deposition branch
-    dq_rim_dt += ∂ₜq_ice_sub * state.F_rim
-    db_rim_dt += ifelse(state.ρ_rim > 0, ∂ₜq_ice_sub * state.F_rim / state.ρ_rim, zero(FT))
+    dq_rim_dt += share_core * (∂ₜq_ice_sub * state.F_rim)
+    db_rim_dt += share_core * ifelse(state.ρ_rim > 0, ∂ₜq_ice_sub * state.F_rim / state.ρ_rim, zero(FT))
     return (dq_ice_dt, dn_ice_dt, dq_rim_dt, db_rim_dt, dq_liq_dt)
 end
 @inline function _vapor_exchange_accumulate(
     liquid::CMP.PredictedLiquidFraction, subdep, tps, ρ, T, q_tot, q_lcl, q_rai, q_ice, n_ice, cat, state,
+    q_other, share_core, share_liq,
     dq_ice_dt, dn_ice_dt, dq_rim_dt, db_rim_dt, dq_liq_dt,
 )
     FT = eltype(ρ)
@@ -1119,29 +1165,295 @@ end
     # the vapor and heat budgets through the q_sno slot; sublimation stays
     # limited to the core mass q_icl.
     n_per_q_ice = ifelse(q_ice > ϵₘ, n_ice / q_ice, zero(n_ice))
-    micro_ice = (; q_tot, q_lcl, q_icl = q_ice, q_rai, q_sno = q_liq)
+    micro_ice = (; q_tot, q_lcl, q_icl = q_ice, q_rai, q_sno = q_liq + q_other)
     ∂ₜq_ice_dep = CMNonEq.conv_q_vap_to_q_icl(
         CMP.ConstantTimescale(subdep.τ_relax), nothing, tps, micro_ice, thermo_mock,
     )
     ∂ₜq_ice_dep = ifelse(T > tps.T_freeze, min(∂ₜq_ice_dep, zero(T)), ∂ₜq_ice_dep)
     ∂ₜn_ice_dep = ifelse(∂ₜq_ice_dep < 0, n_per_q_ice * ∂ₜq_ice_dep, zero(∂ₜq_ice_dep))
-    dq_ice_dt += (1 - w) * ∂ₜq_ice_dep
-    dn_ice_dt += (1 - w) * ∂ₜn_ice_dep
+    dq_ice_dt += share_core * ((1 - w) * ∂ₜq_ice_dep)
+    dn_ice_dt += share_core * ((1 - w) * ∂ₜn_ice_dep)
     ∂ₜq_ice_sub = min(∂ₜq_ice_dep, 0)
-    dq_rim_dt += (1 - w) * ∂ₜq_ice_sub * state.F_rim
-    db_rim_dt += (1 - w) * ifelse(state.ρ_rim > 0, ∂ₜq_ice_sub * state.F_rim / state.ρ_rim, zero(FT))
+    dq_rim_dt += share_core * ((1 - w) * ∂ₜq_ice_sub * state.F_rim)
+    db_rim_dt += share_core * ((1 - w) * ifelse(state.ρ_rim > 0, ∂ₜq_ice_sub * state.F_rim / state.ρ_rim, zero(FT)))
     # Liquid-shell condensation/evaporation, weighted by w, relaxing toward
     # liquid saturation; evaporation is limited to the liquid on ice (the
     # q_lcl slot of the shell state) and reduces the ice number in proportion
     # to the whole mass.
-    micro_shell = (; q_tot, q_lcl = q_liq, q_icl = q_ice, q_rai = q_lcl + q_rai, q_sno = zero(q_ice))
+    micro_shell = (; q_tot, q_lcl = q_liq, q_icl = q_ice, q_rai = q_lcl + q_rai, q_sno = q_other)
     ∂ₜq_shell = CMNonEq.conv_q_vap_to_q_lcl(
         CMP.CloudLiquidFormation(subdep.τ_relax), nothing, tps, micro_shell, thermo_mock,
     )
     n_per_q_tot = ifelse(q_ice + q_liq > ϵₘ, n_ice / (q_ice + q_liq), zero(n_ice))
-    dq_liq_dt += w * ∂ₜq_shell
-    dn_ice_dt += w * ifelse(∂ₜq_shell < 0, n_per_q_tot * ∂ₜq_shell, zero(∂ₜq_shell))
+    dq_liq_dt += share_liq * (w * ∂ₜq_shell)
+    dn_ice_dt += share_liq * (w * ifelse(∂ₜq_shell < 0, n_per_q_tot * ∂ₜq_shell, zero(∂ₜq_shell)))
     return (dq_ice_dt, dn_ice_dt, dq_rim_dt, db_rim_dt, dq_liq_dt)
+end
+
+"""
+    _category_share(::Val{NCAT}, q, q_tot, ϵₘ)
+
+Mass share of one ice category in the constant-timescale vapor exchange: the
+category's mass fraction of the categories' total, regularized by `ϵₘ`. One for
+a single category, where the relaxation applies unconditionally.
+"""
+@inline _category_share(::Val{1}, q, q_tot, ϵₘ) = one(q)
+@inline _category_share(::Val{NCAT}, q, q_tot, ϵₘ) where {NCAT} = q / max(q_tot, ϵₘ)
+
+@inline _liquid_category_share(::CMP.NoLiquidFraction, ncat, cat, q_liq_tot, ϵₘ) = one(ϵₘ)
+@inline _liquid_category_share(::CMP.PredictedLiquidFraction, ::Val{1}, cat, q_liq_tot, ϵₘ) = one(ϵₘ)
+@inline _liquid_category_share(::CMP.PredictedLiquidFraction, ::Val{NCAT}, cat, q_liq_tot, ϵₘ) where {NCAT} =
+    UT.clamp_to_nonneg(cat.q_liq_on_ice) / max(q_liq_tot, ϵₘ)
+
+@inline _cat_q_ice(c) = c.q_ice
+@inline _cat_n_ice(c) = c.n_ice
+@inline _cat_q_liq_clamped(c) = UT.clamp_to_nonneg(c.cat.q_liq_on_ice)
+
+@inline _liquid_condensate_total(::CMP.NoLiquidFraction, cats, ::Type{FT}) where {FT} = zero(FT)
+@inline _liquid_condensate_total(::CMP.PredictedLiquidFraction, cats, ::Type{FT}) where {FT} =
+    reduce(+, map(_cat_q_liq_clamped, cats))
+
+"""
+    _entry_categories(mp, moments, liquid, ρ, ice, shapes)
+
+Per-category clamped prognostic inputs, volumetric [`CMP3.P3State`](@ref), and
+frozen shape of the packed entry, as an `NCAT`-tuple of `NamedTuple`s.
+"""
+@inline function _entry_categories(mp, moments, liquid, ρ, ice::NTuple{NCAT, <:NamedTuple}, shapes) where {NCAT}
+    return ntuple(Val(NCAT)) do j
+        cat = ice[j]
+        q_ice = UT.clamp_to_nonneg(cat.q_ice)
+        n_ice = UT.clamp_to_nonneg(cat.n_ice)
+        q_rim = UT.clamp_to_nonneg(cat.q_rim)
+        b_rim = UT.clamp_to_nonneg(cat.b_rim)
+        state = CMP3.state_from_prognostic(
+            mp.ice.scheme, q_ice * ρ, n_ice * ρ, q_rim * ρ, b_rim * ρ,
+            _cat_ρq_liq(liquid, cat, ρ), _cat_ρz(moments, cat, ρ),
+        )
+        (; q_ice, n_ice, q_rim, b_rim, state, shape = shapes[j], cat)
+    end
+end
+
+@inline _category_condensates(liquid, cats) = map(c -> _ice_condensate(liquid, c.q_ice, c.cat), cats)
+
+"""
+    _warm_ice_categories(ctx, cats, warm4)
+
+Accumulate the warm-coupled per-category ice processes (liquid-ice collisions,
+self-collection, melting, refreezing/shedding, and the residual-liquid drain)
+over the categories, in index order. Every category consumes the same initial
+cloud, rain, and vapor state within the step (rates are evaluated
+simultaneously, as in the reference's per-category process loop); the warm-block
+sinks accumulate across categories. Returns the updated warm accumulator and the
+`NCAT`-tuple of per-category ice accumulators.
+"""
+@inline _warm_ice_categories(ctx, cats::Tuple{}, warm4) = (warm4, ())
+@inline function _warm_ice_categories(ctx, cats::Tuple, warm4)
+    (warm4, acc1) = _category_warm_ice_processes(ctx, first(cats), warm4)
+    (warm4, rest) = _warm_ice_categories(ctx, Base.tail(cats), warm4)
+    return (warm4, (acc1, rest...))
+end
+
+@inline function _category_warm_ice_processes(ctx, c, warm4)
+    (; liquid, aps, tps, vel, pdf_c, pdf_r, quad, p3, ρ, T, T_freeze, L_lcl, N_lcl, L_rai, N_rai, ϵₘ) = ctx
+    (; dq_lcl_dt, dn_lcl_dt, dq_rai_dt, dn_rai_dt) = warm4
+    dq_ice_dt = zero(c.q_ice)
+    dn_ice_dt = zero(c.q_ice)
+    dq_rim_dt = zero(c.q_ice)
+    db_rim_dt = zero(c.q_ice)
+    dq_liq_dt = zero(c.q_ice)
+    # Only compute ice processes if ice mass is present
+    if c.q_ice > ϵₘ
+        # --- Liquid-ice collisions
+        coll = CMP3.bulk_liquid_ice_collision_sources(
+            c.state, c.shape, pdf_c, pdf_r, L_lcl, N_lcl, L_rai, N_rai, aps, tps, vel, ρ, T;
+            quad,
+        )
+        dq_lcl_dt += coll.∂ₜq_c
+        dq_rai_dt += coll.∂ₜq_r
+        dn_lcl_dt += coll.∂ₜN_c / ρ
+        dn_rai_dt += coll.∂ₜN_r / ρ
+        dq_ice_dt += coll.∂ₜL_ice / ρ
+        dq_rim_dt += coll.∂ₜL_rim / ρ
+        db_rim_dt += coll.∂ₜB_rim / ρ
+        dq_liq_dt += _collision_liquid_source(liquid, coll) / ρ
+
+        # --- Ice self-collection (aggregation)
+        S_ice_agg = CMP3.ice_self_collection(c.state, c.shape, vel, ρ; quad)
+        dn_ice_dt -= S_ice_agg.dNdt / ρ
+
+        # Ice melting (above freezing temperature)
+        (dq_rai_dt, dn_rai_dt, dq_ice_dt, dn_ice_dt, dq_rim_dt, db_rim_dt, dq_liq_dt) =
+            _melt_accumulate(
+                liquid, vel, aps, tps, T, T_freeze, ρ, c.state, c.shape, quad,
+                dq_rai_dt, dn_rai_dt, dq_ice_dt, dn_ice_dt, dq_rim_dt, db_rim_dt, dq_liq_dt,
+            )
+
+        # Refreezing and shedding of the liquid on ice
+        (dq_rai_dt, dn_rai_dt, dq_ice_dt, dq_rim_dt, db_rim_dt, dq_liq_dt) =
+            _refreeze_shed_accumulate(
+                liquid, vel, aps, tps, T, ρ, c.state, c.shape, quad,
+                dq_rai_dt, dn_rai_dt, dq_ice_dt, dq_rim_dt, db_rim_dt, dq_liq_dt,
+            )
+    end
+    # Residual liquid on an emptied core drains to rain (identically zero when
+    # the core is above the presence threshold)
+    (dq_rai_dt, dn_rai_dt, dq_liq_dt) = _residual_liquid_to_rain(
+        liquid, p3, ρ, c.q_ice, c.cat, dq_rai_dt, dn_rai_dt, dq_liq_dt,
+    )
+    warm4 = (; dq_lcl_dt, dn_lcl_dt, dq_rai_dt, dn_rai_dt)
+    acc = (; dq_ice_dt, dn_ice_dt, dq_rim_dt, db_rim_dt, dq_liq_dt)
+    return (warm4, acc)
+end
+
+"""
+    _intercategory_accumulate(icp, ctx, cats, acc)
+
+Accumulate the inter-category collection transfers over every ordered category
+pair as a source-sink double entry: the collectee loses ice mass, number, rime
+mass, and rime volume ([`CMP3.inter_category_collection`](@ref)); the same
+mass-like rates arrive at the collector, whose number is unchanged. No-op for a
+single category (`icp === nothing`).
+
+The reflectivity budget of both sides is carried by the per-category constant-μ
+growth pass over the net rates ([`_reflectivity_tendency_slot`](@ref)): by
+linearity, the collectee side realizes the documented `∂ₜz_j` sink with the
+entry's frozen (mean-mass-band-clamped) coefficients, and the collector side
+gains through its own Eq-10 growth from the gained mass at unchanged number, so
+`Z` is not conserved pairwise (the documented behavior).
+"""
+@inline _intercategory_accumulate(::Nothing, ctx, cats, acc) = acc
+@inline function _intercategory_accumulate(icp::CMP.InterCategoryParams, ctx, cats::NTuple{NCAT}, acc) where {NCAT}
+    return _intercategory_pairs(icp, ctx, cats, acc, CMP3.ordered_category_pairs(Val(NCAT)))
+end
+@inline _intercategory_pairs(icp, ctx, cats, acc, ::Tuple{}) = acc
+@inline function _intercategory_pairs(icp, ctx, cats, acc, pairs::Tuple)
+    acc = _intercategory_pair(icp, ctx, cats, acc, first(pairs))
+    return _intercategory_pairs(icp, ctx, cats, acc, Base.tail(pairs))
+end
+@inline function _intercategory_pair(icp, ctx, cats, acc, (i, j))
+    (; vel, quad, ρ, ϵₘ) = ctx
+    ci = cats[i]
+    cj = cats[j]
+    (ci.q_ice > ϵₘ && cj.q_ice > ϵₘ) || return acc
+    r = CMP3.inter_category_collection(ci.state, ci.shape, cj.state, cj.shape, vel, ρ, icp; quad)
+    aj = acc[j]
+    aj = (;
+        aj...,
+        dq_ice_dt = aj.dq_ice_dt - r.∂ₜq_j / ρ,
+        dn_ice_dt = aj.dn_ice_dt - r.∂ₜN_j / ρ,
+        dq_rim_dt = aj.dq_rim_dt - r.∂ₜq_rim_j / ρ,
+        db_rim_dt = aj.db_rim_dt - r.∂ₜb_rim_j / ρ,
+    )
+    acc = Base.setindex(acc, aj, j)
+    ai = acc[i]
+    ai = (;
+        ai...,
+        dq_ice_dt = ai.dq_ice_dt + r.∂ₜq_j / ρ,
+        dq_rim_dt = ai.dq_rim_dt + r.∂ₜq_rim_j / ρ,
+        db_rim_dt = ai.db_rim_dt + r.∂ₜb_rim_j / ρ,
+    )
+    return Base.setindex(acc, ai, i)
+end
+
+"""
+    _destination_index(icp, cats, D_new)
+
+Destination category for newly formed ice of mean-mass diameter `D_new`:
+[`CMP3.icecat_destination`](@ref) over the per-category states and shapes, or 1
+for a single category (`icp === nothing`).
+"""
+@inline _destination_index(::Nothing, cats, D_new) = 1
+@inline function _destination_index(icp::CMP.InterCategoryParams, cats, D_new)
+    states = map(c -> c.state, cats)
+    shps = map(c -> c.shape, cats)
+    return CMP3.icecat_destination(states, shps, D_new, icp)
+end
+
+# Mean-mass sphere diameter of a monodisperse frozen-drop population at ice
+# density ρ_i; for a monodisperse population this equals the mass-weighted mean
+# diameter required by the destination metric. `D_default` is returned when the
+# number rate vanishes (the routed rate is zero).
+@inline function _frozen_drop_diameter(ρ_i, ∂ₜq_frz, ∂ₜn_frz, D_default)
+    D = cbrt(6 * ∂ₜq_frz / (π * ρ_i * ∂ₜn_frz))
+    return ifelse(∂ₜn_frz > 0, D, oftype(D, D_default))
+end
+
+# Add the source rates `δ` (a `NamedTuple` of accumulator-field increments) to
+# category `dest`.
+@inline _add_source(acc::NTuple{NCAT, <:NamedTuple}, dest::Integer, δ::NamedTuple) where {NCAT} =
+    Base.setindex(acc, _acc_plus(acc[dest], δ), dest)
+@inline _acc_plus(a::NamedTuple, δ::NamedTuple{names}) where {names} = merge(
+    a,
+    NamedTuple{names}(ntuple(k -> getfield(a, names[k]) + getfield(δ, k), Val(length(names)))),
+)
+
+"""
+    _vapor_numadj_categories(ctx, cats, conds, totals, acc)
+
+Per-category vapor exchange ([`_vapor_exchange_accumulate`](@ref)) and ice
+number adjustment, in index order. `conds` carries the per-category ice
+condensates and `totals` the category totals for the vapor budget and the
+partition shares.
+"""
+@inline _vapor_numadj_categories(ctx, cats::NTuple{NCAT}, conds, totals, acc) where {NCAT} =
+    _vapor_numadj_rec(ctx, cats, conds, totals, acc, Val(1))
+@inline function _vapor_numadj_rec(ctx, cats::NTuple{NCAT}, conds, totals, acc, ::Val{j}) where {NCAT, j}
+    a = _category_vapor_numadj(ctx, cats[j], conds[j], totals, acc[j], Val(NCAT))
+    acc = Base.setindex(acc, a, j)
+    return j == NCAT ? acc : _vapor_numadj_rec(ctx, cats, conds, totals, acc, Val(j + 1))
+end
+@inline function _category_vapor_numadj(ctx, c, cond_j, totals, a, ncat::Val)
+    (; liquid, moments, subdep, tps, ρ, T, q_tot, q_lcl, q_rai, ϵₘ) = ctx
+    q_other = totals.q_icl_tot - cond_j
+    share_core = _category_share(ncat, c.q_ice, totals.q_ice_tot, ϵₘ)
+    share_liq = _liquid_category_share(liquid, ncat, c.cat, totals.q_liq_tot, ϵₘ)
+    # --- Ice Sublimation / Deposition and liquid-shell condensation / evaporation
+    (dq_ice_dt, dn_ice_dt, dq_rim_dt, db_rim_dt, dq_liq_dt) = _vapor_exchange_accumulate(
+        liquid, subdep, tps, ρ, T, q_tot, q_lcl, q_rai, c.q_ice, c.n_ice, c.cat, c.state,
+        q_other, share_core, share_liq,
+        a.dq_ice_dt, a.dn_ice_dt, a.dq_rim_dt, a.db_rim_dt, a.dq_liq_dt,
+    )
+    # --- Ice number adjustment for mass limits
+    # Nudges n_ice toward [q_ice / x_max, q_ice / x_min] over timescale τ.
+    numadj = _ice_numadj_params(typeof(ϵₘ), moments)
+    ∂ₜn_ice_numadj = CM2.number_tendency_from_mass_limits(numadj, c.q_ice, c.n_ice)
+    dn_ice_dt += ∂ₜn_ice_numadj
+    return (; dq_ice_dt, dn_ice_dt, dq_rim_dt, db_rim_dt, dq_liq_dt)
+end
+
+# Per-category initiation rates: each source's rates land on its destination
+# category, zero elsewhere.
+@inline function _category_inits(
+    acc::NTuple{NCAT, <:NamedTuple},
+    D_nuc,
+    dep,
+    ∂ₜq_imm,
+    ∂ₜn_imm,
+    rain_frz,
+    dests,
+) where {NCAT}
+    return ntuple(Val(NCAT)) do j
+        z = acc[j].dq_ice_dt
+        (;
+            D_nuc,
+            dq_nuc = oftype(z, ifelse(dests.nuc == j, dep.∂ₜq_frz, zero(dep.∂ₜq_frz))),
+            dn_nuc = oftype(z, ifelse(dests.nuc == j, dep.∂ₜn_frz, zero(dep.∂ₜn_frz))),
+            dq_cldfrz = oftype(z, ifelse(dests.imm == j, ∂ₜq_imm, zero(∂ₜq_imm))),
+            dn_cldfrz = oftype(z, ifelse(dests.imm == j, ∂ₜn_imm, zero(∂ₜn_imm))),
+            dq_raifrz = oftype(z, ifelse(dests.raifrz == j, rain_frz.∂ₜq_frz, zero(rain_frz.∂ₜq_frz))),
+            dn_raifrz = oftype(z, ifelse(dests.raifrz == j, rain_frz.∂ₜn_frz, zero(rain_frz.∂ₜn_frz))),
+        )
+    end
+end
+
+@inline function _assemble_ice_blocks(moments, liquid, zc, p3, ρ, acc::NTuple{NCAT, <:NamedTuple}, inits) where {NCAT}
+    blocks = ntuple(Val(NCAT)) do j
+        _ice_tendency_fields(
+            moments, liquid, _cat_zcoeff(zc, j), p3, ρ, acc[j], inits[j], acc[j].dq_liq_dt,
+        )
+    end
+    return _categories_tendency_fields(blocks)
 end
 
 """
@@ -1313,7 +1625,8 @@ per-category ice inputs.
 - `q_rai`: Rain specific content (kg/kg)
 - `n_rai`: Rain number per kg air (1/kg)
 - `ice`: per-category prognostic inputs, each a `NamedTuple` with fields
-  `q_ice` (kg/kg), `n_ice` (1/kg), `q_rim` (kg/kg), `b_rim` (m³/kg), and,
+  `q_ice` (kg/kg), `n_ice` (1/kg), `q_rim` (kg/kg), `b_rim` (m³/kg), then,
+  under [`CMP.PredictedLiquidFraction`](@ref), `q_liq_on_ice` (kg/kg), and,
   under [`CMP.ThreeMoment`](@ref) ice, `z_ice` (m⁶/kg)
 - `shapes`: per-category frozen distribution shapes ([`CMP3.P3Shape`](@ref))
 
@@ -1323,8 +1636,16 @@ per-category ice inputs.
   provided. Differentiated callers must pass coefficients precomputed from the
   primal state.
 
-`NCAT` must equal `n_categories(mp.ice)`; only one category is currently
-supported.
+`NCAT` must equal `n_categories(mp.ice)`; up to four categories are supported.
+For `NCAT > 1` the intra-category processes run per category from the same
+initial cloud, rain, and vapor state (the warm-block sinks accumulate across
+categories); the categories couple through the inter-category collection sweep
+([`_intercategory_accumulate`](@ref)); the nucleation and freezing sources
+route to the destination category ([`_destination_index`](@ref)); and the
+constant-timescale vapor exchange is partitioned by the categories' mass shares
+([`_category_share`](@ref)). Category merging is a separate host-callable
+post-sedimentation step ([`CMP3.merge_categories`](@ref)), not part of this
+tendency.
 
 # Returns
 `NamedTuple` with all tendency fields:
@@ -1336,8 +1657,14 @@ supported.
 - `dn_ice_dt`: Ice number tendency (1/kg/s)
 - `dq_rim_dt`: Rime mass tendency (kg/kg/s)
 - `db_rim_dt`: Rime volume tendency (m³/kg/s)
+- `dq_liq_on_ice_dt`: Liquid-on-ice tendency (kg/kg/s), under
+  [`CMP.PredictedLiquidFraction`](@ref) only
 - `dz_ice_dt`: Reflectivity tendency (m⁶/kg/s), under [`CMP.ThreeMoment`](@ref) ice only
 - `dn_lcl_activation_dt`: Droplet activation tendency (1/kg/s)
+
+For `NCAT > 1` the per-category ice fields carry the category index before the
+`_dt` suffix (`dq_ice_1_dt`, ..., `dz_ice_2_dt`); a single category keeps the
+unsuffixed names.
 """
 @inline function bulk_microphysics_tendencies(
     ::Microphysics2Moment, mp::CMP.Microphysics2MParams{WR, ICE}, tps,
@@ -1349,14 +1676,11 @@ supported.
     zcoeffs = nothing,
 ) where {WR, ICE <: CMP.P3IceParams, NCAT}
     _validate_packed_categories(mp, ice)
-    (; q_ice, n_ice, q_rim, b_rim) = ice[1]
-    shape = shapes[1]
     moments = _moments(mp)
     liquid = _liquid(mp)
     zc = _reflectivity_coefficients(moments, mp, ρ, ice, shapes, zcoeffs)
     FT = eltype(ρ)
     ϵₘ = UT.ϵ_numerics_2M_M(FT)
-    ϵB = UT.ϵ_numerics_P3_B(FT)
     # Clamp negative inputs to zero (robustness against numerical errors)
     ρ = UT.clamp_to_nonneg(ρ)
     q_tot = UT.clamp_to_nonneg(q_tot)
@@ -1364,48 +1688,21 @@ supported.
     q_rai = UT.clamp_to_nonneg(q_rai)
     n_lcl = UT.clamp_to_nonneg(n_lcl)
     n_rai = UT.clamp_to_nonneg(n_rai)
-    q_ice = UT.clamp_to_nonneg(q_ice)
-    n_ice = UT.clamp_to_nonneg(n_ice)
-    q_rim = UT.clamp_to_nonneg(q_rim)
-    b_rim = UT.clamp_to_nonneg(b_rim)
 
     # Convert to volumetric quantities for P3 functions
     L_lcl = q_lcl * ρ  # [kg lcl / m³ air]
     L_rai = q_rai * ρ  # [kg rai / m³ air]
     N_lcl = n_lcl * ρ  # [1 / m³ air]
     N_rai = n_rai * ρ  # [1 / m³ air]
-    L_ice = q_ice * ρ  # [kg ice / m³ air]
-    N_ice = n_ice * ρ  # [1 / m³ air]
-    L_rim = q_rim * ρ  # [kg rim / m³ air]
-    B_rim = b_rim * ρ  # [m³ rim / m³ air]
-    state = CMP3.state_from_prognostic(
-        mp.ice.scheme, L_ice, N_ice, L_rim, B_rim,
-        _cat_ρq_liq(liquid, ice[1], ρ), _cat_ρz(moments, ice[1], ρ),
-    )
+
+    # Per-category clamped inputs, volumetric states, and frozen shapes
+    cats = _entry_categories(mp, moments, liquid, ρ, ice, shapes)
 
     # Unpack warm rain parameters
     aps = mp.warm_rain.air_properties
     subdep = mp.warm_rain.subdep
 
-    # Initialize ice-related tendencies, typed by the ice inputs so the
-    # accumulators are concretely typed on both sides of the ice-presence
-    # branch under ForwardDiff.
-    dq_ice_dt = zero(q_ice)
-    dn_ice_dt = zero(q_ice)
-    dq_rim_dt = zero(q_ice)
-    db_rim_dt = zero(q_ice)
-    dq_liq_dt = zero(q_ice)
-
-    # --- Warm Rain Processes
-    q_icl_tot = _ice_condensate(liquid, q_ice, ice[1])
-    warm = warm_rain_tendencies_2m(mp.warm_rain, tps, T, q_tot, q_lcl, q_rai, q_icl_tot, ρ, n_lcl, n_rai, w, p)
-    dq_lcl_dt = warm.dq_lcl_dt
-    dn_lcl_dt = warm.dn_lcl_dt
-    dq_rai_dt = warm.dq_rai_dt
-    dn_rai_dt = warm.dn_rai_dt
-    dn_lcl_activation_dt = warm.dn_lcl_activation_dt
-
-    # --- P3 Ice Processes
+    # --- P3 Ice Parameters
     p3 = mp.ice.scheme
     vel = mp.ice.terminal_velocity
     pdf_c = mp.ice.cloud_pdf
@@ -1413,49 +1710,33 @@ supported.
     ice_nucleation = mp.ice.ice_nucleation
     inp_depletion_model = mp.ice.inp_depletion_model
     quad = mp.ice.quad
+    icp = mp.ice.inter_category
+    T_freeze = TDI.TD.Parameters.T_freeze(tps)
 
-    # Only compute ice processes if ice mass is present
-    if q_ice > ϵₘ
-
-        # --- Liquid-ice collisions
-        coll = CMP3.bulk_liquid_ice_collision_sources(
-            state, shape, pdf_c, pdf_r, L_lcl, N_lcl, L_rai, N_rai, aps, tps, vel, ρ, T;
-            quad,
-        )
-        dq_lcl_dt += coll.∂ₜq_c
-        dq_rai_dt += coll.∂ₜq_r
-        dn_lcl_dt += coll.∂ₜN_c / ρ
-        dn_rai_dt += coll.∂ₜN_r / ρ
-        dq_ice_dt += coll.∂ₜL_ice / ρ
-        dq_rim_dt += coll.∂ₜL_rim / ρ
-        db_rim_dt += coll.∂ₜB_rim / ρ
-        dq_liq_dt += _collision_liquid_source(liquid, coll) / ρ
-
-        # --- Ice self-collection (aggregation)
-        S_ice_agg = CMP3.ice_self_collection(state, shape, vel, ρ; quad)
-        dn_ice_dt -= S_ice_agg.dNdt / ρ
-
-        # Ice melting (above freezing temperature)
-        T_freeze = TDI.TD.Parameters.T_freeze(tps)
-        (dq_rai_dt, dn_rai_dt, dq_ice_dt, dn_ice_dt, dq_rim_dt, db_rim_dt, dq_liq_dt) =
-            _melt_accumulate(
-                liquid, vel, aps, tps, T, T_freeze, ρ, state, shape, quad,
-                dq_rai_dt, dn_rai_dt, dq_ice_dt, dn_ice_dt, dq_rim_dt, db_rim_dt, dq_liq_dt,
-            )
-
-        # Refreezing and shedding of the liquid on ice
-        (dq_rai_dt, dn_rai_dt, dq_ice_dt, dq_rim_dt, db_rim_dt, dq_liq_dt) =
-            _refreeze_shed_accumulate(
-                liquid, vel, aps, tps, T, ρ, state, shape, quad,
-                dq_rai_dt, dn_rai_dt, dq_ice_dt, dq_rim_dt, db_rim_dt, dq_liq_dt,
-            )
-    end
-
-    # Residual liquid on an emptied core drains to rain (identically zero when
-    # the core is above the presence threshold)
-    (dq_rai_dt, dn_rai_dt, dq_liq_dt) = _residual_liquid_to_rain(
-        liquid, p3, ρ, q_ice, ice[1], dq_rai_dt, dn_rai_dt, dq_liq_dt,
+    # --- Warm Rain Processes (the vapor and heat budgets see the total ice condensate)
+    conds = _category_condensates(liquid, cats)
+    q_icl_tot = reduce(+, conds)
+    warm = warm_rain_tendencies_2m(mp.warm_rain, tps, T, q_tot, q_lcl, q_rai, q_icl_tot, ρ, n_lcl, n_rai, w, p)
+    warm4 = (;
+        dq_lcl_dt = warm.dq_lcl_dt, dn_lcl_dt = warm.dn_lcl_dt,
+        dq_rai_dt = warm.dq_rai_dt, dn_rai_dt = warm.dn_rai_dt,
     )
+    dn_lcl_activation_dt = warm.dn_lcl_activation_dt
+
+    ctx = (;
+        liquid, moments, aps, subdep, tps, vel, pdf_c, pdf_r, quad, p3,
+        ρ, T, T_freeze, q_tot, q_lcl, q_rai, L_lcl, N_lcl, L_rai, N_rai, ϵₘ,
+    )
+
+    # --- Warm-coupled per-category ice processes (collisions, self-collection,
+    # melting, refreezing/shedding, residual liquid); every category consumes
+    # the same initial cloud, rain, and vapor state within the step
+    (warm4, acc) = _warm_ice_categories(ctx, cats, warm4)
+
+    # --- Inter-category collection (source-sink double entry)
+    acc = _intercategory_accumulate(icp, ctx, cats, acc)
+
+    (; dq_lcl_dt, dn_lcl_dt, dq_rai_dt, dn_rai_dt) = warm4
 
     # --- Ice nucleation (F23 + Bigg)
     τ_act = inp_depletion_model.τ_act
@@ -1463,18 +1744,19 @@ supported.
     D_nuc = FT(10e-6)  # 10 μm nascent crystal - small-D tail of the P3
     m_nuc = p3.ρ_i * CO.volume_sphere_D(D_nuc)
 
-    # F23 INP-activation depletion proxy.
-    n_active = CM_HetIce.n_active(inp_depletion_model, n_ice)
+    # F23 INP-activation depletion proxy over the categories' total ice number.
+    n_ice_tot = reduce(+, map(_cat_n_ice, cats))
+    n_active = CM_HetIce.n_active(inp_depletion_model, n_ice_tot)
 
-    # --- deposition nucleation (vapor → pristine ice)
+    # --- deposition nucleation (vapor → pristine ice), routed to the
+    # destination category of the nascent-crystal size
     dep = CM_HetIce.deposition_rate(
         ice_nucleation, tps, T, ρ, q_tot, q_lcl + q_rai, q_icl_tot, n_active;
         m_nuc, τ_act, inpc_log_shift,
     )
-
-    dn_ice_dt += dep.∂ₜn_frz
-    dq_ice_dt += dep.∂ₜq_frz
+    dest_nuc = _destination_index(icp, cats, D_nuc)
     # No contribution to q_rim, b_rim — pristine deposition crystals have F_rim = 0.
+    acc = _add_source(acc, dest_nuc, (; dn_ice_dt = dep.∂ₜn_frz, dq_ice_dt = dep.∂ₜq_frz))
 
     # --- F23-bounded Bigg immersion freezing of cloud drops
     cld_bigg = CM_HetIce.liquid_freezing_rate(
@@ -1489,54 +1771,52 @@ supported.
     # Drain liquid:
     dq_lcl_dt -= ∂ₜq_imm
     dn_lcl_dt -= ∂ₜn_imm
-    # Add to ice as fully-rimed embryo graupel:
-    dq_ice_dt += ∂ₜq_imm
-    dn_ice_dt += ∂ₜn_imm
-    dq_rim_dt += ∂ₜq_imm           # F_rim = 1 (frozen drop)
-    db_rim_dt += ∂ₜq_imm / p3.ρ_i  # solid-ice rime volume
-
-    # --- Ice Sublimation / Deposition and liquid-shell condensation / evaporation
-    (dq_ice_dt, dn_ice_dt, dq_rim_dt, db_rim_dt, dq_liq_dt) = _vapor_exchange_accumulate(
-        liquid, subdep, tps, ρ, T, q_tot, q_lcl, q_rai, q_ice, n_ice, ice[1], state,
-        dq_ice_dt, dn_ice_dt, dq_rim_dt, db_rim_dt, dq_liq_dt,
+    # Add to ice as fully-rimed embryo graupel (F_rim = 1, solid-ice rime
+    # volume), routed to the destination category of the frozen-drop size:
+    dest_imm = _destination_index(icp, cats, _frozen_drop_diameter(p3.ρ_i, ∂ₜq_imm, ∂ₜn_imm, D_nuc))
+    acc = _add_source(
+        acc, dest_imm,
+        (; dq_ice_dt = ∂ₜq_imm, dn_ice_dt = ∂ₜn_imm, dq_rim_dt = ∂ₜq_imm, db_rim_dt = ∂ₜq_imm / p3.ρ_i),
     )
 
-    # --- Ice number adjustment for mass limits
-    # Nudges n_ice toward [q_ice / x_max, q_ice / x_min] over timescale τ.
-    numadj = _ice_numadj_params(FT, moments)
-    ∂ₜn_ice_numadj = CM2.number_tendency_from_mass_limits(numadj, q_ice, n_ice)
-    dn_ice_dt += ∂ₜn_ice_numadj
+    # --- Vapor exchange and ice number adjustment per category
+    totals = (;
+        q_icl_tot,
+        q_ice_tot = reduce(+, map(_cat_q_ice, cats)),
+        q_liq_tot = _liquid_condensate_total(liquid, cats, FT),
+    )
+    acc = _vapor_numadj_categories(ctx, cats, conds, totals, acc)
 
     # --- Rain Heterogeneous Freezing (Bigg 1953)
     rain_frz = CM_HetIce.liquid_freezing_rate(mp.ice.rain_freezing, pdf_r, tps, q_rai, ρ, N_rai, T)
 
-    # Rain → ice (frozen rain is fully rimed, per MM15)
+    # Rain → ice (frozen rain is fully rimed, per MM15), routed to the
+    # destination category of the frozen-drop size
     dq_rai_dt -= rain_frz.∂ₜq_frz
     dn_rai_dt -= rain_frz.∂ₜn_frz
-    dq_ice_dt += rain_frz.∂ₜq_frz
-    dn_ice_dt += rain_frz.∂ₜn_frz
-    dq_rim_dt += rain_frz.∂ₜq_frz
-    db_rim_dt += rain_frz.∂ₜq_frz / p3.ρ_i  # ρ_i = 916.7 kg m⁻³, the density of solid bulk ice
+    dest_raifrz = _destination_index(
+        icp, cats, _frozen_drop_diameter(p3.ρ_i, rain_frz.∂ₜq_frz, rain_frz.∂ₜn_frz, D_nuc),
+    )
+    acc = _add_source(
+        acc, dest_raifrz,
+        (;
+            dq_ice_dt = rain_frz.∂ₜq_frz, dn_ice_dt = rain_frz.∂ₜn_frz,
+            dq_rim_dt = rain_frz.∂ₜq_frz,
+            db_rim_dt = rain_frz.∂ₜq_frz / p3.ρ_i,  # ρ_i = 916.7 kg m⁻³, the density of solid bulk ice
+        ),
+    )
 
     # Aerosol activation is folded into `warm_rain_tendencies_2m` above —
     # `dn_lcl_activation_dt` from `warm` is already included in `dn_lcl_dt`.
 
-    # Initiation rates, in the accumulator element type.
-    init = (;
-        D_nuc,
-        dq_nuc = oftype(dq_ice_dt, dep.∂ₜq_frz),
-        dn_nuc = oftype(dq_ice_dt, dep.∂ₜn_frz),
-        dq_cldfrz = oftype(dq_ice_dt, ∂ₜq_imm),
-        dn_cldfrz = oftype(dq_ice_dt, ∂ₜn_imm),
-        dq_raifrz = oftype(dq_ice_dt, rain_frz.∂ₜq_frz),
-        dn_raifrz = oftype(dq_ice_dt, rain_frz.∂ₜn_frz),
+    # Per-category initiation rates, in the accumulator element type.
+    inits = _category_inits(
+        acc, D_nuc, dep, ∂ₜq_imm, ∂ₜn_imm, rain_frz,
+        (; nuc = dest_nuc, imm = dest_imm, raifrz = dest_raifrz),
     )
     return _bulk_2mp3_tendencies(
         (; dq_lcl_dt, dn_lcl_dt, dq_rai_dt, dn_rai_dt),
-        _ice_tendency_fields(
-            moments, liquid, zc, p3, ρ,
-            (; dq_ice_dt, dn_ice_dt, dq_rim_dt, db_rim_dt), init, dq_liq_dt,
-        ),
+        _assemble_ice_blocks(moments, liquid, zc, p3, ρ, acc, inits),
         dn_lcl_activation_dt,
     )
 end

@@ -887,6 +887,7 @@ function test_vapor_anchor(FT)
         z = zero(FT)
         (dq_ice, dn_ice, dq_rim, db_rim, dq_liq) = BMT._vapor_exchange_accumulate(
             liq, subdep, tps, ρ, T, q_tot, q_lcl, q_rai, q_ice, n_ice, cat, st,
+            zero(FT), one(FT), one(FT),  # single category: no other condensate, unit shares
             z, z, z, z, z,
         )
         rtol = FT === Float32 ? 1e-3 : 1e-6
