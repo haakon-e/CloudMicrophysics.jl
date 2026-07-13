@@ -3,23 +3,12 @@
 #####
 
 """
-    MicroState2MP3{FT}
+    ROSENBROCK_SPECIES_PRESENCE_THRESHOLD
 
-The eight prognostic 2M+P3 species as a `StaticArrays.FieldVector`. Internal to
-the [`RosenbrockAverage`](@ref) implementation.
+Condensed-mass threshold below which a species block is treated as empty in the
+Rosenbrock species mask ([`_rosenbrock_species_mask`](@ref)).
 """
-struct MicroState2MP3{FT} <: SA.FieldVector{8, FT}
-    q_lcl::FT
-    n_lcl::FT
-    q_rai::FT
-    n_rai::FT
-    q_ice::FT
-    n_ice::FT
-    q_rim::FT
-    b_rim::FT
-end
-SA.similar_type(::Type{<:MicroState2MP3}, ::Type{FT}, ::SA.Size{(8,)}) where {FT} =
-    MicroState2MP3{FT}
+const ROSENBROCK_SPECIES_PRESENCE_THRESHOLD = 1e-10
 
 """
     _instantaneous_2mp3_tendency(mp, tps, ρ, T, q_tot,
@@ -62,7 +51,7 @@ end
         g.ρ, g.T, eltype(x)(g.q_tot),
         q_lcl, n_lcl, q_rai, n_rai, q_ice, n_ice, q_rim, b_rim, g.logλ,
     )
-    return MicroState2MP3(values(tend)...)
+    return SA.similar_type(typeof(x), eltype(x))(values(tend))
 end
 
 """
@@ -111,7 +100,7 @@ sides `f_p` for the linear post-solve attribution and is not differentiated.
     o = zero(FT)
     # builder for a per-process vector in the (q_lcl, n_lcl, q_rai, n_rai,
     # q_ice, n_ice, q_rim, b_rim) order shared with the entry's accumulators
-    Z() = MicroState2MP3(o, o, o, o, o, o, o, o)
+    Z() = MicroState2MP3{FT}((o, o, o, o, o, o, o, o))
 
     # Volumetric quantities for P3 functions (entry convention).
     L_lcl = q_lcl * ρ
@@ -139,7 +128,7 @@ sides `f_p` for the linear post-solve attribution and is not differentiated.
 
     # activation (cloud number only): no activation source
     dn_lcl_activation_dt = o
-    activation = MicroState2MP3(o, dn_lcl_activation_dt, o, o, o, o, o, o)
+    activation = MicroState2MP3{FT}((o, dn_lcl_activation_dt, o, o, o, o, o, o))
 
     # cloud condensation / evaporation (cloud mass only; number neglected)
     micro_mock = (; q_tot, q_lcl, q_icl = q_ice, q_rai, q_sno = zero(q_ice))
@@ -147,41 +136,41 @@ sides `f_p` for the linear post-solve attribution and is not differentiated.
     ∂ₜq_lcl_cond = CMNonEq.conv_q_vap_to_q_lcl(
         CMP.CloudLiquidFormation(condevap.τ_relax), nothing, tps, micro_mock, thermo_mock,
     )
-    cloud_condevap = MicroState2MP3(∂ₜq_lcl_cond, o, o, o, o, o, o, o)
+    cloud_condevap = MicroState2MP3{FT}((∂ₜq_lcl_cond, o, o, o, o, o, o, o))
 
     # rain evaporation (rain mass + number)
     evap = CM2.rain_evaporation(sb, aps, tps, q_tot, q_lcl, q_ice, q_rai, zero(q_ice), ρ, N_rai_wr, T)
-    rain_evap = MicroState2MP3(o, o, evap.∂ₜq_rai, evap.∂ₜρn_rai / ρ, o, o, o, o)
+    rain_evap = MicroState2MP3{FT}((o, o, evap.∂ₜq_rai, evap.∂ₜρn_rai / ρ, o, o, o, o))
 
     # autoconversion (cloud → rain, mass + number)
     acnv = CM2.autoconversion(sb.acnv, sb.pdf_c, q_lcl, q_rai, ρ, N_lcl_wr)
-    autoconv = MicroState2MP3(
+    autoconv = MicroState2MP3{FT}((
         acnv.dq_lcl_dt, acnv.dN_lcl_dt / ρ, acnv.dq_rai_dt, acnv.dN_rai_dt / ρ, o, o, o, o,
-    )
+    ))
 
     # cloud self-collection (cloud number only)
     ∂ₜN_lcl_sc = CM2.cloud_liquid_self_collection(sb.acnv, sb.pdf_c, q_lcl, ρ, acnv.dN_lcl_dt)
-    cloud_selfcol = MicroState2MP3(o, ∂ₜN_lcl_sc / ρ, o, o, o, o, o, o)
+    cloud_selfcol = MicroState2MP3{FT}((o, ∂ₜN_lcl_sc / ρ, o, o, o, o, o, o))
 
     # accretion (cloud → rain, mass; cloud number)
     accr = CM2.accretion(sb, q_lcl, q_rai, ρ, N_lcl_wr)
-    accretion_wr = MicroState2MP3(accr.dq_lcl_dt, accr.dN_lcl_dt / ρ, accr.dq_rai_dt, o, o, o, o, o)
+    accretion_wr = MicroState2MP3{FT}((accr.dq_lcl_dt, accr.dN_lcl_dt / ρ, accr.dq_rai_dt, o, o, o, o, o))
 
     # rain self-collection (rain number only)
     ∂ₜN_rai_sc = CM2.rain_self_collection(sb.pdf_r, sb.self, q_rai, ρ, N_rai_wr)
-    rain_selfcol = MicroState2MP3(o, o, o, ∂ₜN_rai_sc / ρ, o, o, o, o)
+    rain_selfcol = MicroState2MP3{FT}((o, o, o, ∂ₜN_rai_sc / ρ, o, o, o, o))
 
     # rain breakup (rain number only)
     ∂ₜN_rai_br = CM2.rain_breakup(sb.pdf_r, sb.brek, q_rai, ρ, N_rai_wr, ∂ₜN_rai_sc)
-    rain_breakup = MicroState2MP3(o, o, o, ∂ₜN_rai_br / ρ, o, o, o, o)
+    rain_breakup = MicroState2MP3{FT}((o, o, o, ∂ₜN_rai_br / ρ, o, o, o, o))
 
     # number adjustment for mass limits (cloud, then rain)
     numadj_lcl = (; sb.numadj.τ, x_min = sb.pdf_c.xc_min, x_max = sb.pdf_c.xc_max)
     ∂ₜn_lcl_numadj = CM2.number_tendency_from_mass_limits(numadj_lcl, q_lcl, n_lcl)
-    cloud_numadj = MicroState2MP3(o, ∂ₜn_lcl_numadj, o, o, o, o, o, o)
+    cloud_numadj = MicroState2MP3{FT}((o, ∂ₜn_lcl_numadj, o, o, o, o, o, o))
     numadj_rai = (; sb.numadj.τ, x_min = sb.pdf_r.xr_min, x_max = sb.pdf_r.xr_max)
     ∂ₜn_rai_numadj = CM2.number_tendency_from_mass_limits(numadj_rai, q_rai, n_rai)
-    rain_numadj = MicroState2MP3(o, o, o, ∂ₜn_rai_numadj, o, o, o, o)
+    rain_numadj = MicroState2MP3{FT}((o, o, o, ∂ₜn_rai_numadj, o, o, o, o))
 
     #####
     ##### P3 ice processes (mirrors the warm-rain + P3 ice entry)
@@ -200,13 +189,13 @@ sides `f_p` for the linear post-solve attribution and is not differentiated.
             state, shape, pdf_c, pdf_r, L_lcl, N_lcl, L_rai, N_rai, aps, tps, vel, ρ, T;
             quad,
         )
-        liquid_ice_collision = MicroState2MP3(
+        liquid_ice_collision = MicroState2MP3{FT}((
             coll.∂ₜq_c, coll.∂ₜN_c / ρ, coll.∂ₜq_r, coll.∂ₜN_r / ρ,
             coll.∂ₜL_ice / ρ, o, coll.∂ₜL_rim / ρ, coll.∂ₜB_rim / ρ,
-        )
+        ))
 
         S_ice_agg = CMP3.ice_self_collection(state, shape, vel, ρ; quad)
-        ice_aggregation = MicroState2MP3(o, o, o, o, o, -S_ice_agg.dNdt / ρ, o, o)
+        ice_aggregation = MicroState2MP3{FT}((o, o, o, o, o, -S_ice_agg.dNdt / ρ, o, o))
 
         T_freeze = TDI.TD.Parameters.T_freeze(tps)
         melt = ifelse(T > T_freeze,
@@ -217,10 +206,10 @@ sides `f_p` for the linear post-solve attribution and is not differentiated.
         ∂ₜn_ice_melt = melt.dNdt / ρ
         ∂ₜq_rim_melt = -∂ₜq_ice_melt * state.F_rim
         ∂ₜb_rim_melt = ifelse(state.ρ_rim > 0, -∂ₜq_ice_melt * state.F_rim / state.ρ_rim, zero(FT))
-        ice_melting = MicroState2MP3(
+        ice_melting = MicroState2MP3{FT}((
             o, o, ∂ₜq_ice_melt, ∂ₜn_ice_melt, -∂ₜq_ice_melt, -∂ₜn_ice_melt,
             ∂ₜq_rim_melt, ∂ₜb_rim_melt,
-        )
+        ))
     else
         liquid_ice_collision = Z()
         ice_aggregation = Z()
@@ -236,7 +225,7 @@ sides `f_p` for the linear post-solve attribution and is not differentiated.
         ice_nucleation, tps, T, ρ, q_tot, q_lcl + q_rai, q_ice, n_active;
         m_nuc, τ_act, inpc_log_shift = zero(ρ),
     )
-    f23_deposition = MicroState2MP3(o, o, o, o, f23_dep.∂ₜq_frz, f23_dep.∂ₜn_frz, o, o)
+    f23_deposition = MicroState2MP3{FT}((o, o, o, o, f23_dep.∂ₜq_frz, f23_dep.∂ₜn_frz, o, o))
 
     # Bigg immersion freezing of cloud drops (fully-rimed embryo graupel)
     cld_bigg = CM_HetIce.liquid_freezing_rate(mp.ice.rain_freezing, pdf_c, tps, q_lcl, ρ, N_lcl, T)
@@ -245,9 +234,9 @@ sides `f_p` for the linear post-solve attribution and is not differentiated.
     )
     ∂ₜn_imm = min(cld_bigg.∂ₜn_frz, cld_cap.∂ₜn_frz)
     ∂ₜq_imm = ifelse(cld_bigg.∂ₜn_frz > 0, cld_bigg.∂ₜq_frz * ∂ₜn_imm / cld_bigg.∂ₜn_frz, zero(FT))
-    bigg_immersion = MicroState2MP3(
+    bigg_immersion = MicroState2MP3{FT}((
         -∂ₜq_imm, -∂ₜn_imm, o, o, ∂ₜq_imm, ∂ₜn_imm, ∂ₜq_imm, ∂ₜq_imm / p3.ρ_i,
-    )
+    ))
 
     # ice deposition / sublimation (rim drains on the sublimation branch only)
     n_per_q_ice = ifelse(q_ice > ϵₘ, n_ice / q_ice, zero(n_ice))
@@ -260,19 +249,19 @@ sides `f_p` for the linear post-solve attribution and is not differentiated.
     ∂ₜq_ice_sub = min(∂ₜq_ice_dep, 0)
     ∂ₜq_rim_sub = ∂ₜq_ice_sub * state.F_rim
     ∂ₜb_rim_sub = ifelse(state.ρ_rim > 0, ∂ₜq_ice_sub * state.F_rim / state.ρ_rim, zero(FT))
-    ice_depsub = MicroState2MP3(o, o, o, o, ∂ₜq_ice_dep, ∂ₜn_ice_dep, ∂ₜq_rim_sub, ∂ₜb_rim_sub)
+    ice_depsub = MicroState2MP3{FT}((o, o, o, o, ∂ₜq_ice_dep, ∂ₜn_ice_dep, ∂ₜq_rim_sub, ∂ₜb_rim_sub))
 
     # ice number adjustment for mass limits
     numadj = _ice_numadj_params(FT)
     ∂ₜn_ice_numadj = CM2.number_tendency_from_mass_limits(numadj, q_ice, n_ice)
-    ice_numadj = MicroState2MP3(o, o, o, o, o, ∂ₜn_ice_numadj, o, o)
+    ice_numadj = MicroState2MP3{FT}((o, o, o, o, o, ∂ₜn_ice_numadj, o, o))
 
     # rain heterogeneous freezing (Bigg; frozen rain fully rimed)
     rain_frz = CM_HetIce.liquid_freezing_rate(mp.ice.rain_freezing, pdf_r, tps, q_rai, ρ, N_rai, T)
-    rain_freezing = MicroState2MP3(
+    rain_freezing = MicroState2MP3{FT}((
         o, o, -rain_frz.∂ₜq_frz, -rain_frz.∂ₜn_frz,
         rain_frz.∂ₜq_frz, rain_frz.∂ₜn_frz, rain_frz.∂ₜq_frz, rain_frz.∂ₜq_frz / p3.ρ_i,
-    )
+    ))
 
     return (;
         activation, cloud_condevap, rain_evap, autoconv, cloud_selfcol,
@@ -308,19 +297,33 @@ end
 end
 
 """
-    _rosenbrock_species_mask(x)
+    _rosenbrock_species_mask(x::MicroState)
 
 Diagonal of the species projection matrix `P` used by
 [`_rosenbrock_update`](@ref): 1 for active species, 0 for near-empty ones
-(condensed mass below `1e-10`, per species: liquid, rain, ice+rime). A masked
-species takes the forward-Euler update while active species stay implicit.
+(condensed mass below [`ROSENBROCK_SPECIES_PRESENCE_THRESHOLD`](@ref)). Cloud
+liquid and rain mass set the warm-block entries; [`ice_present_mass`](@ref) sets
+each ice category block. A masked species takes the forward-Euler update while
+active species stay implicit.
 """
-@inline function _rosenbrock_species_mask(x::MicroState2MP3{FT}) where {FT}
-    ϵ_empty = FT(1e-10)
-    liq = ifelse(x.q_lcl < ϵ_empty, zero(FT), one(FT))
-    rai = ifelse(x.q_rai < ϵ_empty, zero(FT), one(FT))
-    ice = ifelse(x.q_ice < ϵ_empty, zero(FT), one(FT))
-    return MicroState2MP3(liq, liq, rai, rai, ice, ice, ice, ice)
+@inline function _rosenbrock_species_mask(x::MicroState{FT, NCAT, LIQ, ZM, N}) where {FT, NCAT, LIQ, ZM, N}
+    ϵ = FT(ROSENBROCK_SPECIES_PRESENCE_THRESHOLD)
+    present(v) = ifelse(v < ϵ, zero(FT), one(FT))
+    liq = present(x[IQ_LCL])
+    rai = present(x[IQ_RAI])
+    cat_present = ntuple(j -> present(ice_present_mass(x, Val(j))), Val(NCAT))
+    nif = 4 + LIQ + ZM
+    return MicroState{FT, NCAT, LIQ, ZM, N}(
+        ntuple(Val(N)) do i
+            if i == IQ_LCL || i == IN_LCL
+                liq
+            elseif i == IQ_RAI || i == IN_RAI
+                rai
+            else
+                @inbounds cat_present[(i - 5) ÷ nif + 1]
+            end
+        end,
+    )
 end
 
 """
@@ -432,7 +435,7 @@ tendency cache (droplet activation is added by the host, not the substep loop).
     Lv_over_cp = TDI.TD.Parameters.LH_v0(tps) / cp_d
     Ls_over_cp = TDI.TD.Parameters.LH_s0(tps) / cp_d
 
-    x = MicroState2MP3{FT}(q_lcl, n_lcl, q_rai, n_rai, q_ice, n_ice, q_rim, b_rim)
+    x = MicroState2MP3{FT}((q_lcl, n_lcl, q_rai, n_rai, q_ice, n_ice, q_rim, b_rim))
     x₀ = x
     Tsub = T
     for _ in 1:nsub_eff
@@ -455,7 +458,8 @@ tendency cache (droplet activation is added by the host, not the substep loop).
         end
         Δ = x - x_prev
         T_safe = max(150, Tsub)
-        Tsub += (TDI.Lᵥ(tps, T_safe) * (Δ.q_lcl + Δ.q_rai) + TDI.Lₛ(tps, T_safe) * Δ.q_ice) / cp_d
+        Tsub +=
+            (TDI.Lᵥ(tps, T_safe) * (Δ[IQ_LCL] + Δ[IQ_RAI]) + TDI.Lₛ(tps, T_safe) * ice_q(Δ, Val(1))) / cp_d
     end
 
     rates = (x - x₀) / Δt
@@ -557,6 +561,18 @@ of `∂ₜq`.
 end
 
 """
+    _named_species(x::MicroState2MP3)
+
+`NamedTuple` view of a default-layout 2M+P3 vector, keyed by the eight
+prognostic-species names `(q_lcl, n_lcl, q_rai, n_rai, q_ice, n_ice, q_rim,
+b_rim)`.
+"""
+@inline _named_species(x::MicroState2MP3) = (;
+    q_lcl = x[IQ_LCL], n_lcl = x[IN_LCL], q_rai = x[IQ_RAI], n_rai = x[IN_RAI],
+    cat_view(x, Val(1))...,
+)
+
+"""
     _jacobian_2mp3_manual(g::Instantaneous2MP3Tendency, x::MicroState2MP3)
 
 The hand-built 2M+P3 substep Jacobian for [`ManualJacobian`](@ref), evaluated at
@@ -594,7 +610,7 @@ The entries are tiered:
     q_tot = FT(g.q_tot)
     logλ = g.logλ
 
-    (; q_lcl, n_lcl, q_rai, n_rai, q_ice, n_ice, q_rim, b_rim) = x
+    (q_lcl, n_lcl, q_rai, n_rai, q_ice, n_ice, q_rim, b_rim) = x
     o = zero(FT)
     # ϵₘ matches the entry's `n_ice/q_ice` and number-adjustment guards
     qmin = UT.ϵ_numerics_2M_M(FT)
@@ -602,9 +618,13 @@ The entries are tiered:
     q_floor = FT(TDI.TD.Parameters.q_min(tps))
     n_floor = q_floor
 
-    # per-process primal rates (Tier-2 donor coefficients reuse these)
-    pp = _per_process_2mp3(mp, tps, ρ, T, q_tot,
-        q_lcl, n_lcl, q_rai, n_rai, q_ice, n_ice, q_rim, b_rim, logλ)
+    # per-process primal rates as named-species views (Tier-2 donor
+    # coefficients reuse these)
+    pp = map(
+        _named_species,
+        _per_process_2mp3(mp, tps, ρ, T, q_tot,
+            q_lcl, n_lcl, q_rai, n_rai, q_ice, n_ice, q_rim, b_rim, logλ),
+    )
 
     # --- shared thermodynamic constants (T, ρ, q_tot frozen in the substep) ---
     Rᵥ = TDI.Rᵥ(tps)
@@ -943,12 +963,12 @@ end
     _rosenbrock_species_mask(x::MicroState1M)
 
 Diagonal of the species projection `P` for the 1M state: 1 for active species,
-0 for near-empty ones (mass below `1e-10`, per species: liquid, ice, rain,
-snow). See the [`MicroState2MP3`](@ref) method for the role of `P` in
-[`_rosenbrock_update`](@ref).
+0 for near-empty ones (mass below [`ROSENBROCK_SPECIES_PRESENCE_THRESHOLD`](@ref),
+per species: liquid, ice, rain, snow). See the [`MicroState2MP3`](@ref) method for
+the role of `P` in [`_rosenbrock_update`](@ref).
 """
 @inline function _rosenbrock_species_mask(x::MicroState1M{FT}) where {FT}
-    ϵ_empty = FT(1e-10)
+    ϵ_empty = FT(ROSENBROCK_SPECIES_PRESENCE_THRESHOLD)
     lcl = ifelse(x.q_lcl < ϵ_empty, zero(FT), one(FT))
     icl = ifelse(x.q_icl < ϵ_empty, zero(FT), one(FT))
     rai = ifelse(x.q_rai < ϵ_empty, zero(FT), one(FT))
@@ -1099,10 +1119,10 @@ end
     ρ, Tsub, q_tot, Lv_over_cp, Ls_over_cp, tps,
 ) where {FT}
     Ssat(xx, TT) = max(
-        TDI.supersaturation_over_ice(tps, q_tot, xx.q_lcl + xx.q_rai, xx.q_ice, ρ, TT),
-        TDI.supersaturation_over_liquid(tps, q_tot, xx.q_lcl + xx.q_rai, xx.q_ice, ρ, TT),
+        TDI.supersaturation_over_ice(tps, q_tot, xx[IQ_LCL] + xx[IQ_RAI], ice_q(xx, Val(1)), ρ, TT),
+        TDI.supersaturation_over_liquid(tps, q_tot, xx[IQ_LCL] + xx[IQ_RAI], ice_q(xx, Val(1)), ρ, TT),
     )
-    latent(dd) = Lv_over_cp * (dd.q_lcl + dd.q_rai) + Ls_over_cp * dd.q_ice
+    latent(dd) = Lv_over_cp * (dd[IQ_LCL] + dd[IQ_RAI]) + Ls_over_cp * ice_q(dd, Val(1))
     return _saturation_bisection(Ssat, latent, x, d, Tsub)
 end
 
@@ -1120,13 +1140,13 @@ obtained from `ForwardDiff`. The donor-based matrices ([`DonorJacobian`](@ref),
 [`CoupledDonorJacobian`](@ref)) produce no tendency by-product, so `f = g(x)` is
 evaluated separately.
 """
-@inline function _tendency_and_jacobian(::ExactJacobian, g, x::SA.FieldVector{N, FT}) where {N, FT}
+@inline function _tendency_and_jacobian(::ExactJacobian, g, x::SA.StaticVector{N, FT}) where {N, FT}
     Tag = typeof(FD.Tag(g, FT))
     dx = SA.SVector(
         ntuple(i -> FD.Dual{Tag}(x[i], ntuple(s -> ifelse(s == i, one(FT), zero(FT)), Val(N))...), Val(N)),
     )
     y = g(dx)
-    f = typeof(x)(ntuple(i -> @inbounds(FD.value(y[i])), Val(N))...)
+    f = typeof(x)(ntuple(i -> @inbounds(FD.value(y[i])), Val(N)))
     J = SA.SMatrix{N, N, FT}(
         ntuple(k -> @inbounds(FD.partials(y[(k - 1) % N + 1], (k - 1) ÷ N + 1)), Val(N * N)),
     )
@@ -1399,7 +1419,7 @@ This is a diagnostic path, separate from the non-verbose entry.
     h = Δt / FT(nsub_eff)
     cp_d = TDI.TD.Parameters.cp_d(tps)
 
-    x = MicroState2MP3{FT}(q_lcl, n_lcl, q_rai, n_rai, q_ice, n_ice, q_rim, b_rim)
+    x = MicroState2MP3{FT}((q_lcl, n_lcl, q_rai, n_rai, q_ice, n_ice, q_rim, b_rim))
     x₀ = x
     Tsub = T
     Δxp_sum = _per_process_zero_accumulator(Verbose2MP3Tendency(mp, tps, ρ, Tsub, q_tot, logλ), x)
@@ -1421,7 +1441,8 @@ This is a diagnostic path, separate from the non-verbose entry.
         Δx_clamp_sum += Δx_clamp
         Δ = x - x_prev
         T_safe = max(150, Tsub)
-        Tsub += (TDI.Lᵥ(tps, T_safe) * (Δ.q_lcl + Δ.q_rai) + TDI.Lₛ(tps, T_safe) * Δ.q_ice) / cp_d
+        Tsub +=
+            (TDI.Lᵥ(tps, T_safe) * (Δ[IQ_LCL] + Δ[IQ_RAI]) + TDI.Lₛ(tps, T_safe) * ice_q(Δ, Val(1))) / cp_d
     end
 
     rates = (x - x₀) / Δt

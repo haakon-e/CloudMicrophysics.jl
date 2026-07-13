@@ -1138,6 +1138,7 @@ to be non-Nothing, eliminating runtime type checks and dynamic dispatch.
     )
 end
 
+include("BMT_state.jl")
 include("BMT_rosenbrock.jl")
 
 end # module BulkMicrophysicsTendencies

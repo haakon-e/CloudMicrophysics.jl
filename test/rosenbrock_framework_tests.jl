@@ -16,6 +16,7 @@ import CloudMicrophysics.Common as CO
 import CloudMicrophysics.Utilities as UT
 import ForwardDiff as FD
 import StaticArrays: SVector
+import StaticArrays as SA
 
 # The unified `RosenbrockAverage{Jacobian, GrowthTreatment, TendencyLimiter}`
 # framework: presets (`rosenbrock_donor`, `rosenbrock_coupled`,
@@ -442,7 +443,7 @@ function test_framework_2m(FT)
     end
 end
 
-function _framework_exact_args(FT)
+function _framework_2mp3_args(FT, mode)
     tps = TDI.TD.Parameters.ThermodynamicsParameters(FT)
     mp = CMP.Microphysics2MParams(FT; with_ice = true, is_limited = true)
     p3 = mp.ice.scheme
@@ -451,20 +452,91 @@ function _framework_exact_args(FT)
     )
     logλ = P3.get_distribution_logλ(st)
     return (
-        BMT.rosenbrock_exact(), BMT.Microphysics2Moment(), mp, tps,
+        mode, BMT.Microphysics2Moment(), mp, tps,
         FT(0.78), FT(273.5), FT(0.009),
         FT(2e-4), FT(5e7), FT(1e-4), FT(4e4), FT(1e-4), FT(2e5), FT(4e-5), FT(6e-8),
         logλ, FT(60), 4,
     )
 end
 
-function test_framework_exact_inference(FT)
-    args = _framework_exact_args(FT)
-    @testset "rosenbrock_exact() inference and allocations ($FT)" begin
-        @test (@inferred BMT.bulk_microphysics_tendencies(args...)) isa NamedTuple
-        JET.@test_opt BMT.bulk_microphysics_tendencies(args...)
-        trail = BT.@benchmark $(splat(BMT.bulk_microphysics_tendencies))($args) samples = 100 evals = 1
-        @test trail.memory == 0
+function test_framework_2mp3_inference(FT)
+    for (name, mode) in
+        (("rosenbrock_exact()", BMT.rosenbrock_exact()), ("rosenbrock_manual()", BMT.rosenbrock_manual()))
+        args = _framework_2mp3_args(FT, mode)
+        @testset "$name inference and allocations ($FT)" begin
+            @test (@inferred BMT.bulk_microphysics_tendencies(args...)) isa NamedTuple
+            JET.@test_opt BMT.bulk_microphysics_tendencies(args...)
+            trail = BT.@benchmark $(splat(BMT.bulk_microphysics_tendencies))($args) samples = 100 evals = 1
+            @test trail.memory == 0
+        end
+    end
+end
+
+# Structural tests of the layout-parameterized `MicroState` over the default
+# (N=8) and extended (N=9/10/12) layouts.
+function test_microstate_layout(FT)
+    layouts = (
+        (; NCAT = 1, LIQ = false, ZM = false, N = 8),
+        (; NCAT = 1, LIQ = true, ZM = false, N = 9),
+        (; NCAT = 1, LIQ = false, ZM = true, N = 9),
+        (; NCAT = 1, LIQ = true, ZM = true, N = 10),
+        (; NCAT = 2, LIQ = false, ZM = false, N = 12),
+    )
+
+    @testset "MicroState construction, indexing, cat_view ($FT)" begin
+        for L in layouts
+            @test BMT.state_length(L.NCAT, L.LIQ, L.ZM) == L.N
+            MS = BMT.MicroState{FT, L.NCAT, L.LIQ, L.ZM, L.N}
+            x = MS(ntuple(i -> FT(i), L.N))
+            @test x isa MS
+            @test length(x) == L.N
+            @test all(x[i] == FT(i) for i in 1:L.N)
+            @test (x[BMT.IQ_LCL], x[BMT.IN_LCL], x[BMT.IQ_RAI], x[BMT.IN_RAI]) == (FT(1), FT(2), FT(3), FT(4))
+            @test BMT.n_categories(x) == L.NCAT
+            @test BMT.n_ice_fields(x) == 4 + L.LIQ + L.ZM
+            keys_core = (:q_ice, :n_ice, :q_rim, :b_rim)
+            keys_liq = L.LIQ ? (:q_liq_on_ice,) : ()
+            keys_z = L.ZM ? (:z_ice,) : ()
+            expected_keys = (keys_core..., keys_liq..., keys_z...)
+            for j in 1:L.NCAT
+                cv = BMT.cat_view(x, Val(j))
+                @test keys(cv) == expected_keys
+                off = 4 + (j - 1) * (4 + L.LIQ + L.ZM)
+                @test (BMT.ice_q(x, Val(j)), BMT.ice_n(x, Val(j)), BMT.ice_qrim(x, Val(j)), BMT.ice_brim(x, Val(j))) ==
+                      (FT(off + 1), FT(off + 2), FT(off + 3), FT(off + 4))
+                @test cv.q_ice == FT(off + 1)
+                if L.LIQ
+                    @test BMT.ice_qliq(x, Val(j)) == cv.q_liq_on_ice == FT(off + 5)
+                    @test BMT.ice_present_mass(x, Val(j)) == cv.q_ice + cv.q_liq_on_ice
+                else
+                    @test BMT.ice_present_mass(x, Val(j)) == cv.q_ice
+                end
+                if L.ZM
+                    @test BMT.ice_zice(x, Val(j)) == cv.z_ice == FT(off + 4 + L.LIQ + 1)
+                end
+            end
+        end
+    end
+
+    @testset "MicroState length invariant throws ($FT)" begin
+        @test_throws DimensionMismatch BMT.MicroState{FT, 1, false, false, 7}(ntuple(i -> FT(i), 7))
+        @test_throws DimensionMismatch SA.similar_type(BMT.MicroState2MP3{FT}, FT, SA.Size((7,)))
+    end
+
+    @testset "MicroState similar_type and solve preserve the layout type ($FT)" begin
+        for L in layouts
+            MS = BMT.MicroState{FT, L.NCAT, L.LIQ, L.ZM, L.N}
+            x = MS(ntuple(i -> FT(i), L.N))
+            N = L.N
+            @test SA.similar_type(typeof(x), FT, SA.Size((N,))) == MS
+            @test typeof(abs.(x)) == MS
+            @test typeof(max.(x .+ x, FT(0))) == MS
+            J = FT(2) .* one(SA.SMatrix{N, N, FT})
+            @test typeof(J * x) == MS
+            @test typeof(J \ x) == MS
+            @test typeof(J * (J \ (J * x))) == MS
+            @test typeof(x * x') <: SA.SMatrix{N, N, FT}
+        end
     end
 end
 
@@ -473,5 +545,8 @@ test_framework_1m(Float32)
 test_framework_2m(Float64)
 test_framework_2m(Float32)
 
-test_framework_exact_inference(Float64)
-test_framework_exact_inference(Float32)
+test_microstate_layout(Float64)
+test_microstate_layout(Float32)
+
+test_framework_2mp3_inference(Float64)
+test_framework_2mp3_inference(Float32)
