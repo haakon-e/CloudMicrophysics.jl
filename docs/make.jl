@@ -47,6 +47,7 @@ Parameterizations = [
     "2-moment precipitation microphysics" => "Microphysics2M.md",
     "P3 Scheme" => "P3Scheme.md",
     "P3 Three-Moment Ice" => "P3ThreeMoment.md",
+    "P3 Predicted Liquid Fraction" => "P3LiquidFraction.md",
     "Terminal Velocity" => "TerminalVelocity.md",
     "Non-equilibrium cloud formation" => "MicrophysicsNonEq.md",
     "Smooth transition at thresholds" => "ThresholdsTransition.md",

@@ -206,6 +206,7 @@ CMP.AspectRatio
 
 ```@docs
 P3Scheme.P3State
+P3Scheme.P3Shape
 P3Scheme.state_from_prognostic
 ```
 
@@ -254,6 +255,18 @@ P3Scheme.logmass_gamma_moment
 P3Scheme.logLdivN
 ```
 
+### Liquid-fraction distribution relationships
+
+```@docs
+P3Scheme.liquid_blend
+P3Scheme.total_mass_concentration
+P3Scheme.log_mixed_mass_moment
+P3Scheme.logLdivN_whole
+P3Scheme.log_upper_incomplete_gamma
+P3Scheme.get_distribution_logλ_whole
+P3Scheme.get_distribution_logλ_core
+```
+
 ### Derived integral quantities
 
 These methods integrate over the particle size distribution.
@@ -278,6 +291,17 @@ P3Scheme.het_ice_nucleation
 
 ```@docs
 P3Scheme.ice_melt
+```
+
+#### Predicted liquid fraction
+
+```@docs
+P3Scheme.ice_refreeze
+P3Scheme.ice_shed
+P3Scheme.vapor_path_weight
+P3Scheme.mixed_mass
+P3Scheme.mixed_area
+P3Scheme.mixed_particle_terminal_velocity
 ```
 
 #### Collisions with liquid droplets
@@ -449,6 +473,7 @@ Utilities.gamma_inc
 Utilities.gamma_inc_inv
 Utilities.rime_mass_fraction
 Utilities.rime_density
+Utilities.liquid_mass_fraction
 Utilities.sgs_weight_function
 Utilities.unrolled_logsumexp
 Utilities.fac

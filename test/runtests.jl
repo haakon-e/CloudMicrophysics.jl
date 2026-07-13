@@ -19,6 +19,7 @@ TT.@testset "All tests" begin
     include("precipitation_susceptibility_tests.jl")
     include("p3_tests.jl")
     include("p3_three_moment_tests.jl")
+    include("p3_liquid_fraction_tests.jl")
     include("p3_rho_d_stability.jl")
     include("p3_shape_solver_warmstart_tests.jl")
     include("aqua.jl")
