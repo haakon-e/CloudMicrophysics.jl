@@ -60,15 +60,26 @@ end
  - `quad`: quadrature rule (a `Quadrature.QuadratureRule`)
 
 Returns the melting rate of ice (QIMLT in Morrison and Mildbrandt (2015)).
+
+Dispatches on the liquid-fraction treatment. Under
+[`CMP.NoLiquidFraction`](@ref) the whole particle melts to rain and the return
+is `(; dNdt, dLdt)`. Under [`CMP.PredictedLiquidFraction`](@ref) the frozen-core
+melt splits at `D_th`: particles with `D ≤ D_th` melt completely to rain, larger
+particles melt into retained liquid on ice; the return is
+`(; dLdt_ice, dLdt_rain, dNdt_rain, dLdt_liq, dLdt_rim, dBdt_rim)` with
+`dLdt_ice = -(dLdt_rain + dLdt_liq)` the frozen-core mass tendency, symmetric
+with [`ice_refreeze`](@ref) (gains positive, the core loss explicit). See the
+[P3 liquid-fraction documentation](@ref P3-liquid-fraction).
 """
-@inline function ice_melt(
+@inline ice_melt(
     velocity_params, aps::CMP.AirProperties, tps::TDI.PS,
-    Tₐ, ρₐ, state::P3State, shape::P3Shape;
-    quad,
+    Tₐ, ρₐ, state::P3State, shape::P3Shape; quad,
+) = _ice_melt(state.params.liquid, velocity_params, aps, tps, Tₐ, ρₐ, state, shape; quad)
+
+@inline function _ice_melt(
+    ::CMP.NoLiquidFraction, velocity_params, aps::CMP.AirProperties, tps::TDI.PS,
+    Tₐ, ρₐ, state::P3State, shape::P3Shape; quad,
 )
-    # Note: process not dependent on `F_liq`
-    # (we want ice core shape params)
-    # Get constants
     (; K_therm) = aps
     L_f = TDI.Lf(tps, Tₐ)
 
@@ -92,6 +103,168 @@ Returns the melting rate of ice (QIMLT in Morrison and Mildbrandt (2015)).
     dNdt = ρn_ice / ρq_ice * dLdt
 
     return (; dNdt, dLdt)
+end
+
+@inline function _ice_melt(
+    ::CMP.PredictedLiquidFraction, velocity_params, aps::CMP.AirProperties, tps::TDI.PS,
+    Tₐ, ρₐ, state::P3State, shape::P3Shape; quad,
+)
+    (; K_therm) = aps
+    L_f = TDI.Lf(tps, Tₐ)
+    (; ρq_ice, ρn_ice, F_rim, ρ_rim) = state
+    (; T_freeze, vent) = state.params
+
+    # Melting acts on the frozen core: integrate over the ice-core PSD
+    # (`logλ_core`) with the ice-core mass gradient. The ventilation factor uses
+    # the blended whole-particle fall speed (C19 Eq A3), as in `ice_refreeze`.
+    core = P3Shape(; logλ = shape.logλ_core, μ = shape.μ)
+    v_term = mixed_particle_terminal_velocity(velocity_params, ρₐ, state)
+    F_v = CO.ventilation_factor(vent, aps, v_term)
+    N′ = size_distribution(state, core)
+    fac = 4 * K_therm / L_f * (Tₐ - T_freeze)
+    bnds = velocity_integral_bounds(state, core, v_term; p = 1e-6)
+    melt_integrand = D -> ∂ice_mass_∂D(state, D) * F_v(D) * N′(D) / D
+
+    # Split at the small-spherical threshold D_th (already a subinterval
+    # boundary): D ≤ D_th melts completely to rain, D > D_th is retained as
+    # liquid on the ice (C19 Eqs A1, A2).
+    D_split = clamp(state.D_th, first(bnds), last(bnds))
+    bnds_rain = map(D -> min(D, D_split), bnds)
+    bnds_liq = map(D -> max(D, D_split), bnds)
+    Q_rain = max(zero(fac), fac * integrate(melt_integrand, bnds_rain, quad))
+    Q_liq = max(zero(fac), fac * integrate(melt_integrand, bnds_liq, quad))
+
+    # Complete-melt part reduces number through the mean-mass band, so the number
+    # rate is bounded and vanishes with the mass rate as the core empties. Rime
+    # drains with the total core-mass loss at fixed F_rim.
+    (; mean_mass_min, mean_mass_max) = state.params
+    m̄ = clamp(ρq_ice / max(ρn_ice, floatmin(eltype(state))), mean_mass_min, mean_mass_max)
+    dNdt_rain = Q_rain / m̄
+    ΔL_core = Q_rain + Q_liq
+    dLdt_rim = -ΔL_core * F_rim
+    dBdt_rim = ifelse(ρ_rim > 0, -ΔL_core * F_rim / ρ_rim, zero(fac))
+    return (; dLdt_ice = -ΔL_core, dLdt_rain = Q_rain, dNdt_rain, dLdt_liq = Q_liq, dLdt_rim, dBdt_rim)
+end
+
+"""
+    ice_refreeze(velocity_params, aps, tps, Tₐ, ρₐ, state, shape; quad)
+
+Refreeze the liquid on ice back into rime below the freezing
+temperature (C19 Eq A4, A5). The frozen-core mass grows and the liquid shrinks
+by the same rate, so the total mixed-phase mass and the ice number are
+conserved. Nonzero only for `Tₐ < T_freeze` and `F_liq > 0`.
+
+Integrated over the whole-particle PSD (`shape.logλ`) with the mixed-particle
+terminal velocity for ventilation, mirroring the ventilated capacitance form of
+[`ice_melt`](@ref); the refrozen mass joins the rime at the solid-ice density
+`params.ρ_i` (a deviation from the reference 900 kg/m³; see the
+[P3 liquid-fraction documentation](@ref P3-liquid-fraction)).
+
+# Arguments
+ - `velocity_params`: [`CMP.Chen2022VelType`](@ref)
+ - `aps`: [`CMP.AirProperties`](@ref)
+ - `tps`: thermodynamics parameters
+ - `Tₐ`: temperature [K]
+ - `ρₐ`: air density [kg/m³]
+ - `state`: a [`P3State`](@ref)
+ - `shape`: the diagnosed [`P3Shape`](@ref)
+
+# Returns
+A `NamedTuple` `(; dLdt_liq, dLdt_ice, dLdt_rim, dBdt_rim)` of volumetric
+tendencies [kg/m³/s], [m³/m³/s]: `dLdt_liq = -dLdt_ice` (liquid → frozen core),
+`dLdt_rim` (rime mass gain), `dBdt_rim` (rime volume gain).
+"""
+@inline function ice_refreeze(
+    velocity_params, aps::CMP.AirProperties, tps::TDI.PS,
+    Tₐ, ρₐ, state::P3State, shape::P3Shape; quad,
+)
+    (; K_therm) = aps
+    L_f = TDI.Lf(tps, Tₐ)
+    (; F_liq) = state
+    (; T_freeze, vent, ρ_i) = state.params
+
+    v_term = mixed_particle_terminal_velocity(velocity_params, ρₐ, state)
+    F_v = CO.ventilation_factor(vent, aps, v_term)
+    N′ = size_distribution(state, shape)
+    # (T_freeze - Tₐ) driver ⇒ positive below freezing, continuous to zero at T_freeze
+    fac = 4 * K_therm / L_f * (T_freeze - Tₐ)
+    bnds = velocity_integral_bounds(state, shape, v_term; p = 1e-6)
+    frz_integrand = D -> ∂ice_mass_∂D(state, D) * F_v(D) * N′(D) / D
+    Q_frz = max(zero(fac), F_liq * fac * integrate(frz_integrand, bnds, quad))
+
+    dBdt_rim = Q_frz / ρ_i
+    return (; dLdt_liq = -Q_frz, dLdt_ice = Q_frz, dLdt_rim = Q_frz, dBdt_rim)
+end
+
+"""
+    ice_shed(state, shape)
+
+Shed the liquid on ice from particles larger than the shedding onset diameter into
+rain (C19; Rasmussen and Heymsfield 1987). Only particles with maximum
+dimension above `params.liquid.D_shd_onset` shed, and shedding scales with the
+frozen-core rime fraction `F_rim` (unrimed wet snow retains its liquid). Active
+only under [`CMP.PredictedLiquidFraction`](@ref).
+
+The shed-able liquid mass concentration is the closed-form whole-particle liquid
+moment above the onset diameter,
+
+```math
+L_\\mathrm{shd} = F_\\mathrm{rim}\\, F_\\mathrm{liq}\\,
+    \\frac{\\pi \\rho_l}{6} \\int_{D_\\mathrm{shd}}^{\\infty} D^3\\, n(D)\\, \\mathrm{d}D ,
+```
+
+evaluated through the log-space upper incomplete gamma
+([`log_upper_incomplete_gamma`](@ref)), which stays accurate over the physical
+`λ D_shd` range in Float32 and underflows cleanly only in the extreme tail,
+where shedding is negligible. It is shed as rain drops of mean diameter
+`params.liquid.D_shd_drop`.
+
+# Returns
+A `NamedTuple` `(; L_shd, N_shd)`: the shed liquid mass concentration [kg/m³]
+and the corresponding rain number concentration [1/m³]. Shedding is
+instantaneous in the reference; the host applies these amounts limited to the
+available liquid `ρq_liq`.
+"""
+@inline ice_shed(state::P3State, shape::P3Shape) = _ice_shed(state.params.liquid, state, shape)
+
+@inline function _ice_shed(::CMP.NoLiquidFraction, state::P3State, shape::P3Shape)
+    z = zero(eltype(state))
+    return (; L_shd = z, N_shd = z)
+end
+
+@inline function _ice_shed(liquid::CMP.PredictedLiquidFraction, state::P3State, shape::P3Shape)
+    (; ρn_ice, F_rim, F_liq) = state
+    (; ρ_l) = state.params
+    (; D_shd_onset, D_shd_drop) = liquid
+    (; μ, logλ) = shape
+    x₀ = exp(logλ) * D_shd_onset
+    # log ∫_{D_shd_onset}^∞ D³ n(D) dD / ρn_ice via the log-space upper incomplete
+    # gamma; ρn_ice stays outside the exponential.
+    log_tail = -3 * logλ - SF.loggamma(μ + 1) + log_upper_incomplete_gamma(μ + 4, x₀)
+    M₃ = ρn_ice * exp(log_tail)
+    L_shd = F_rim * F_liq * (π * ρ_l / 6) * M₃
+    N_shd = L_shd / (ρ_l * CO.volume_sphere_D(D_shd_drop))
+    return (; L_shd, N_shd)
+end
+
+"""
+    vapor_path_weight(liquid::PredictedLiquidFraction, F_liq)
+
+C1 ramp weight selecting the vapor-exchange path from the liquid mass fraction:
+`0` for a dry core (deposition/sublimation), `1` for a wet shell
+(condensation/evaporation), with a smooth Hermite ramp on the band
+`[F_dry, F_dry + ΔF_switch]`. Satisfies `w(0) = 0` and `w'(0) = 0`, so the
+dry-ice vapor baseline is untouched (C19 §3d; the band is asserted inside
+`(0, F_melt)` at construction).
+"""
+@inline vapor_path_weight((; F_dry, ΔF_switch)::CMP.PredictedLiquidFraction, F_liq) =
+    _smoothstep(F_liq, F_dry, F_dry + ΔF_switch)
+
+# C1 Hermite smoothstep: 0 below `lo`, 1 above `hi`, 3t² - 2t³ in between, with
+# zero slope at both ends.
+@inline function _smoothstep(x, lo, hi)
+    t = clamp((x - lo) / (hi - lo), zero(x), one(x))
+    return t * t * (3 - 2 * t)
 end
 
 """
