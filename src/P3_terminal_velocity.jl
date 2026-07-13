@@ -161,6 +161,69 @@ function ice_terminal_velocity_mass_weighted(
     return integ / max(ρq_ice, represented_mass, floatmin(eltype(state)))
 end
 
+# Gauss-Legendre order for the reflectivity-weighted integrals, selected by the
+# reflectivity level of `test/p3_quadrature_error_study.jl` (the `Dⁿ` weight
+# moves the integrand mode into the size-distribution tail).
+# TODO: Store the order on `P3IceParams`.
+const REFLECTIVITY_QUADRATURE_ORDER = 12
+
+# Fused reflectivity-weighted integrand. `logn₆` folds the `D⁶` weight into the
+# log-exponent (`log(N₀) + (μ+6) logD − λD`), so no bare `n(D)·D⁶` product
+# underflows in Float32. Returns `(numerator, denominator)` as one `SVector`.
+struct P3ReflectivityWeightedIntegrand{F, V} <: Function
+    logn₆::F
+    v_term::V
+end
+@inline function (f::P3ReflectivityWeightedIntegrand)(D)
+    w = exp(f.logn₆(D))
+    return SA.SVector(w * f.v_term(D), w)
+end
+
+"""
+    ice_terminal_velocity_reflectivity_weighted(
+        velocity_params::CMP.Chen2022VelType, ρₐ, state::P3State, shape;
+        [p], [order], [quad],
+    )
+
+Return the terminal velocity of the reflectivity- (sixth-moment-) weighted mean
+ice particle size, `∫ D⁶ v(D) N′(D) dD / ∫ D⁶ N′(D) dD`.
+
+# Arguments
+- `velocity_params`: A [`CMP.Chen2022VelType`](@ref) with terminal velocity parameters
+- `ρₐ`: Air density [kg/m³]
+- `state`: A [`P3State`](@ref)
+- `shape`: The diagnosed [`P3Shape`](@ref)
+
+# Keyword arguments
+ - `p`: Tolerance parameter for the integral bounds. Default is 1e-6.
+ - `order`: Gauss-Legendre order of the default rule. By default,
+   `REFLECTIVITY_QUADRATURE_ORDER`.
+ - `quad`: quadrature rule (a `Quadrature.QuadratureRule`).
+
+See also [`ice_terminal_velocity_number_weighted`](@ref) and
+[`ice_terminal_velocity_mass_weighted`](@ref).
+"""
+function ice_terminal_velocity_reflectivity_weighted(
+    velocity_params::CMP.Chen2022VelType, ρₐ, state::P3State, shape::P3Shape;
+    p = 1e-6, order = REFLECTIVITY_QUADRATURE_ORDER,
+    quad = GaussLegendre(eltype(state), order),
+)
+    FT = eltype(state)
+    v_term = ice_particle_terminal_velocity(velocity_params, ρₐ, state)
+    μ = shape.μ
+    log_N₀ = get_logN₀(state.ρn_ice, μ, shape.logλ)
+    λ = exp(shape.logλ)
+    logn₆ = P3LogNumberFunctor(promote(log_N₀, μ + 6, λ)...)
+
+    # Fused numerator/denominator over the moment-6 tail-aware bounds; the mode
+    # breakpoint `(μ+6)/λ` lands on a subinterval boundary. The denominator is
+    # floored by `floatmin` for finiteness only.
+    integrand = P3ReflectivityWeightedIntegrand(logn₆, v_term)
+    bnds = velocity_integral_bounds(state, shape, v_term; p, moment_order = 6)
+    (num, den) = integrate(integrand, bnds, quad)
+    return num / max(den, floatmin(FT))
+end
+
 """
     ice_terminal_velocity_number_weighted_from_prognostic(
         velocity_params, ρₐ, params, ρq_ice, ρn_ice, ρq_rim, ρb_rim, logλ; kw...
