@@ -6,9 +6,10 @@
     ROSENBROCK_SPECIES_PRESENCE_THRESHOLD
 
 Condensed-mass threshold below which a species block is treated as empty in the
-Rosenbrock species mask ([`_rosenbrock_species_mask`](@ref)).
+Rosenbrock species mask ([`_rosenbrock_species_mask`](@ref)). Alias of the
+shared [`UT.SPECIES_PRESENCE_THRESHOLD`](@ref CloudMicrophysics.Utilities.SPECIES_PRESENCE_THRESHOLD).
 """
-const ROSENBROCK_SPECIES_PRESENCE_THRESHOLD = 1e-10
+const ROSENBROCK_SPECIES_PRESENCE_THRESHOLD = UT.SPECIES_PRESENCE_THRESHOLD
 
 """
     _instantaneous_2mp3_tendency(mp, tps, ρ, T, q_tot,

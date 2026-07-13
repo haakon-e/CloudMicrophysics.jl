@@ -11,6 +11,7 @@ import SpecialFunctions as SF
 import ForwardDiff as FD
 
 export clamp_to_nonneg, ϵ_numerics, ϵ_numerics_2M_M, ϵ_numerics_2M_N, ϵ_numerics_P3_B
+export SPECIES_PRESENCE_THRESHOLD
 export promote_typeof
 export fac
 
@@ -338,6 +339,16 @@ Physical smallness threshold for the **P3** rime-volume variable `B_rim`
 (`eps(FT)`).
 """
 @inline ϵ_numerics_P3_B(FT) = eps(FT)
+
+"""
+    SPECIES_PRESENCE_THRESHOLD
+
+Condensed-mass threshold below which a microphysical species block or P3 ice
+category is treated as absent. Applied to specific contents [kg/kg] in the
+Rosenbrock species mask and to volumetric contents [kg/m³] in the P3
+multi-category routines.
+"""
+const SPECIES_PRESENCE_THRESHOLD = 1e-10
 
 
 """

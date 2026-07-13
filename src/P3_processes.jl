@@ -1026,16 +1026,22 @@ end
 
 
 """
+    collision_cross_section_ice_ice(state_1, D_1, state_2, D_2)
     collision_cross_section_ice_ice(state, D_1, D_2)
 
-Ice-ice collision cross-section [m²], `π (r(D_1) + r(D_2))²`, where the ice
-effective radius is `r(D) = √(ice_area(state, D) / π)`; see [`ice_area`](@ref).
-Used in [`ice_self_collection`](@ref).
+Ice-ice collision cross-section [m²], `π (r₁(D_1) + r₂(D_2))²`, where the ice
+effective radius is `rₖ(D) = √(ice_area(stateₖ, D) / π)`; see [`ice_area`](@ref).
+The three-argument method uses a single `state` for both particles (equal-state
+collisions), used in [`ice_self_collection`](@ref); the four-argument method
+takes distinct states for the two particles, used in inter-category collection
+([`inter_category_collection`](@ref)).
 """
-function collision_cross_section_ice_ice(state, D_1, D_2)
-    r_eff(D) = √(ice_area(state, D) / π)
-    return π * (r_eff(D_1) + r_eff(D_2))^2  # collision cross section
+function collision_cross_section_ice_ice(state_1, D_1, state_2, D_2)
+    r_eff(state, D) = √(ice_area(state, D) / π)
+    return π * (r_eff(state_1, D_1) + r_eff(state_2, D_2))^2  # collision cross section
 end
+collision_cross_section_ice_ice(state, D_1, D_2) =
+    collision_cross_section_ice_ice(state, D_1, state, D_2)
 
 """
     ice_self_collection(state, shape, vel, ρₐ; [quad])
