@@ -304,7 +304,9 @@ end
 @inline function Chen2022_vel_coeffs(coeffs::CMP.Chen2022VelTypeSmallIce, ρₐ, ρᵢ)
     FT = eltype(coeffs)
     (; A, B, C, E, F, G) = coeffs
-    ρₐ = max(ρₐ, zero(ρₐ))
+    # The ice-density exponent `As` is negative, so `ρₐ` is floored to a small positive
+    # value: a zero or negative sub-domain density would give non-finite coefficients.
+    ρₐ = max(ρₐ, FT(1e-4))
     # Table B3 - cache sqrt for reuse
     log_ρᵢ = log(ρᵢ)
     sqrt_ρᵢ = sqrt(ρᵢ)
@@ -327,7 +329,9 @@ end
 @inline function Chen2022_vel_coeffs(coeffs::CMP.Chen2022VelTypeLargeIce, ρₐ, ρᵢ)
     FT = eltype(coeffs)
     (; A, B, C, E, F, G, H) = coeffs
-    ρₐ = max(ρₐ, zero(ρₐ))
+    # The ice-density exponent `Al` can be non-positive, so `ρₐ` is floored to a small
+    # positive value: a zero or negative sub-domain density would give non-finite coefficients.
+    ρₐ = max(ρₐ, FT(1e-4))
     # Table B5 - cache sqrt for reuse
     log_ρᵢ = log(ρᵢ)
     sqrt_ρᵢ = sqrt(ρᵢ)
