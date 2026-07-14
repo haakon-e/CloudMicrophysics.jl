@@ -158,15 +158,20 @@ Transform the volumetric number and sixth moments into the advected variable
 quantity, rather than `ρz_ice` directly, preserves the moment ratios (and hence
 μ) under linear transport.
 """
-@inline advected_reflectivity(ρn_ice, ρz_ice) = sqrt(ρn_ice * ρz_ice)
+@inline advected_reflectivity(ρn_ice, ρz_ice) = sqrt(max(ρn_ice * ρz_ice, zero(ρn_ice * ρz_ice)))
 
 """
-    reflectivity_from_advected(ρz_adv, ρn_ice, n_presence)
+    reflectivity_from_advected(moments::ThreeMoment, ρz_adv, ρn_ice)
 
-Recover the volumetric sixth moment `ρz_ice = ρz_adv² / max(ρn_ice, n_presence)`
-from the advected variable. `n_presence` is the number presence scale flooring
-the `0/0` at vanishing number. The round trip with
-[`advected_reflectivity`](@ref) is the identity for `ρn_ice ≥ n_presence`; the
-state construction re-imposes the window clamp on the recovered value.
+Recover the volumetric sixth moment `ρz_ice` from the advected variable `ρz_adv`,
+clamping `ρz_adv` into the admissible window `[√zn_lo, √zn_hi] · max(ρn_ice, 0)`
+before inverting: `ρz_ice = ρz_adv² / max(ρn_ice, n_presence)`. The window keeps
+the recovered moment consistent with the number content and finite when transport
+drives `ρn_ice` toward zero while `ρz_adv` lags. The round trip with
+[`advected_reflectivity`](@ref) is the identity for in-window `ρn_ice ≥ n_presence`.
 """
-@inline reflectivity_from_advected(ρz_adv, ρn_ice, n_presence) = ρz_adv^2 / max(ρn_ice, n_presence)
+@inline function reflectivity_from_advected(moments::CMP.ThreeMoment, ρz_adv, ρn_ice)
+    ρn⁺ = max(ρn_ice, zero(ρn_ice))
+    ρz_adv_windowed = clamp(ρz_adv, sqrt(moments.zn_lo) * ρn⁺, sqrt(moments.zn_hi) * ρn⁺)
+    return ρz_adv_windowed^2 / max(ρn_ice, moments.n_presence)
+end

@@ -190,12 +190,20 @@ function test_3m_onset(FT)
             end
         end
 
-        # ForwardDiff: recovery ρz = ρz_adv²/max(ρn, n_presence) has a bounded
-        # derivative in ρn near onset, floored by the number presence scale.
-        n_presence = FT(1e-3)
+        # ForwardDiff: the windowed recovery has a bounded derivative in ρn near
+        # onset, floored by the number presence scale.
+        moments = params.moments
         ρz_adv = P3.advected_reflectivity(N, Z0)
-        drecov = FD.derivative(ρn -> P3.reflectivity_from_advected(ρz_adv, ρn, n_presence), FT(0))
+        drecov = FD.derivative(ρn -> P3.reflectivity_from_advected(moments, ρz_adv, ρn), FT(0))
         @test isfinite(drecov)
+
+        # A transport-decoupled advected variable (large ρz_adv while ρn_ice → 0)
+        # recovers to a finite, in-window sixth moment rather than overflowing.
+        for ρn in FT.((0.0, 1e-8, 1e-3, 1e5))
+            ρz = P3.reflectivity_from_advected(moments, FT(2e14), ρn)
+            @test isfinite(ρz) && ρz ≥ 0
+            @test ρz ≤ moments.zn_hi * max(ρn, moments.n_presence) * (1 + 8 * eps(FT))
+        end
 
         # The growth coefficients stay finite as ρq_ice → 0 (mean-mass band).
         for q in FT.((0.0, 1e-12, 1e-8))
