@@ -138,6 +138,12 @@ unchanged:
     return (; ∂ₜN_j, ∂ₜq_j, ∂ₜq_rim_j, ∂ₜb_rim_j, ∂ₜz_j)
 end
 
+# Core-PSD view of a frozen shape: the shared μ with the ice-core slope. The
+# destination and merge similarity metrics are evaluated on the frozen core
+# (`logλ_core == logλ` when liquid is off).
+@inline _core_shape(shape::P3Shape) =
+    P3Shape(; logλ = shape.logλ_core, μ = shape.μ, logλ_core = shape.logλ_core)
+
 """
     icecat_destination(states, shapes, D_new, icp)
 
@@ -158,7 +164,9 @@ A category is populated when `state.ρq_ice` exceeds the presence threshold
 `D_new` must use the same mean-diameter definition as [`D_m`](@ref) (the
 mass-weighted mean diameter); the reference Fortran computes its `D_new` as the
 equivalent mean-mass sphere diameter, a different moment of the distribution,
-and mixing the two definitions degrades the selection metric. Pure over the
+and mixing the two definitions degrades the selection metric. The per-category
+mean diameters are evaluated on the frozen core (the shared μ with the ice-core
+slope), so the liquid on ice does not enter the selection metric. Pure over the
 `N`-tuples of states and shapes; `N = 1` returns 1.
 """
 @inline function icecat_destination(
@@ -174,7 +182,7 @@ and mixing the two definitions degrades the selection metric. Pure over the
     for k in 1:N
         if states[k].ρq_ice > ϵ_pres
             n_present += 1
-            diff = abs(D_m(states[k], shapes[k]) - D_new)
+            diff = abs(D_m(states[k], _core_shape(shapes[k])) - D_new)
             if diff < mindiff
                 mindiff = diff
                 i_mindiff = k
@@ -206,10 +214,14 @@ end
 @inline function _category_prognostic(state::P3State)
     ρq_rim = state.F_rim * state.ρq_ice
     ρb_rim = iszero(state.ρ_rim) ? zero(ρq_rim) : ρq_rim / state.ρ_rim
-    return SA.SVector(state.ρq_ice, state.ρn_ice, ρq_rim, ρb_rim, state.ρz_ice)
+    # from: F_liq = ρq_liq / (ρq_ice + ρq_liq); zero when liquid is off
+    ρq_liq_on_ice = state.ρq_ice * (state.F_liq / (1 - state.F_liq))
+    return SA.SVector(state.ρq_ice, state.ρn_ice, ρq_rim, ρb_rim, ρq_liq_on_ice, state.ρz_ice)
 end
-@inline _prognostic_namedtuple(v) =
-    (; ρq_ice = v[1], ρn_ice = v[2], ρq_rim = v[3], ρb_rim = v[4], ρz_ice = v[5])
+@inline _prognostic_namedtuple(v) = (;
+    ρq_ice = v[1], ρn_ice = v[2], ρq_rim = v[3], ρb_rim = v[4],
+    ρq_liq_on_ice = v[5], ρz_ice = v[6],
+)
 
 """
     merge_categories(states, shapes, icp)
@@ -219,14 +231,18 @@ converged in mean size and bulk density
 ([Milbrandt and Morrison (2016)](@cite MilbrandtMorrison2016), section 2b(3)).
 Two adjacent populated categories are merged when both the mean-mass-diameter
 difference is below `icp.ΔD_merge` and the [`mean_ice_density`](@ref) difference
-is below `icp.Δρ_merge`. Merging sums the prognostic quantities (ice mass,
-number, rime mass, rime volume, and reflectivity) into the lower-index category
-and zeros the higher-index one. Reflectivity sums additively on merge
-([Milbrandt et al. (2021)](@cite MilbrandtEtAl2021)).
+is below `icp.Δρ_merge`; both metrics are evaluated on the frozen core (the
+shared μ with the ice-core slope), consistent with the destination metric, so
+the liquid on ice does not enter the criterion. Merging sums the extensive
+prognostic quantities (ice mass, number, rime mass, rime volume, liquid mass on
+ice, and reflectivity) into the lower-index category and zeros the higher-index
+one: the liquid rides along with its category. Reflectivity sums additively on
+merge ([Milbrandt et al. (2021)](@cite Milbrandt2021)).
 
 Pure over the `N`-tuples of states and shapes. Returns an `N`-tuple of
-`NamedTuple`s `(; ρq_ice, ρn_ice, ρq_rim, ρb_rim, ρz_ice)`, the merged
-prognostic quantities per category, with `ρz_ice = 0` under two-moment ice.
+`NamedTuple`s `(; ρq_ice, ρn_ice, ρq_rim, ρb_rim, ρq_liq_on_ice, ρz_ice)`, the
+merged prognostic quantities per category, with `ρq_liq_on_ice = 0` when the
+liquid treatment is off and `ρz_ice = 0` under two-moment ice.
 A category participates in merging when `state.ρq_ice` exceeds the presence
 threshold
 [`UT.SPECIES_PRESENCE_THRESHOLD`](@ref CloudMicrophysics.Utilities.SPECIES_PRESENCE_THRESHOLD).
@@ -246,8 +262,8 @@ diverges here, reusing its `ΔD_init` and testing only the diameter condition.
     ϵ_pres = FT(UT.SPECIES_PRESENCE_THRESHOLD)
     present = map(s -> s.ρq_ice > ϵ_pres, states)
     # criterion metrics only for present categories; absent ones take inert zeros
-    D = ntuple(k -> present[k] ? D_m(states[k], shapes[k]) : zero(FT), Val(N))
-    ρ = ntuple(k -> present[k] ? mean_ice_density(states[k], shapes[k]) : zero(FT), Val(N))
+    D = ntuple(k -> present[k] ? D_m(states[k], _core_shape(shapes[k])) : zero(FT), Val(N))
+    ρ = ntuple(k -> present[k] ? mean_ice_density(states[k], _core_shape(shapes[k])) : zero(FT), Val(N))
 
     # merge_pair[k] (k ≥ 2): categories k and k-1 satisfy the merge criterion
     merge_pair = ntuple(Val(N)) do k
@@ -264,7 +280,7 @@ diverges here, reusing its `ΔD_init` and testing only the diameter condition.
         r
     end
     # each category accumulates the prognostics of every category collapsing into it
-    z = zero(SA.SVector{5, FT})
+    z = zero(SA.SVector{6, FT})
     return ntuple(Val(N)) do m
         acc = z
         for k in 1:N

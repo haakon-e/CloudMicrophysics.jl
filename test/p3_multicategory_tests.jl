@@ -431,6 +431,44 @@ function test_merge_categories(FT)
     end
 end
 
+
+function test_merge_liquid(FT)
+    @testset "merge: liquid mass on ice rides along" begin
+        params = CMP.ParametersP3(FT; liquid = :predicted)
+        icp = CMP.InterCategoryParams(FT; n_categories = 3)
+        mk(F_liq) = P3.P3State(params, FT(5e-4), FT(1e5), FT(0.3), FT(400), F_liq)
+        # two categories with similar frozen cores and different liquid
+        # fractions, plus an empty slot
+        states = (mk(FT(0.25)), mk(FT(0.1)), P3.P3State(params, FT(0), FT(0), FT(0), FT(400)))
+        shapes = map(P3.get_distribution_shape, states)
+        prog = map(st -> P3._prognostic_namedtuple(P3._category_prognostic(st)), states)
+        merged = @inferred P3.merge_categories(states, shapes, icp)
+        # the similar cores merge and the liquid sums exactly with its category
+        @test merged[1].ρq_liq_on_ice === prog[1].ρq_liq_on_ice + prog[2].ρq_liq_on_ice
+        @test merged[2].ρq_ice == 0 && merged[2].ρq_liq_on_ice == 0
+        for k in (:ρq_ice, :ρn_ice, :ρq_rim, :ρb_rim, :ρq_liq_on_ice, :ρz_ice)
+            @test sum(m -> getproperty(m, k), merged) ≈ sum(p -> getproperty(p, k), prog)
+        end
+        # well-separated cores stay unmerged regardless of the liquid
+        far = (mk(FT(0.25)), P3.P3State(params, FT(3e-3), FT(5e3), FT(0.6), FT(700), FT(0.1)))
+        fshapes = map(P3.get_distribution_shape, far)
+        fmerged = P3.merge_categories(far, fshapes, icp)
+        @test fmerged[1].ρq_ice ≈ far[1].ρq_ice
+        @test fmerged[2].ρq_ice ≈ far[2].ρq_ice
+        @test fmerged[1].ρq_liq_on_ice === P3._prognostic_namedtuple(P3._category_prognostic(far[1])).ρq_liq_on_ice
+        # the similarity metrics are evaluated on the frozen core: at zero
+        # liquid they match the dry configuration to solver tolerance
+        rtol = FT === Float32 ? FT(1e-3) : FT(1e-5)
+        pd = CMP.ParametersP3(FT)
+        st0 = P3.P3State(params, FT(5e-4), FT(1e5), FT(0.3), FT(400), FT(0))
+        sh0 = P3.get_distribution_shape(st0)
+        std = P3.P3State(pd, FT(5e-4), FT(1e5), FT(0.3), FT(400))
+        shd = P3.get_distribution_shape(std)
+        @test P3.D_m(st0, P3._core_shape(sh0)) ≈ P3.D_m(std, shd) rtol = rtol
+        @test P3.mean_ice_density(st0, P3._core_shape(sh0)) ≈ P3.mean_ice_density(std, shd) rtol = rtol
+    end
+end
+
 # Packed multi-category entry arguments: `cats` are the per-category prognostic
 # NamedTuples; shapes are diagnosed per category.
 function _ncat_entry_args(FT, cats, mode...; kw...)
@@ -709,6 +747,7 @@ end
     test_intercategory_collection(FT)
     test_icecat_destination(FT)
     test_merge_categories(FT)
+    test_merge_liquid(FT)
     test_ncat_params(FT)
     test_ncat1_equivalence(FT)
     test_ncat2_intercategory_conservation(FT)

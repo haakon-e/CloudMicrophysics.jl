@@ -99,7 +99,8 @@ Following the two-condition criterion of [MilbrandtMorrison2016](@cite), section
 ```
 
 where ``\rho_i`` is the mean bulk density (ice mass over equivalent-sphere volume; see [`mean_ice_density`](@ref CloudMicrophysics.P3Scheme.mean_ice_density)).
-Merging sums every prognostic quantity into the lower-index category and zeros the higher-index one; reflectivity sums additively ([Milbrandt2021](@cite)).
+Both similarity metrics are evaluated on the frozen core (the shared ``\mu`` with the ice-core slope), consistent with the destination metric and the ice-phase basis of [MilbrandtMorrison2016](@cite); the liquid on ice does not enter the criterion.
+Merging sums every extensive prognostic quantity — ice mass, number, rime mass, rime volume, liquid mass on ice, and reflectivity — into the lower-index category and zeros the higher-index one: the liquid rides along with its category, and reflectivity sums additively ([Milbrandt2021](@cite)).
 
 The reference Fortran diverges from the paper here: it reuses ``\Delta D_{init}`` as the merge diameter threshold and applies only the diameter condition, omitting the density condition.
 This implementation follows the two-condition paper form with the paper's fixed ``150 \; \mu\mathrm{m}`` and ``100 \; \mathrm{kg\,m^{-3}}`` thresholds.
@@ -145,6 +146,10 @@ Outside the entry, the host is responsible for:
   velocities evaluated from its own state and shape; there is no cross-category coupling in sedimentation.
 - Calling [`merge_categories`](@ref CloudMicrophysics.P3Scheme.merge_categories) after sedimentation to collapse
   converged categories; merging is not part of the tendency entry, which only routes sources.
+  The merge returns per-category `(; ρq_ice, ρn_ice, ρq_rim, ρb_rim, ρq_liq_on_ice, ρz_ice)`: the host
+  overwrites every per-category prognostic from the returned tuple, including the liquid mass on ice
+  (summed with its category on merge; zero when the liquid treatment is off) and the reflectivity
+  (from which the host rebuilds its advected variable).
 - Positivity per category: the host floors every per-category prognostic independently, exactly as for a single
   category.
 
