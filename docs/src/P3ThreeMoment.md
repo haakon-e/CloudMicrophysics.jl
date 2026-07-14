@@ -269,6 +269,27 @@ The sixth-moment sedimentation velocity is
 [`ice_terminal_velocity_reflectivity_weighted`](@ref)`(velocity_params, ρ, state, shape)`,
 and the outbound transform is [`advected_reflectivity`](@ref)`(ρn_ice, ρz_ice)`.
 
+### Tendency application on the advected variable
+
+The host stores ``\rho z_\mathrm{adv}`` and applies tendencies additively, so the cache
+fill expresses the reflectivity rate as the net change of the advected variable over the
+step, computed from the returned number and reflectivity rates:
+
+```math
+\partial_t \rho z_\mathrm{adv} = \frac{
+    \sqrt{(\rho n + \Delta t\, \partial_t \rho n)(\rho z + \Delta t\, \partial_t \rho z)}
+    - \sqrt{\rho n\, \rho z}
+}{\Delta t},
+```
+
+with ``\partial_t \rho n = \rho\, \mathtt{dn\_ice\_dt}`` and
+``\partial_t \rho z = \rho\, \mathtt{dz\_ice\_dt}``.
+Additive application then lands exactly on
+[`advected_reflectivity`](@ref) of the microphysics-updated moments — the
+reference's in/out conversion around the microphysics expressed as a tendency —
+so the moment ratios seen by the next cache fill are those the scheme produced,
+with no linearization error in the transform.
+
 Inside the entry, the reflectivity tendency assembles as the constant-μ growth
 term over the net growth/decay ice rates plus the initiation terms:
 deposition nucleation (monodisperse at ``D_{nuc}`` with ``\mu_{init}``), cloud

@@ -275,6 +275,73 @@ function test_joint_jacobian_sweep(FT)
     end
 end
 
+
+function test_joint_terminal_velocities(FT)
+    @testset "Joint sedimentation velocities (shape-taking and prognostic wrappers)" begin
+        tps = TDI.TD.Parameters.ThermodynamicsParameters(FT)
+        mp = CMP.Microphysics2MParams(
+            FT;
+            with_ice = true,
+            is_limited = true,
+            moments = :three_moment,
+            liquid = :predicted,
+        )
+        mp2 = CMP.Microphysics2MParams(FT; with_ice = true, is_limited = true, liquid = :predicted)
+        p3 = mp.ice.scheme
+        p32 = mp2.ice.scheme
+        vel = mp.ice.terminal_velocity
+        quad = mp.ice.quad
+        ρₐ = FT(0.9)
+        for (q_ice, n_ice, F_rim, ρ_rim, F_liq) in (
+            (FT(1e-4), FT(2e5), FT(0.3), FT(500), FT(0.25)),
+            (FT(8e-4), FT(5e4), FT(0.7), FT(700), FT(0.1)),
+        )
+            ρq_ice = q_ice * ρₐ
+            ρn_ice = n_ice * ρₐ
+            ρq_rim = F_rim * ρq_ice
+            ρb_rim = ρq_rim / ρ_rim
+            ρq_liq = F_liq * ρq_ice / (1 - F_liq)
+
+            # matched two-moment liquid reference state and shape
+            st2 = P3.state_from_prognostic(p32, ρq_ice, ρn_ice, ρq_rim, ρb_rim, ρq_liq)
+            sh2 = P3.get_distribution_shape(st2)
+            # joint state with the sixth moment matched to the reference shape
+            Z = ρn_ice * exp(SF.loggamma(sh2.μ + 7) - SF.loggamma(sh2.μ + 1) - 6 * sh2.logλ)
+            st = P3.state_from_prognostic(p3, ρq_ice, ρn_ice, ρq_rim, ρb_rim, ρq_liq, Z)
+            sh = P3.get_distribution_shape(st)
+
+            # shape-taking forms (the host call under three-moment ice)
+            vn = P3.ice_terminal_velocity_number_weighted(vel, ρₐ, st, sh; quad)
+            vm = P3.ice_terminal_velocity_mass_weighted(vel, ρₐ, st, sh; quad)
+            vz = P3.ice_terminal_velocity_reflectivity_weighted(vel, ρₐ, st, sh)
+            @test isfinite(vn) && vn > 0
+            @test isfinite(vm) && vm > 0
+            @test isfinite(vz) && vz > 0
+
+            # prognostic wrappers with the frozen shape trailing (the broadcast
+            # host call); the wrapper state carries no sixth moment, which the
+            # given shape already encodes
+            vn_w = P3.ice_terminal_velocity_number_weighted_from_prognostic(
+                vel, ρₐ, p3, ρq_ice, ρn_ice, ρq_rim, ρb_rim, ρq_liq, sh; quad,
+            )
+            vm_w = P3.ice_terminal_velocity_mass_weighted_from_prognostic(
+                vel, ρₐ, p3, ρq_ice, ρn_ice, ρq_rim, ρb_rim, ρq_liq, sh; quad,
+            )
+            @test vn_w === vn
+            @test vm_w === vm
+
+            # consistency with the two-moment liquid velocities at the matched
+            # state: the joint solve recovers the reference shape to solver
+            # tolerance, so the weighted velocities agree
+            rtol = FT === Float32 ? FT(2e-2) : FT(2e-3)
+            vn2 = P3.ice_terminal_velocity_number_weighted(vel, ρₐ, st2, sh2; quad)
+            vm2 = P3.ice_terminal_velocity_mass_weighted(vel, ρₐ, st2, sh2; quad)
+            @test vn ≈ vn2 rtol = rtol
+            @test vm ≈ vm2 rtol = rtol
+        end
+    end
+end
+
 for FT in (Float64, Float32)
     test_joint_monotonicity(FT)
     test_joint_roundtrip(FT)
@@ -283,4 +350,5 @@ for FT in (Float64, Float32)
     test_joint_entry(FT)
     test_joint_conservation(FT)
     test_joint_jacobian_sweep(FT)
+    test_joint_terminal_velocities(FT)
 end

@@ -219,18 +219,21 @@ end
 """
     get_μ(slope::CMP.SlopeLaw, logλ)
     get_μ(state::P3State, logλ)
-    
-Compute the slope parameter μ
+
+Compute the shape parameter μ from the slope law. The state form is defined for
+[`CMP.TwoMoment`](@ref) ice only; under [`CMP.ThreeMoment`](@ref) ice μ is a
+free diagnosis carried on the frozen [`P3Shape`](@ref), not a function of
+`logλ`.
 
 # Arguments
 - `slope`: [`CMP.SlopeLaw`](@ref) object, or
-- `state`: [`P3State`](@ref) object, or
-- `params`: [`CMP.ParametersP3`](@ref) object
+- `state`: [`P3State`](@ref) object with a two-moment closure
 - `logλ`: The log of the slope parameter [log(1/m)]
 """
 get_μ((; a, b, c, μ_max)::CMP.SlopePowerLaw, logλ) = clamp(a * exp(logλ)^b - c, 0, μ_max)
 get_μ((; μ)::CMP.SlopeConstant, logλ...) = μ
-get_μ((; params)::P3State, logλ) = get_μ(params.moments.slope, logλ)
+get_μ(state::P3State{<:Any, <:CMP.ParametersP3{<:Any, <:CMP.TwoMoment}}, logλ) =
+    get_μ(state.params.moments.slope, logλ)
 
 """
     logmass_gamma_moment(state, logλ; [n=0])

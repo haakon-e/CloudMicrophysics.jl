@@ -294,7 +294,9 @@ function _terminal_velocity_mass_weighted(
 
     bnds = velocity_integral_bounds(state, shape, v_term; p)
     integ = integrate(P3MixedMassWeightedIntegrand(n, v_term, state), bnds, quad)
-    represented_mass = ρn_ice * exp(logLdivN_whole(state, shape.logλ, F_liq))
+    # The frozen shape's μ enters explicitly: under three-moment ice μ is not
+    # a function of logλ.
+    represented_mass = ρn_ice * exp(logLdivN_whole(state, shape.μ, shape.logλ, F_liq))
     return integ / max(ρq_tot, represented_mass, floatmin(eltype(state)))
 end
 
