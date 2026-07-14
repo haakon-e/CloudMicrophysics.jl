@@ -1289,9 +1289,11 @@ function _p3_bit_identity_hash(vals::Vector{FT}) where {FT}
     return h
 end
 
-# Captured at the foundation base commit dd26bc32.
+# Re-baselined after the value-lane branch-guard fixes (differentiated zeros
+# select the primal branch); previous baseline at the foundation base dd26bc32
+# was (0x89c023ee67cce5b7, 0x50df586fb4467f48).
 const _P3_BIT_IDENTITY_GOLDEN =
-    Dict{DataType, UInt64}(Float64 => 0x89c023ee67cce5b7, Float32 => 0x50df586fb4467f48)
+    Dict{DataType, UInt64}(Float64 => 0xcf3d1f5482548ddf, Float32 => 0xdb0584ac8ef32b6b)
 
 function test_p3_bit_identity(FT)
     @testset "Bit-identity regression (default 2M+P3 config)" begin

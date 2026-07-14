@@ -150,6 +150,14 @@ Outside the entry, the host is responsible for:
 
 The Rosenbrock substep driver supports `rosenbrock_exact()` for any category count; `rosenbrock_manual()` and
 `Verbose` throw for more than one category.
+The substep loop stays finite at zero-number-with-mass states (which inter-category collection produces on a
+collector, whose mass grows at unchanged number): the differentiated evaluation reads its branch guards from
+the value lane, and a non-finite Jacobian routes the substep to a forward-Euler update on the primal tendency.
+There is no per-process transfer cap (the reference's per-collectee `q/Δt` caps are timestep clipping and are
+intentionally not part of the instantaneous rates), so at coarse steps with several categories the accumulated
+warm-block sinks can overdraw cloud or rain within a step; overdraw protection rests on the substep positivity
+floor and the host's floors, and coarse-step configurations may need more substeps.
+Whether an explicit cap is needed will be decided from the box A/B campaign.
 The substep loop and the instantaneous entry are allocation-free for every supported layout: above the
 StaticArrays public-solve cutoff (state lengths over 14) the substep system is solved through the
 size-independent static LU kernel, which keeps the larger layouts (for example two three-moment

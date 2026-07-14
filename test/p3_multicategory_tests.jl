@@ -609,12 +609,10 @@ function test_ncat_entry_gates(FT)
         trial = BT.@benchmark $(BMT.bulk_microphysics_tendencies)($argse...) samples = 20 evals = 1
         @test trial.memory == 0
 
-        # rosenbrock_exact finiteness over a small grid. The near-empty corner
-        # (mass scale 1e-3 at 250 K) is excluded: the substep trajectory
-        # reaches a zero-number state with mass where the differentiated
-        # tendency is non-finite in the value lane and poisons the Euler
-        # fallback, a fragility shared with the single-category driver.
-        for T in (FT(250), FT(263), FT(275)), scale in (FT(1), FT(1e-2))
+        # rosenbrock_exact finiteness over a small grid, including the
+        # near-empty cold corner where the substep trajectory reaches a
+        # zero-number state with mass
+        for T in (FT(250), FT(263), FT(275)), scale in (FT(1), FT(1e-2), FT(1e-3))
             c1 = map(x -> x * scale, _ncat_cat1(FT))
             c2 = map(x -> x * scale, _ncat_cat2(FT))
             a = _ncat_entry_args(FT, (c1, c2), BMT.rosenbrock_exact()).args

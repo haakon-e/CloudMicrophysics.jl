@@ -602,7 +602,7 @@ The velocities and the rain velocity-curve coefficients come from the
     D_min, D_max = bounds_r
     zero_rates = (zero(FT), zero(FT), zero(FT))
     function liquid_integrals(Dᵢ)
-        if iszero(N₀r) || !(D_max > D_min)
+        if iszero(FD.value(N₀r)) || !(D_max > D_min)
             return zero_rates
         end
         v_i_at_Dᵢ = v_i(Dᵢ)
@@ -667,7 +667,7 @@ A tuple of 8 integrands, see [`∫liquid_ice_collisions`](@ref) for details.
         ∂ₜM_col = ∂ₜM_c_col + ∂ₜM_r_col  # [kg / s]
 
         ∂ₜM_frz = min(∂ₜM_col, ∂ₜM_max(Dᵢ))
-        f_frz = iszero(∂ₜM_col) ? zero(∂ₜM_frz) : ∂ₜM_frz / ∂ₜM_col
+        f_frz = iszero(FD.value(∂ₜM_col)) ? zero(∂ₜM_frz) : ∂ₜM_frz / ∂ₜM_col
         𝟙_wet = ∂ₜM_col > ∂ₜM_frz  # Used for wet densification
 
         n = n_i(Dᵢ)
@@ -825,7 +825,7 @@ function wet_growth_onset_diameter(
     (; N₀r, Dr_mean) = CM2.pdf_rain_parameters(psd_r, L_r / ρₐ, ρₐ, N_r)
     ai, bi, ci = SA.SVector(v_l.ai), SA.SVector(v_l.bi), SA.SVector(v_l.ci)
     D_min_r, D_max_r = bounds_r
-    rain_active = !iszero(N₀r) && (D_max_r > D_min_r)
+    rain_active = !iszero(FD.value(N₀r)) && (D_max_r > D_min_r)
 
     function excess_mass_rate(D)
         v = v_i(D)
@@ -955,7 +955,7 @@ the [P3 liquid-fraction documentation](@ref P3-liquid-fraction).
     (QCFRZ, QCSHD, NCCOL, QRFRZ, QRSHD, NRCOL, ∫∂ₜM_col, BCCOL, BRCOL, ∫𝟙_wet_M_col) = rates
 
     # Bulk wet growth fraction
-    f_wet = iszero(∫∂ₜM_col) ? zero(∫∂ₜM_col) : ∫𝟙_wet_M_col / ∫∂ₜM_col
+    f_wet = iszero(FD.value(∫∂ₜM_col)) ? zero(∫∂ₜM_col) : ∫𝟙_wet_M_col / ∫∂ₜM_col
 
     # Shedding of rain
     # QRSHD = ∫∂ₜM_col - (QCFRZ + QRFRZ)
@@ -964,7 +964,7 @@ the [P3 liquid-fraction documentation](@ref P3-liquid-fraction).
 
     # Densification of rime
     (; ρq_ice, F_rim, ρ_rim) = state
-    B_rim = iszero(ρ_rim) ? zero(ρ_rim) : (ρq_ice * F_rim) / ρ_rim  # from: ρ_rim = L_rim / B_rim
+    B_rim = iszero(FD.value(ρ_rim)) ? zero(ρ_rim) : (ρq_ice * F_rim) / ρ_rim  # from: ρ_rim = L_rim / B_rim
     QIWET = f_wet * ρq_ice * (1 - F_rim) / τ_wet   # densification of rime mass
     BIWET = f_wet * (ρq_ice / ρ_i - B_rim) / τ_wet  # densification of rime volume
 

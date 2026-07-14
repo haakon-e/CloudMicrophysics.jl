@@ -556,7 +556,9 @@ tendency cache (droplet activation is added by the host, not the substep loop).
             d = if all(isfinite, J)
                 _rosenbrock_update(x, f, J, z, h) - x
             else
-                _euler_update(x, f, h) - x
+                # The fallback consumes the primal tendency when the
+                # differentiated evaluation is non-finite in the value lane.
+                _euler_update(x, all(isfinite, f) ? f : g(x), h) - x
             end
             d = _apply_limiter(mode.limiter, x, d, ρ, Tsub, q_tot, Lv_over_cp, Ls_over_cp, tps)
             x = max.(x .+ d, 0)

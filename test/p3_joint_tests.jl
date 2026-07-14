@@ -202,11 +202,12 @@ function test_joint_jacobian_sweep(FT)
         n_bad = 0
         for q_ice in FT.((1e-5, 1e-4, 1e-3)), F_liq in FT.((0.05, 0.3, 0.6)),
             z_ice in FT.((1e-9, 1e-8, 1e-7)), F_rim in FT.((0.0, 0.5)),
+            n_ice in FT.((2e5, 2e2, 0)),
             T in (mp.ice.scheme.T_freeze - FT(10), mp.ice.scheme.T_freeze + FT(2))
 
             q_rim = F_rim * q_ice
             q_liq = F_liq * q_ice / (1 - F_liq)
-            cat = (; q_ice, n_ice = FT(2e5), q_rim, b_rim = q_rim / FT(700), q_liq_on_ice = q_liq, z_ice)
+            cat = (; q_ice, n_ice, q_rim, b_rim = q_rim / FT(700), q_liq_on_ice = q_liq, z_ice)
             st = P3.state_from_prognostic(
                 p3, cat.q_ice * ρ, cat.n_ice * ρ, cat.q_rim * ρ, cat.b_rim * ρ, cat.q_liq_on_ice * ρ, cat.z_ice * ρ,
             )
