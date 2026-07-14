@@ -3,6 +3,10 @@ import CloudMicrophysics.P3Scheme as P3
 import CloudMicrophysics.Parameters as CMP
 import CloudMicrophysics.BulkMicrophysicsTendencies as BMT
 import CloudMicrophysics.ThermodynamicsInterface as TDI
+import CloudMicrophysics.MicrophysicsNonEq as CMNonEq
+import CloudMicrophysics.Microphysics2M as CM2
+import CloudMicrophysics.HetIceNucleation as CM_HetIce
+import CloudMicrophysics.Common as CO
 import SpecialFunctions as SF
 import ForwardDiff as FD
 import BenchmarkTools as BT
@@ -157,31 +161,75 @@ function test_joint_entry(FT)
     end
 end
 
+# Vapor-side exchange of the joint entry, reconstructed from the public
+# primitives (white-box): warm condensation and rain evaporation, deposition
+# nucleation, and the ramped core/shell vapor exchange. See the liquid-fraction
+# conservation testset for the single-feature counterpart.
+function _joint_vapor_exchange(mp, tps, ρ, T, warm, cat, state)
+    FT = eltype(ρ)
+    (; q_tot, q_lcl, q_rai, n_rai) = warm
+    p3 = mp.ice.scheme
+    liq = p3.liquid
+    sb = mp.warm_rain.seifert_beheng
+    aps = mp.warm_rain.air_properties
+    condevap = mp.warm_rain.condevap
+    subdep = mp.warm_rain.subdep
+    q_liq = cat.q_liq_on_ice
+    q_ice = cat.q_ice
+    q_icl_tot = q_ice + q_liq
+    thermo = (; ρ, T)
+    cond = CMNonEq.conv_q_vap_to_q_lcl(
+        CMP.CloudLiquidFormation(condevap.τ_relax), nothing, tps,
+        (; q_tot, q_lcl, q_icl = q_icl_tot, q_rai, q_sno = zero(q_ice)), thermo,
+    )
+    evap = CM2.rain_evaporation(
+        sb, aps, tps, q_tot, q_lcl, q_icl_tot, q_rai, zero(q_ice), ρ, n_rai * ρ, T,
+    ).∂ₜq_rai
+    τ_act = mp.ice.inp_depletion_model.τ_act
+    D_nuc = FT(10e-6)
+    m_nuc = p3.ρ_i * CO.volume_sphere_D(D_nuc)
+    n_active = CM_HetIce.n_active(mp.ice.inp_depletion_model, cat.n_ice)
+    dep_nuc = CM_HetIce.deposition_rate(
+        mp.ice.ice_nucleation, tps, T, ρ, q_tot, q_lcl + q_rai, q_icl_tot, n_active;
+        m_nuc, τ_act, inpc_log_shift = zero(ρ),
+    ).∂ₜq_frz
+    w = P3.vapor_path_weight(liq, state.F_liq)
+    depsub = CMNonEq.conv_q_vap_to_q_icl(
+        CMP.ConstantTimescale(subdep.τ_relax), nothing, tps,
+        (; q_tot, q_lcl, q_icl = q_ice, q_rai, q_sno = q_liq), thermo,
+    )
+    depsub = ifelse(T > tps.T_freeze, min(depsub, zero(T)), depsub)
+    shell = CMNonEq.conv_q_vap_to_q_lcl(
+        CMP.CloudLiquidFormation(subdep.τ_relax), nothing, tps,
+        (; q_tot, q_lcl = q_liq, q_icl = q_ice, q_rai = q_lcl + q_rai, q_sno = zero(q_ice)), thermo,
+    )
+    return cond + evap + dep_nuc + (1 - w) * depsub + w * shell
+end
+
 function test_joint_conservation(FT)
     @testset "Joint entry water conservation" begin
         rtol = FT === Float32 ? FT(5e-4) : FT(1e-9)
         tps = TDI.TD.Parameters.ThermodynamicsParameters(FT)
-        mp = CMP.Microphysics2MParams(
-            FT;
-            with_ice = true,
-            is_limited = true,
-            moments = :three_moment,
-            liquid = :predicted,
-        )
-        T_frz = mp.ice.scheme.T_freeze
-        # Warm-block-only source: with no cloud/rain water and dry-neutral vapor,
-        # the ice-side transfers conserve the tracked ice + liquid-on-ice water.
+        T_frz = CMP.Microphysics2MParams(FT; with_ice = true).ice.scheme.T_freeze
+        # The total condensed-water tendency equals the vapor-side exchange
+        # (white-box, from the same public primitives), so every internal
+        # ice ⇄ liquid-on-ice ⇄ rain transfer closes.
         for T in (T_frz - FT(20), T_frz + FT(2)), F_liq in (FT(0.1), FT(0.4)),
             (q_ice, z_ice) in ((FT(8e-4), FT(5e-8)), (FT(5e-5), FT(2e-9)))
 
             args = _joint_args(FT; q_ice, F_liq, z_ice, T)
+            (mp, tps_a, ρ) = (args[2], args[3], args[4])
+            warm = (; q_tot = args[6], q_lcl = args[7], n_lcl = args[8], q_rai = args[9], n_rai = args[10])
+            cat = args[11][1]
+            st = P3.state_from_prognostic(
+                mp.ice.scheme, cat.q_ice * ρ, cat.n_ice * ρ, cat.q_rim * ρ, cat.b_rim * ρ,
+                cat.q_liq_on_ice * ρ, cat.z_ice * ρ,
+            )
             t = BMT.bulk_microphysics_tendencies(args...)
-            # Total tracked water tendency (all phases) matches the water the
-            # warm-rain + vapor terms exchange; the internal ice ⇄ liquid ⇄ rain
-            # transfers are conservative by construction, so the sum is finite
-            # and bounded, never a spurious source.
             S = t.dq_lcl_dt + t.dq_rai_dt + t.dq_ice_dt + t.dq_liq_on_ice_dt
-            @test isfinite(S)
+            V = _joint_vapor_exchange(mp, tps_a, ρ, T, warm, cat, st)
+            scale = max(abs(S), abs(V), FT(1e-8))
+            @test abs(S - V) / scale < rtol
         end
     end
 end

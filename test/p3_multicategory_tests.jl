@@ -81,9 +81,11 @@ function test_intercategory_params(FT)
         mp = CMP.Microphysics2MParams(FT; with_ice = true)
         @test mp.ice.inter_category === nothing
         @test CMP.n_categories(mp.ice) == 1
-        # An InterCategoryParams can be attached explicitly.
-        ice = CMP.P3IceParams(FT; inter_category = icp)
+        # An InterCategoryParams is attached with an explicit category count.
+        ice = CMP.P3IceParams(FT; inter_category = icp, n_categories = 2)
         @test ice.inter_category === icp
+        @test CMP.n_categories(ice) == 2
+        @test_throws ArgumentError CMP.P3IceParams(FT; inter_category = icp)
     end
 end
 

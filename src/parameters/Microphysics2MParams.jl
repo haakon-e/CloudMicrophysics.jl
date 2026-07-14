@@ -116,7 +116,10 @@ function P3IceParams(;
     inter_category = nothing,
     inp_depletion_model = NIceProxyDepletion(),
     quad = QUAD.GaussLegendre(Float64, 6),
-    n_categories::Integer = inter_category === nothing ? 1 : 2,
+    # `InterCategoryParams` does not carry the category count it was sized for,
+    # so it must be paired with an explicit `n_categories`.
+    n_categories::Integer = inter_category === nothing ? 1 :
+                            throw(ArgumentError("pass `n_categories` explicitly with `inter_category`")),
 )
     return P3IceParams{Int(n_categories)}(
         scheme, terminal_velocity, cloud_pdf, rain_pdf,
@@ -132,7 +135,8 @@ function P3IceParams(toml_dict::CP.ParamDict;
     moments = :two_moment,
     liquid = :none,
     inter_category = nothing,
-    n_categories = inter_category === nothing ? 1 : 2,
+    n_categories = inter_category === nothing ? 1 :
+                   throw(ArgumentError("pass `n_categories` explicitly with `inter_category`")),
 )
     icp =
         inter_category === nothing && n_categories > 1 ?

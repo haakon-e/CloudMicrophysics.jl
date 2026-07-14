@@ -611,7 +611,9 @@ three-moment solve. μ solves the whole-particle mass residual
 `μ ∈ [0, μ_max]` with the in-residual `logλ` clamp (C23 shared-μ closure). The
 ice-core slope then solves the frozen core at the shared μ
 ([`get_distribution_logλ_core`](@ref)). Reduces bit-for-bit to the dry
-three-moment solve for `(μ, logλ)` at `F_liq = 0`, where `logλ_core = logλ`.
+three-moment solve for `(μ, logλ)` at `F_liq = 0`, where `logλ_core = logλ`; as
+`F_liq → 0⁺` the fixed-iteration core solve is tolerance-continuous with that
+limit, not bitwise.
 """
 function _distribution_shape(moments::CMP.ThreeMoment, ::CMP.PredictedLiquidFraction, state::P3State{FT}) where {FT}
     (; ρn_ice, F_liq) = state

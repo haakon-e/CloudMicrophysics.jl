@@ -309,7 +309,7 @@ its previous output byte for byte.
 ## Joint three-moment predicted-liquid-fraction closure
 
 The three-moment and predicted-liquid-fraction features combine in one code path
-following the combined formulation of Cholette et al. (2023), which builds on the
+following the combined formulation of [Cholette2023](@cite), which builds on the
 three-moment scheme of [Milbrandt2021](@cite).
 The whole-particle number ``N`` and sixth moment ``Z`` are pure gamma moments of
 the whole size distribution regardless of liquid, so the slope is pinned by

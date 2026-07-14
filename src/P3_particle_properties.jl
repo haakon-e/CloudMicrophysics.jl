@@ -13,6 +13,14 @@ This struct bundles the P3 parameterizations `params`, the provided rime state
     Accepts the volumetric prognostic variables `(ρq_ice, ρn_ice, ρq_rim, ρb_rim)`,
     regularises them into `(F_rim, ρ_rim)`, and returns the constructed state.
 
+!!! warn "Treatment-dependent trailing constructor slots"
+    The positional constructor's trailing slots depend on the liquid treatment:
+    `P3State(params, ρq_ice, ρn_ice, F_rim, ρ_rim, ρz_ice)` under
+    `NoLiquidFraction`, but
+    `P3State(params, ρq_ice, ρn_ice, F_rim, ρ_rim, F_liq, ρz_ice)` under
+    `PredictedLiquidFraction`. Prefer [`state_from_prognostic`](@ref), whose
+    trailing slots are unambiguous.
+
 # Fields
 $(FIELDS)
 """
