@@ -25,6 +25,7 @@ import CloudMicrophysics.MicrophysicsNonEq as CMN
 import CloudMicrophysics.Nucleation as MN
 import CloudMicrophysics.P3Scheme as P3
 import CloudMicrophysics.BulkMicrophysicsTendencies as BMT
+import StaticArrays as SA
 
 work_groups = 2
 
@@ -456,6 +457,20 @@ end
         ρ[i], T[i], q_tot[i], q_lcl[i], n_lcl[i], q_rai[i], n_rai[i],
         q_ice[i], n_ice[i], q_rim[i], b_rim[i], logλ, Δt[i], 2,
     )
+end
+
+
+@kernel inbounds = true function test_static_lu_solve_kernel!(output, seed)
+    i = @index(Global, Linear)
+    FT = eltype(output)
+    # Deterministic diagonally dominant 16-state system built in the kernel;
+    # exercises the above-cutoff substep solve (`BMT._static_lu_solve`).
+    A = SA.SMatrix{16, 16, FT}(ntuple(k -> FT(0.1) * sin(FT(k) * seed[i]), Val(256))) +
+        2 * one(SA.SMatrix{16, 16, FT})
+    b = SA.SVector{16, FT}(ntuple(k -> cos(FT(k) * seed[i]), Val(16)))
+    x = BMT._static_lu_solve(A, b)
+    r = A * x - b
+    output[i] = sqrt(sum(r .* r))
 end
 
 @kernel inbounds = true function test_P3_get_distribution_logλ_kernel!(
@@ -1316,6 +1331,16 @@ function test_gpu(FT)
             end
         end
     end  # TT.@testset "Bulk microphysics tendencies kernels"
+
+
+    TT.@testset "static LU solve in kernels (16 states)" begin
+        (; output, ndrange) = setup_output(10, FT)
+        seed = constant_data(FT(0.7); ndrange)
+        kernel! = test_static_lu_solve_kernel!(backend, work_groups)
+        kernel!(output, seed; ndrange)
+        TT.@test all(<(sqrt(eps(FT))), Array(output))
+    end
+
 
     TT.@testset "P3 get_distribution_logλ" begin
         p3_params = CMP.ParametersP3(FT)

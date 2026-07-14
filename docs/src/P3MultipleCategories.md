@@ -150,8 +150,11 @@ Outside the entry, the host is responsible for:
 
 The Rosenbrock substep driver supports `rosenbrock_exact()` for any category count; `rosenbrock_manual()` and
 `Verbose` throw for more than one category.
-The substep linear solve heap-allocates beyond the StaticArrays dense-solve boundary (state lengths above 14,
-e.g. two three-moment liquid-fraction categories); the instantaneous entry is allocation-free for every layout.
+The substep loop and the instantaneous entry are allocation-free for every supported layout: above the
+StaticArrays public-solve cutoff (state lengths over 14) the substep system is solved through the
+size-independent static LU kernel, which keeps the larger layouts (for example two three-moment
+liquid-fraction categories, 16 states) runnable inside GPU kernels, where the public heap-fallback solve
+cannot compile.
 
 ## API
 

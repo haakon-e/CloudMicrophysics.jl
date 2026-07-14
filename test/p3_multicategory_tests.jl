@@ -8,6 +8,7 @@ import ClimaParams as CP
 import BenchmarkTools as BT
 import JET
 import QuadGK as QGK
+import StaticArrays as SA
 
 # Copy a P3State with an injected sixth-moment (reflectivity) content, so the
 # constant-μ inter-category Z hooks can be exercised without the three-moment
@@ -657,6 +658,50 @@ function test_joint_ncat2_smoke(FT)
     end
 end
 
+
+function test_substep_solver(FT)
+    @testset "substep dense solve above the StaticArrays cutoff" begin
+        # Cross-check the internal-API bypass (`BMT._static_lu_solve`, built on
+        # `StaticArrays.__lu`) against the public heap-fallback path, so a
+        # StaticArrays change that breaks the internal kernel fails loudly.
+        s = Ref(UInt64(0x9E3779B97F4A7C15))
+        draw() = (s[] = 6364136223846793005 * s[] + 1442695040888963407; Float64(s[] >> 11) * (2.0^-53))
+        for N in (16, 20, 24, 28)
+            A = SA.SMatrix{N, N, FT}(ntuple(i -> FT(0.2 * (draw() - 0.5)), N * N)) +
+                2 * one(SA.SMatrix{N, N, FT})
+            b = SA.SVector{N, FT}(ntuple(i -> FT(draw() - 0.5), N))
+            x = BMT._static_lu_solve(A, b)
+            xref = SA.SVector{N, FT}(Matrix(A) \ Vector(b))
+            @test x isa SA.SVector{N, FT}
+            @test x ≈ xref rtol = 500 * eps(FT)
+        end
+    end
+end
+
+function test_ncat_substep_alloc(FT)
+    @testset "substep solve allocations across the state layouts" begin
+        base = _ncat_cat1(FT)
+        liqz = (; q_liq_on_ice = FT(3e-5), z_ice = FT(1e-8))
+        joint2 = ((; moments = :three_moment, liquid = :predicted), 2, (; base..., liqz...))  # 16 states
+        configs =
+            FT === Float64 ?
+            (
+                joint2,
+                ((;), 3, base),                                                               # 16 states
+                ((;), 4, base),                                                               # 20 states
+                ((; moments = :three_moment), 4, (; base..., z_ice = FT(1e-8))),              # 24 states
+                ((; moments = :three_moment, liquid = :predicted), 4, (; base..., liqz...)),  # 28 states
+            ) : (joint2,)  # the code path is float-type independent
+        for (kw, ncat, cat) in configs
+            argse = _ncat_entry_args(FT, ntuple(_ -> cat, ncat), BMT.rosenbrock_exact(); kw...).args
+            te = BMT.bulk_microphysics_tendencies(argse...)
+            @test all(isfinite, values(te))
+            trial = BT.@benchmark $(BMT.bulk_microphysics_tendencies)($argse...) samples = 10 evals = 1
+            @test trial.memory == 0
+        end
+    end
+end
+
 @testset "P3 multicategory tests ($FT)" for FT in (Float64, Float32)
     test_intercategory_params(FT)
     test_ordered_category_pairs(FT)
@@ -670,5 +715,7 @@ end
     test_ncat2_destination_routing(FT)
     test_ncat_entry_gates(FT)
     test_joint_ncat2_smoke(FT)
+    test_substep_solver(FT)
+    test_ncat_substep_alloc(FT)
 end
 nothing

@@ -415,7 +415,35 @@ the unclamped increment of right-hand side `v`: `Δ = S (A \\ (S⁻¹ v))`, the
 equilibrated form of `(I/h - P J P)⁻¹ v`. Linear in `v`, so per-process
 increments sum to the full-step increment.
 """
-@inline _rosenbrock_solve(S, S⁻¹, A, v) = S * (A \ (S⁻¹ * v))
+@inline _rosenbrock_solve(S, S⁻¹, A, v) = S * _rosenbrock_ldiv(A, S⁻¹ * v)
+
+"Largest static-vector length for which StaticArrays' `\\` stays allocation-free."
+const STATIC_SOLVE_UNROLL_LIMIT = 14
+
+"""
+    _rosenbrock_ldiv(A, v)
+
+Dense solve `A \\ v` of the substep system: StaticArrays' unrolled solve up to
+[`STATIC_SOLVE_UNROLL_LIMIT`](@ref) states, [`_static_lu_solve`](@ref) above it.
+"""
+@inline _rosenbrock_ldiv(A::SA.SMatrix{N, N, FT}, v::SA.StaticVector{N, FT}) where {N, FT} =
+    N ≤ STATIC_SOLVE_UNROLL_LIMIT ? A \ v : _static_lu_solve(A, v)
+
+"""
+    _static_lu_solve(A::SMatrix{N, N}, b::StaticVector{N})
+
+Allocation-free dense solve `A \\ b` through StaticArrays' static LU kernel and
+triangular substitutions. A singular `A` yields a non-finite solution (as the
+unrolled StaticArrays solve does), handled by the caller's finiteness checks.
+"""
+@inline function _static_lu_solve(A::SA.SMatrix{N, N, FT}, b::SA.StaticVector{N, FT}) where {N, FT}
+    # Internal-API dependency (StaticArrays 1.9.18, src/lu.jl): the public `\`
+    # and `lu` route through a heap `Matrix` above a 14×14 policy cutoff in
+    # `_lu`, while the static `__lu` kernel is size-independent. Cross-checked
+    # against the public path in test/p3_multicategory_tests.jl.
+    L, U, p = SA.__lu(A, Val(true))
+    return LA.UpperTriangular(U) \ (LA.LowerTriangular(L) \ b[p])
+end
 
 """
     _rosenbrock_update(x, f, J, z, h)

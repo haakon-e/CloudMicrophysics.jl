@@ -35,6 +35,7 @@ import ..HetIceNucleation as CM_HetIce
 import ...ThermodynamicsInterface as TDI
 import ..Common as CO
 import ForwardDiff as FD
+import LinearAlgebra as LA
 import StaticArrays as SA
 
 export MicrophysicsScheme,
