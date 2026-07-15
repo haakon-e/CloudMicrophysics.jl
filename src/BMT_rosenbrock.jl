@@ -76,6 +76,30 @@ the primal tendency ([`_per_process_2mp3`](@ref)) and its Jacobian
     (; τ = FT(100), x_min = FT(1e-12), x_max = FT(1e-5))
 
 """
+    _project_ice_mean_mass(x::MicroState2MP3)
+
+Project the ice number onto the mass-consistent range: `n_ice` is clamped to
+`[q_ice / x_max, q_ice / x_min]` so the mean particle mass `q_ice / n_ice`
+stays within the `_ice_numadj_params` bounds after every substep. Continuous
+in value across the projection boundary. Below the mass existence threshold
+the state is unchanged. Follows the P3 Fortran lambda limiter, which adjusts
+the ice number to keep the mean size within the scheme's calibrated range.
+"""
+@inline function _project_ice_mean_mass(x::MicroState2MP3{FT}) where {FT}
+    (; x_min, x_max) = _ice_numadj_params(FT)
+    ϵₘ = UT.ϵ_numerics_2M_M(FT)
+    n_proj = ifelse(
+        x.q_ice < ϵₘ,
+        x.n_ice,
+        clamp(x.n_ice, x.q_ice / x_max, x.q_ice / x_min),
+    )
+    return MicroState2MP3(
+        x.q_lcl, x.n_lcl, x.q_rai, x.n_rai,
+        x.q_ice, n_proj, x.q_rim, x.b_rim,
+    )
+end
+
+"""
     _per_process_2mp3(mp, tps, ρ, T, q_tot,
         q_lcl, n_lcl, q_rai, n_rai, q_ice, n_ice, q_rim, b_rim, logλ)
 
@@ -447,10 +471,10 @@ tendency cache (droplet activation is added by the host, not the substep loop).
                 _euler_update(x, f, h) - x
             end
             d = _apply_limiter(mode.limiter, x, d, ρ, Tsub, q_tot, Lv_over_cp, Ls_over_cp, tps)
-            x = max.(x .+ d, 0)
+            x = _project_ice_mean_mass(max.(x .+ d, 0))
         else
             f = g(x)
-            x = _euler_update(x, f, h)
+            x = _project_ice_mean_mass(_euler_update(x, f, h))
         end
         Δ = x - x_prev
         T_safe = max(150, Tsub)
