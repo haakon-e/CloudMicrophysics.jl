@@ -320,16 +320,20 @@ relates to the 2-moment/P3 thresholds.
 """
     ϵ_numerics_2M_M(FT)
 
-Physical smallness threshold for **2-moment mass** variables (`eps(FT)`).
+Physical smallness threshold for **2-moment mass** variables. A fixed,
+precision-independent value: the physical process rates at this content are
+negligible, so the existence gates act as cost short-circuits rather than a
+physical switch, identically at Float32 and Float64.
 """
-@inline ϵ_numerics_2M_M(FT) = eps(FT)
+@inline ϵ_numerics_2M_M(FT) = FT(1e-12)
 
 """
     ϵ_numerics_2M_N(FT)
 
-Physical smallness threshold for **2-moment number** variables (`eps(FT)`).
+Physical smallness threshold for **2-moment number** variables. Fixed and
+precision-independent; see [`ϵ_numerics_2M_M`](@ref).
 """
-@inline ϵ_numerics_2M_N(FT) = eps(FT)
+@inline ϵ_numerics_2M_N(FT) = FT(1e-12)
 
 """
     ϵ_numerics_P3_B(FT)
