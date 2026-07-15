@@ -288,8 +288,11 @@ Compute the coefficients for the Chen 2022 terminal velocity parametrization.
 See [Chen2022](@cite) for more details.
 """
 @inline function Chen2022_vel_coeffs(coeffs::CMP.Chen2022VelTypeRain, ρₐ)
+    FT = eltype(coeffs)
     (; ρ0, a, a3_pow, b, b_ρ, c) = coeffs
-    ρₐ = max(ρₐ, zero(ρₐ))
+    # The exponent `a3_pow` is negative, so `ρₐ` is floored to a small positive
+    # value: a zero or negative sub-domain density would give non-finite coefficients.
+    ρₐ = max(ρₐ, FT(1e-4))
     # Table B1
     q = exp(ρ0 * ρₐ)
     ai = (a[1] * q, a[2] * q, a[3] * q * ρₐ^a3_pow)
