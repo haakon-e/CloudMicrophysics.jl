@@ -110,6 +110,48 @@ controls size sorting); under [`CMP.TwoMoment`](@ref) the band is fixed at
     (; τ = FT(100), x_min = FT(moments.mean_mass_min), x_max = FT(moments.mean_mass_max))
 
 """
+    _per_process_ice_melt(liquid, vel, aps, tps, T, ρ, state, shape, quad)
+
+The ice-melting per-process contribution to the eight core prognostic species as
+a [`MicroState2MP3`](@ref), for the melt block of [`_per_process_2mp3`](@ref).
+Under [`CMP.NoLiquidFraction`](@ref) the whole melt converts ice to rain; under
+[`CMP.PredictedLiquidFraction`](@ref) the [`CMP3.ice_melt`](@ref) partition
+routes complete melt to rain and the frozen-core mass change to the ice, with
+the retained melt to the liquid on ice held outside the eight-state block.
+"""
+@inline function _per_process_ice_melt(
+    ::CMP.NoLiquidFraction, vel, aps, tps, T, ρ, state, shape, quad,
+)
+    FT = eltype(ρ)
+    o = zero(FT)
+    T_freeze = TDI.TD.Parameters.T_freeze(tps)
+    melt = ifelse(T > T_freeze,
+        CMP3.ice_melt(vel, aps, tps, T, ρ, state, shape; quad),
+        (; dNdt = zero(ρ), dLdt = zero(ρ)),
+    )
+    ∂ₜq_ice_melt = melt.dLdt / ρ
+    ∂ₜn_ice_melt = melt.dNdt / ρ
+    ∂ₜq_rim_melt = -∂ₜq_ice_melt * state.F_rim
+    ∂ₜb_rim_melt = ifelse(state.ρ_rim > 0, -∂ₜq_ice_melt * state.F_rim / state.ρ_rim, zero(FT))
+    return MicroState2MP3{FT}((
+        o, o, ∂ₜq_ice_melt, ∂ₜn_ice_melt, -∂ₜq_ice_melt, -∂ₜn_ice_melt,
+        ∂ₜq_rim_melt, ∂ₜb_rim_melt,
+    ))
+end
+@inline function _per_process_ice_melt(
+    ::CMP.PredictedLiquidFraction, vel, aps, tps, T, ρ, state, shape, quad,
+)
+    FT = eltype(ρ)
+    o = zero(FT)
+    # The partitioned melt rates vanish below freezing.
+    melt = CMP3.ice_melt(vel, aps, tps, T, ρ, state, shape; quad)
+    return MicroState2MP3{FT}((
+        o, o, melt.dLdt_rain / ρ, melt.dNdt_rain / ρ,
+        melt.dLdt_ice / ρ, -melt.dNdt_rain / ρ, melt.dLdt_rim / ρ, melt.dBdt_rim / ρ,
+    ))
+end
+
+"""
     _per_process_2mp3(mp, tps, ρ, T, q_tot,
         q_lcl, n_lcl, q_rai, n_rai, ice, shapes)
 
@@ -243,19 +285,7 @@ sides `f_p` for the linear post-solve attribution and is not differentiated.
         S_ice_agg = CMP3.ice_self_collection(state, shape, vel, ρ; quad)
         ice_aggregation = MicroState2MP3{FT}((o, o, o, o, o, -S_ice_agg.dNdt / ρ, o, o))
 
-        T_freeze = TDI.TD.Parameters.T_freeze(tps)
-        melt = ifelse(T > T_freeze,
-            CMP3.ice_melt(vel, aps, tps, T, ρ, state, shape; quad),
-            (; dNdt = zero(ρ), dLdt = zero(ρ)),
-        )
-        ∂ₜq_ice_melt = melt.dLdt / ρ
-        ∂ₜn_ice_melt = melt.dNdt / ρ
-        ∂ₜq_rim_melt = -∂ₜq_ice_melt * state.F_rim
-        ∂ₜb_rim_melt = ifelse(state.ρ_rim > 0, -∂ₜq_ice_melt * state.F_rim / state.ρ_rim, zero(FT))
-        ice_melting = MicroState2MP3{FT}((
-            o, o, ∂ₜq_ice_melt, ∂ₜn_ice_melt, -∂ₜq_ice_melt, -∂ₜn_ice_melt,
-            ∂ₜq_rim_melt, ∂ₜb_rim_melt,
-        ))
+        ice_melting = _per_process_ice_melt(_liquid(mp), vel, aps, tps, T, ρ, state, shape, quad)
     else
         liquid_ice_collision = Z()
         ice_aggregation = Z()
@@ -523,10 +553,11 @@ tendency cache (droplet activation is added by the host, not the substep loop).
     _validate_packed_categories(mp, ice)
     moments = _moments(mp)
     liquid = _liquid(mp)
-    liquid isa CMP.PredictedLiquidFraction && mode.jacobian isa ManualJacobian &&
+    liquid isa CMP.PredictedLiquidFraction && moments isa CMP.ThreeMoment &&
+        mode.jacobian isa ManualJacobian &&
         throw(
             ArgumentError(
-                "rosenbrock_manual on the 2M+P3 model does not support predicted liquid fraction; use rosenbrock_exact()",
+                "rosenbrock_manual on the 2M+P3 model does not support predicted liquid fraction with three-moment ice; use rosenbrock_exact()",
             ),
         )
     NCAT > 1 && mode.jacobian isa ManualJacobian &&
@@ -1048,6 +1079,64 @@ approximation affects only the implicit damping.
                 zero(FT)
             elseif i == 9
                 c_q * J[5, j] + c_n * J[6, j]
+            else
+                J[i, j]
+            end
+        end,
+    )
+end
+
+"""
+    _tendency_and_jacobian(::ManualJacobian, g, x::MicroState{FT, 1, true, false, 9})
+
+Predicted-liquid-fraction specialization of the manual tendency-and-Jacobian
+pair: the raw tendency `f = g(x)` is evaluated once and passed to the liquid
+[`_jacobian_2mp3_manual`](@ref), which reads the liquid-on-ice slot of `f` for
+its donor-diagonal self-limiting term.
+"""
+@inline function _tendency_and_jacobian(
+    ::ManualJacobian, g::Instantaneous2MP3Tendency, x::MicroState{FT, 1, true, false, 9},
+) where {FT}
+    f = g(x)
+    return (f, _jacobian_2mp3_manual(g, x, f))
+end
+
+"""
+    _jacobian_2mp3_manual(g, x::MicroState{FT, 1, true, false, 9}, f)
+
+Single-category predicted-liquid-fraction extension of the hand-built 2M+P3
+substep Jacobian. The eight-state cloud/rain/ice/rime block is
+[`_jacobian_2mp3_manual`](@ref) evaluated at the leading eight slots, carrying
+its Tier 1 (closed-form) and Tier 2 (donor-diagonal) couplings unchanged.
+
+The liquid-on-ice slot (row and column 9) holds only a Tier 2 donor-diagonal
+term. The predicted-liquid sources into the liquid on ice (retained-liquid
+collision, partitioned melt, liquid-shell condensation) and its mixed-phase
+sinks (refreezing to rime, shedding to rain) are quadrature-shape transfers
+whose shape derivatives are dropped: the quadrature rate is frozen and the net
+liquid-on-ice drain is self-limited on its own donor as
+`min(f_liq, 0) / max(floor, q_liq_on_ice)`, so the slot cannot overshoot below
+zero within the implicit step while its sources stay explicit, bounded by the
+equilibrated update and its positivity clamp. Column 9 is zero: the leading
+block linearizes the core species without the liquid-on-ice coupling, matching
+the eight-state per-process decomposition.
+"""
+@inline function _jacobian_2mp3_manual(
+    g::Instantaneous2MP3Tendency, x::MicroState{FT, 1, true, false, 9}, f,
+) where {FT}
+    x8 = MicroState2MP3{FT}(ntuple(i -> x[i], Val(8)))
+    J = _jacobian_2mp3_manual(g, x8)
+    q_floor = FT(TDI.TD.Parameters.q_min(g.tps))
+    q_liq = x[9]
+    liq_liq = ifelse(f[9] < 0, f[9] / max(q_floor, q_liq), zero(FT))
+    return SA.SMatrix{9, 9, FT}(
+        ntuple(Val(81)) do k
+            i = (k - 1) % 9 + 1
+            j = (k - 1) ÷ 9 + 1
+            if i == 9 && j == 9
+                liq_liq
+            elseif i == 9 || j == 9
+                zero(FT)
             else
                 J[i, j]
             end

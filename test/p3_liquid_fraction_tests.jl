@@ -560,6 +560,10 @@ function test_liquid_entry_wiring(FT)
             ros = _liq_entry(FT, T, inp; mode = (BMT.rosenbrock_exact(),))
             @test keys(ros) == names10
             @test all(isfinite, values(ros))
+            # single-category predicted liquid has a manual Jacobian tier
+            man = _liq_entry(FT, T, inp; mode = (BMT.rosenbrock_manual(),))
+            @test keys(man) == names10
+            @test all(isfinite, values(man))
         end
 
         # warm melting and collection fill the liquid; cold refreezing drains it
@@ -571,7 +575,6 @@ function test_liquid_entry_wiring(FT)
         @test inst_cold.dq_rim_dt > 0
 
         # unsupported paths throw
-        @test_throws ArgumentError _liq_entry(FT, T_frz + FT(2), inp; mode = (BMT.rosenbrock_manual(),))
         @test_throws ArgumentError _liq_entry(FT, T_frz + FT(2), inp; mode = (BMT.Verbose(BMT.rosenbrock_exact()),))
         @test_throws ArgumentError BMT.bulk_microphysics_tendencies(
             BMT.Microphysics2Moment(), mp, tps, ρ, T_frz + FT(2), warm.q_tot,
