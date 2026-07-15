@@ -471,15 +471,19 @@ tendency cache (droplet activation is added by the host, not the substep loop).
                 _euler_update(x, f, h) - x
             end
             d = _apply_limiter(mode.limiter, x, d, ρ, Tsub, q_tot, Lv_over_cp, Ls_over_cp, tps)
-            x = _project_ice_mean_mass(max.(x .+ d, 0))
+            x = max.(x .+ d, 0)
         else
             f = g(x)
-            x = _project_ice_mean_mass(_euler_update(x, f, h))
+            x = _euler_update(x, f, h)
         end
         Δ = x - x_prev
         T_safe = max(150, Tsub)
         Tsub += (TDI.Lᵥ(tps, T_safe) * (Δ.q_lcl + Δ.q_rai) + TDI.Lₛ(tps, T_safe) * Δ.q_ice) / cp_d
     end
+    # Project once per host step, after the substep loop: within a step the ice
+    # number evolves only by physical processes, and the mean-mass correction is
+    # applied at the cadence the host sees, following the P3 Fortran ordering.
+    x = _project_ice_mean_mass(x)
 
     rates = (x - x₀) / Δt
     return NamedTuple{(
