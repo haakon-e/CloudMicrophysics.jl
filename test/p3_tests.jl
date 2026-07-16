@@ -745,21 +745,23 @@ function test_p3_melting(FT)
         F_rim = FT(0.8)
         ρ_rim = FT(800)
         T_warm = FT(273.15 + 0.01)
-        logλ = P3.get_distribution_logλ(P3.P3State(params, FT(1e-4) * ρₐ, Nᵢ, F_rim, ρ_rim))
+        # shape is solved while the mass is healthy, then carried into the
+        # degenerate state, as the host does across a substep
+        shape = P3.get_distribution_shape(P3.P3State(params, FT(1e-4) * ρₐ, Nᵢ, F_rim, ρ_rim))
 
         # Ice mass underflows to zero while number and the slope state survive:
         # the melt integral is built from the number distribution, so the mass
         # rate is positive and the number rate must stay finite.
         state₀ = P3.P3State(params, FT(0), Nᵢ, F_rim, ρ_rim)
-        rate = P3.ice_melt(vel, aps, tps, T_warm, ρₐ, state₀, logλ; quad)
+        rate = P3.ice_melt(vel, aps, tps, T_warm, ρₐ, state₀, shape; quad)
         @test isfinite(rate.dNdt)
         @test rate.dNdt >= 0
         @test rate.dNdt == rate.dLdt / P3.ice_mean_particle_mass_min(FT)
 
         # A mean mass above the physical range melts number at the upper bound.
         state₁ = P3.P3State(params, FT(1.2e-3), FT(12), F_rim, ρ_rim)
-        logλ₁ = P3.get_distribution_logλ(state₁)
-        rate = P3.ice_melt(vel, aps, tps, T_warm, ρₐ, state₁, logλ₁; quad)
+        shape₁ = P3.get_distribution_shape(state₁)
+        rate = P3.ice_melt(vel, aps, tps, T_warm, ρₐ, state₁, shape₁; quad)
         @test isfinite(rate.dNdt)
         @test rate.dNdt == rate.dLdt / P3.ice_mean_particle_mass_max(FT)
     end
@@ -1320,11 +1322,15 @@ function _p3_bit_identity_hash(vals::Vector{FT}) where {FT}
     return h
 end
 
-# Re-baselined after the value-lane branch-guard fixes (differentiated zeros
-# select the primal branch); previous baseline at the foundation base dd26bc32
-# was (0x89c023ee67cce5b7, 0x50df586fb4467f48).
+# Re-baselined for the underflow-safe melting number rate (dNdt = dLdt divided by
+# a bounded mean particle mass): a numerically inert reassociation of the melt
+# number tendency shifts the exact hash while the melt reference values are
+# unchanged. Previous baseline was (0xcf3d1f5482548ddf, 0xdb0584ac8ef32b6b).
+# Re-baselined earlier after the value-lane branch-guard fixes (differentiated
+# zeros select the primal branch); the baseline before that at the foundation
+# base dd26bc32 was (0x89c023ee67cce5b7, 0x50df586fb4467f48).
 const _P3_BIT_IDENTITY_GOLDEN =
-    Dict{DataType, UInt64}(Float64 => 0xcf3d1f5482548ddf, Float32 => 0xdb0584ac8ef32b6b)
+    Dict{DataType, UInt64}(Float64 => 0x280bcaeb64fa4798, Float32 => 0x72efc27a03f46f17)
 
 function test_p3_bit_identity(FT)
     @testset "Bit-identity regression (default 2M+P3 config)" begin
