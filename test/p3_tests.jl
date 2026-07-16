@@ -719,6 +719,37 @@ function test_p3_melting(FT)
         @test rate.dNdt ≈ ref_vwarm_dNdt
         @test rate.dLdt ≈ ref_vwarm_dLdt
     end
+
+    @testset "Melting number rate is finite and number-consistent at the mean-mass bounds" begin
+        params = CMP.ParametersP3(FT)
+        vel = CMP.Chen2022VelType(FT)
+        aps = CMP.AirProperties(FT)
+        tps = TDI.TD.Parameters.ThermodynamicsParameters(FT)
+        quad = P3.GaussLegendre(FT, 12)
+
+        ρₐ = FT(1.2)
+        Nᵢ = FT(2e5) * ρₐ
+        F_rim = FT(0.8)
+        ρ_rim = FT(800)
+        T_warm = FT(273.15 + 0.01)
+        logλ = P3.get_distribution_logλ(P3.P3State(params, FT(1e-4) * ρₐ, Nᵢ, F_rim, ρ_rim))
+
+        # Ice mass underflows to zero while number and the slope state survive:
+        # the melt integral is built from the number distribution, so the mass
+        # rate is positive and the number rate must stay finite.
+        state₀ = P3.P3State(params, FT(0), Nᵢ, F_rim, ρ_rim)
+        rate = P3.ice_melt(vel, aps, tps, T_warm, ρₐ, state₀, logλ; quad)
+        @test isfinite(rate.dNdt)
+        @test rate.dNdt >= 0
+        @test rate.dNdt == rate.dLdt / P3.ice_mean_particle_mass_min(FT)
+
+        # A mean mass above the physical range melts number at the upper bound.
+        state₁ = P3.P3State(params, FT(1.2e-3), FT(12), F_rim, ρ_rim)
+        logλ₁ = P3.get_distribution_logλ(state₁)
+        rate = P3.ice_melt(vel, aps, tps, T_warm, ρₐ, state₁, logλ₁; quad)
+        @test isfinite(rate.dNdt)
+        @test rate.dNdt == rate.dLdt / P3.ice_mean_particle_mass_max(FT)
+    end
 end
 
 function test_p3_bulk_liquid_ice_collisions(FT)
