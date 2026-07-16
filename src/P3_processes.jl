@@ -99,8 +99,16 @@ with [`ice_refreeze`](@ref) (gains positive, the core loss explicit). See the
 
     # only consider melting (not fusion)
     dLdt = max(0, dLdt_unclamped)
-    # compute change of N_ice proportional to change in mass
-    dNdt = ρn_ice / ρq_ice * dLdt
+    # Remove number in proportion to mass through the mean particle mass,
+    # bounded to the physical range, so the rate stays finite when `ρq_ice`
+    # underflows to zero while `ρn_ice` and the melt integral remain positive.
+    FT = eltype(state)
+    m̄ = clamp(
+        ρq_ice / max(ρn_ice, floatmin(FT)),
+        ice_mean_particle_mass_min(FT),
+        ice_mean_particle_mass_max(FT),
+    )
+    dNdt = dLdt / m̄
 
     return (; dNdt, dLdt)
 end
@@ -266,6 +274,16 @@ dry-ice vapor baseline is untouched (C19 §3d; the band is asserted inside
     t = clamp((x - lo) / (hi - lo), zero(x), one(x))
     return t * t * (3 - 2 * t)
 end
+
+"""
+    ice_mean_particle_mass_min(FT)
+    ice_mean_particle_mass_max(FT)
+
+Bounds of the physical mean ice particle mass range [kg], matching the ice
+number-adjustment bounds of the 2-moment scheme.
+"""
+@inline ice_mean_particle_mass_min(::Type{FT}) where {FT} = FT(1e-12)
+@inline ice_mean_particle_mass_max(::Type{FT}) where {FT} = FT(1e-5)
 
 """
     collision_cross_section_ice_liquid_coeffs(rᵢ)
