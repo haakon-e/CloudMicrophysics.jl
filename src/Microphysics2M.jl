@@ -236,6 +236,47 @@ function pdf_cloud_parameters(pdf_c, q, ρₐ, N)
 end
 
 """
+    cloud_condensation_timescale(pdf_c, aps, tps, Tₐ, ρₐ, q_lcl, N_lcl)
+
+Compute the condensation relaxation timescale of the cloud droplet population
+from its capacitance integral,
+
+```math
+τ_{cond} = \\frac{ρₐ q_{v,sl}}{2π G_l ∫ D n(D) dD},
+```
+
+with spherical capacitance `C = D/2` and unit ventilation. The diameter moment
+of the generalized gamma distribution is closed form,
+`∫ D n(D) dD = N₀/μ λ^{-(ν+2)/μ} Γ((ν+2)/μ)`. The timescale diverges as the
+population vanishes and shrinks as the integrated droplet surface grows.
+
+# Arguments
+ - `pdf_c`: cloud droplet size distribution parameters, [`CMP.CloudParticlePDF_SB2006`](@ref)
+ - `aps`: [`CMP.AirProperties`](@ref)
+ - `tps`: thermodynamics parameters
+ - `Tₐ`: temperature (K)
+ - `ρₐ`: air density
+ - `q_lcl`: cloud liquid mass content [kg/kg]
+ - `N_lcl`: cloud droplet number concentration [1/m³]
+
+# Returns
+- Condensation timescale [s], bounded above at `1e10` to stay finite.
+"""
+@inline function cloud_condensation_timescale(
+    pdf_c::CMP.CloudParticlePDF_SB2006, aps::CMP.AirProperties, tps::TDI.PS,
+    Tₐ, ρₐ, q_lcl, N_lcl,
+)
+    FT = UT.promote_typeof(q_lcl, ρₐ, N_lcl, Tₐ)
+    G = CO.G_func_liquid(aps, tps, Tₐ)
+    qᵥ_sat_liq = TDI.saturation_vapor_specific_content_over_liquid(tps, Tₐ, ρₐ)
+    (; logN₀c, λc, νcD, μcD) = pdf_cloud_parameters(pdf_c, q_lcl, ρₐ, N_lcl)
+    z = (νcD + 2) / μcD
+    log_moment = logN₀c - log(μcD) - z * log(λc) + SF.loggamma(z)
+    denom = 2 * FT(π) * G * exp(log_moment)
+    return min(ρₐ * qᵥ_sat_liq / max(denom, floatmin(FT)), FT(1e10))
+end
+
+"""
     log_size_distribution_mass(pdf::CMP.CloudParticlePDF_SB2006, q_c, ρₐ, N_c)
 
 Return the log of the size distribution, as a function of mass, of the form

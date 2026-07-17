@@ -131,7 +131,6 @@ sides `f_p` for the linear post-solve attribution and is not differentiated.
     #####
     warm_rain = mp.warm_rain
     sb = warm_rain.seifert_beheng
-    condevap = warm_rain.condevap
     N_lcl_wr = ρ * n_lcl
     N_rai_wr = ρ * n_rai
 
@@ -139,11 +138,14 @@ sides `f_p` for the linear post-solve attribution and is not differentiated.
     dn_lcl_activation_dt = o
     activation = MicroState2MP3(o, dn_lcl_activation_dt, o, o, o, o, o, o)
 
-    # cloud condensation / evaporation (cloud mass only; number neglected)
+    # cloud condensation / evaporation (cloud mass only; number neglected);
+    # the relaxation timescale follows the droplet population's capacitance
+    # integral, so the rate vanishes with the population
     micro_mock = (; q_tot, q_lcl, q_icl = q_ice, q_rai, q_sno = zero(q_ice))
     thermo_mock = (; ρ, T)
+    τ_cond = CM2.cloud_condensation_timescale(sb.pdf_c, aps, tps, T, ρ, q_lcl, N_lcl_wr)
     ∂ₜq_lcl_cond = CMNonEq.conv_q_vap_to_q_lcl(
-        CMP.CloudLiquidFormation(condevap.τ_relax), nothing, tps, micro_mock, thermo_mock,
+        CMP.CloudLiquidFormation(τ_cond), nothing, tps, micro_mock, thermo_mock,
     )
     cloud_condevap = MicroState2MP3(∂ₜq_lcl_cond, o, o, o, o, o, o, o)
 
@@ -625,8 +627,11 @@ The entries are tiered:
     ##### Tier 1 — closed-form stiff couplings
     #####
 
-    # cloud condensation / evaporation (row q_lcl), branch matched to the primal
-    τ_l = mp.warm_rain.condevap.τ_relax
+    # cloud condensation / evaporation (row q_lcl), branch matched to the primal;
+    # τ matches the entry's capacitance-integral timescale
+    τ_l = CM2.cloud_condensation_timescale(
+        mp.warm_rain.seifert_beheng.pdf_c, mp.warm_rain.air_properties, tps, T, ρ,
+        UT.clamp_to_nonneg(q_lcl), UT.clamp_to_nonneg(n_lcl) * ρ)
     qᵥ_sat_liq = TDI.saturation_vapor_specific_content_over_liquid(tps, T, ρ)
     dqsl_dT = CMNonEq.dqcld_dT(qᵥ_sat_liq, Lᵥ, Rᵥ, T)
     Γₗ = CMNonEq.gamma_helper(Lᵥ, cp_air, dqsl_dT)

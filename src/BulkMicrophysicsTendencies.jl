@@ -741,7 +741,6 @@ Used by both warm-only and warm+ice dispatch methods to reduce code duplication.
     # Unpack parameters
     sb = warm_rain.seifert_beheng
     aps = warm_rain.air_properties
-    condevap = warm_rain.condevap
 
     # Convert to number densities for CM2 functions
     N_lcl = ρ * n_lcl
@@ -758,10 +757,13 @@ Used by both warm-only and warm+ice dispatch methods to reduce code duplication.
     dn_lcl_activation_dt = zero(FT)
 
     # --- Condensation of vapor / evaporation of cloud liquid water ---
+    # The relaxation timescale follows the droplet population's capacitance
+    # integral, so the rate vanishes with the population.
     micro_mock = (; q_tot, q_lcl, q_icl = q_ice, q_rai, q_sno = zero(q_ice))
     thermo_mock = (; ρ, T)
+    τ_cond = CM2.cloud_condensation_timescale(sb.pdf_c, aps, tps, T, ρ, q_lcl, N_lcl)
     ∂ₜq_lcl_cond = CMNonEq.conv_q_vap_to_q_lcl(
-        CMP.CloudLiquidFormation(condevap.τ_relax), nothing, tps, micro_mock, thermo_mock,
+        CMP.CloudLiquidFormation(τ_cond), nothing, tps, micro_mock, thermo_mock,
     )
     ∂ₜn_lcl_cond = zero(∂ₜq_lcl_cond)  # neglect number change from condensation/evaporation
     dq_lcl_dt += ∂ₜq_lcl_cond
