@@ -113,6 +113,58 @@ number-adjustment bounds of the 2-moment scheme.
 @inline ice_mean_particle_mass_max(::Type{FT}) where {FT} = FT(1e-5)
 
 """
+    ice_deposition_timescale(velocity_params, aps, tps, Tₐ, ρₐ, state, logλ; quad)
+
+Compute the vapor deposition relaxation timescale of the ice population from
+its capacitance integral,
+
+```math
+τ_{dep} = \\frac{ρₐ q_{v,si}}{2π G_i ∫ D F_v(D) N'(D) dD},
+```
+
+with spherical capacitance `C = D/2`, following Morrison and Milbrandt (2015).
+The timescale diverges as the population vanishes and shrinks as the
+integrated particle surface grows.
+
+# Arguments
+ - `velocity_params`: [`CMP.Chen2022VelType`](@ref)
+ - `aps`: [`CMP.AirProperties`](@ref)
+ - `tps`: thermodynamics parameters
+ - `Tₐ`: temperature (K)
+ - `ρₐ`: air density
+ - `state`: a [`P3State`](@ref) object
+ - `logλ`: the log of the slope parameter [log(1/m)]
+
+# Keyword arguments
+ - `quad`: quadrature rule (a `Quadrature.QuadratureRule`)
+
+# Returns
+- Deposition timescale [s], bounded above at `1e10` to stay finite.
+"""
+@inline function ice_deposition_timescale(
+    velocity_params, aps::CMP.AirProperties, tps::TDI.PS,
+    Tₐ, ρₐ, state::P3State, logλ;
+    quad,
+)
+    FT = eltype(state)
+    (; vent) = state.params
+
+    G = CO.G_func_ice(aps, tps, Tₐ)
+    qᵥ_sat_ice = TDI.saturation_vapor_specific_content_over_ice(tps, Tₐ, ρₐ)
+
+    v_term = ice_particle_terminal_velocity(velocity_params, ρₐ, state)
+    F_v = CO.ventilation_factor(vent, aps, v_term)
+    N′ = size_distribution(state, logλ)
+
+    bnds = velocity_integral_bounds(state, logλ, v_term; p = 1e-6)
+    dep_integrand = D -> D * F_v(D) * N′(D)
+    ∫DFvN = integrate(dep_integrand, bnds, quad)
+
+    denom = 2 * FT(π) * G * ∫DFvN
+    return min(ρₐ * qᵥ_sat_ice / max(denom, floatmin(FT)), FT(1e10))
+end
+
+"""
     collision_cross_section_ice_liquid_coeffs(rᵢ)
     collision_cross_section_ice_liquid_coeffs(state, Dᵢ)
 

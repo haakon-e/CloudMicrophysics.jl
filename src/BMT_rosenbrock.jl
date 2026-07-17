@@ -125,7 +125,6 @@ sides `f_p` for the linear post-solve attribution and is not differentiated.
     state = CMP3.state_from_prognostic(mp.ice.scheme, L_ice, N_ice, L_rim, B_rim)
 
     aps = mp.warm_rain.air_properties
-    subdep = mp.warm_rain.subdep
 
     #####
     ##### Warm-rain processes (mirrors `warm_rain_tendencies_2m`)
@@ -248,11 +247,14 @@ sides `f_p` for the linear post-solve attribution and is not differentiated.
         -∂ₜq_imm, -∂ₜn_imm, o, o, ∂ₜq_imm, ∂ₜn_imm, ∂ₜq_imm, ∂ₜq_imm / p3.ρ_i,
     )
 
-    # ice deposition / sublimation (rim drains on the sublimation branch only)
+    # ice deposition / sublimation (rim drains on the sublimation branch only);
+    # the relaxation timescale follows the population's capacitance integral,
+    # so the rate vanishes with the population instead of an existence threshold
     n_per_q_ice = ifelse(q_ice > ϵₘ, n_ice / q_ice, zero(n_ice))
     micro_mock_ice = (; q_tot, q_lcl, q_icl = q_ice, q_rai, q_sno = zero(q_ice))
+    τ_dep = CMP3.ice_deposition_timescale(vel, aps, tps, T, ρ, state, logλ; quad)
     ∂ₜq_ice_dep = CMNonEq.conv_q_vap_to_q_icl(
-        CMP.ConstantTimescale(subdep.τ_relax), nothing, tps, micro_mock_ice, thermo_mock,
+        CMP.ConstantTimescale(τ_dep), nothing, tps, micro_mock_ice, thermo_mock,
     )
     ∂ₜq_ice_dep = ifelse(T > tps.T_freeze, min(∂ₜq_ice_dep, zero(T)), ∂ₜq_ice_dep)
     ∂ₜn_ice_dep = ifelse(∂ₜq_ice_dep < 0, n_per_q_ice * ∂ₜq_ice_dep, zero(∂ₜq_ice_dep))
@@ -634,8 +636,16 @@ The entries are tiered:
     lcl_rai = cl.∂s_rai
     lcl_ice = cl.∂s_ice
 
-    # ice deposition / sublimation (rows q_ice, n_ice, q_rim, b_rim)
-    τ_i = mp.warm_rain.subdep.τ_relax
+    # ice deposition / sublimation (rows q_ice, n_ice, q_rim, b_rim);
+    # τ matches the entry's capacitance-integral timescale (inputs clamped
+    # to nonnegative as in the entry)
+    state_i = CMP3.state_from_prognostic(
+        mp.ice.scheme,
+        UT.clamp_to_nonneg(q_ice) * ρ, UT.clamp_to_nonneg(n_ice) * ρ,
+        UT.clamp_to_nonneg(q_rim) * ρ, UT.clamp_to_nonneg(b_rim) * ρ)
+    τ_i = CMP3.ice_deposition_timescale(
+        mp.ice.terminal_velocity, mp.warm_rain.air_properties, tps, T, ρ,
+        state_i, logλ; quad = mp.ice.quad)
     qᵥ_sat_ice = TDI.saturation_vapor_specific_content_over_ice(tps, T, ρ)
     dqsi_dT = CMNonEq.dqcld_dT(qᵥ_sat_ice, Lₛ, Rᵥ, T)
     Γᵢ = CMNonEq.gamma_helper(Lₛ, cp_air, dqsi_dT)
