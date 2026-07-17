@@ -960,7 +960,6 @@ to be non-Nothing, eliminating runtime type checks and dynamic dispatch.
 
     # Unpack warm rain parameters
     aps = mp.warm_rain.air_properties
-    subdep = mp.warm_rain.subdep
 
     # Initialize ice-related tendencies
     dq_ice_dt = zero(ρ)
@@ -1063,12 +1062,15 @@ to be non-Nothing, eliminating runtime type checks and dynamic dispatch.
     db_rim_dt += ∂ₜq_imm / p3.ρ_i  # solid-ice rime volume
 
     # --- Ice Sublimation / Deposition
+    # The relaxation timescale follows the population's capacitance integral,
+    # so the rate vanishes with the population instead of an existence threshold.
     n_per_q_ice = ifelse(q_ice > ϵₘ, n_ice / q_ice, zero(n_ice))
     # Deposition/sublimation of cloud ice
     micro_mock = (; q_tot, q_lcl, q_icl = q_ice, q_rai, q_sno = zero(q_ice))
     thermo_mock = (; ρ, T)
+    τ_dep = CMP3.ice_deposition_timescale(vel, aps, tps, T, ρ, state, logλ; quad)
     ∂ₜq_ice_dep = CMNonEq.conv_q_vap_to_q_icl(
-        CMP.ConstantTimescale(subdep.τ_relax), nothing, tps, micro_mock, thermo_mock,
+        CMP.ConstantTimescale(τ_dep), nothing, tps, micro_mock, thermo_mock,
     )
     # No ice deposition above freezing (lack of INPs)
     ∂ₜq_ice_dep = ifelse(T > tps.T_freeze, min(∂ₜq_ice_dep, zero(T)), ∂ₜq_ice_dep)

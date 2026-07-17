@@ -1,0 +1,90 @@
+┌ Warning: The project dependencies or compat requirements have changed since the manifest was last resolved.
+│ It is recommended to `Pkg.resolve()` or consider `Pkg.update()` if necessary.
+└ @ Pkg.API ~/.julia/juliaup/julia-1.11.9+0.x64.linux.gnu/share/julia/stdlib/v1.11/Pkg/src/API.jl:1206
+┌ Warning: The project dependencies or compat requirements have changed since the manifest was last resolved.
+│ It is recommended to `Pkg.resolve()` or consider `Pkg.update()` if necessary.
+└ @ Pkg.API ~/.julia/juliaup/julia-1.11.9+0.x64.linux.gnu/share/julia/stdlib/v1.11/Pkg/src/API.jl:1206
+Test Summary:      | Pass  Broken  Total   Time
+P3 tests (Float64) | 3427      11   3438  33.4s
+Test Summary:      | Pass  Broken  Total   Time
+P3 tests (Float64) | 3427      11   3438  36.3s
+Test Summary:      | Pass  Broken  Total   Time
+P3 tests (Float32) | 3418      11   3429  33.4s
+Test Summary:      | Pass  Broken  Total   Time
+P3 tests (Float32) | 3418      11   3429  36.1s
+Test Summary:                                          | Pass  Total   Time
+RosenbrockAverage vs fine explicit reference (Float64) |    9      9  20.4s
+Test Summary:                                            | Pass  Total  Time
+rosenbrock_manual() vs fine explicit reference (Float64) |    3      3  6.2s
+Test Summary:                                          | Pass  Total   Time
+RosenbrockAverage vs fine explicit reference (Float64) |    9      9  21.7s
+Test Summary:                           | Pass  Total  Time
+degenerate and trivial states (Float64) |    2      2  3.5s
+Test Summary:                                   | Pass  Total  Time
+substeps stay finite and non-negative (Float64) |   12     12  0.2s
+Test Summary:                                       | Pass  Total  Time
+near-empty species take the explicit path (Float64) |    4      4  0.0s
+Test Summary:                                            | Pass  Total  Time
+rosenbrock_manual() vs fine explicit reference (Float64) |    3      3  6.5s
+Test Summary:                           | Pass  Total  Time
+degenerate and trivial states (Float64) |    2      2  3.8s
+Test Summary:                                   | Pass  Total  Time
+substeps stay finite and non-negative (Float64) |   12     12  0.2s
+Test Summary:                                       | Pass  Total  Time
+near-empty species take the explicit path (Float64) |    4      4  0.1s
+Test Summary:                                          | Pass  Total   Time
+RosenbrockAverage vs fine explicit reference (Float32) |    9      9  21.5s
+Test Summary:                                            | Pass  Total  Time
+rosenbrock_manual() vs fine explicit reference (Float32) |    3      3  5.3s
+Test Summary:                           | Pass  Total  Time
+degenerate and trivial states (Float32) |    2      2  3.6s
+Test Summary:                                   | Pass  Total  Time
+substeps stay finite and non-negative (Float32) |   12     12  0.2s
+Test Summary:                                       | Pass  Total  Time
+near-empty species take the explicit path (Float32) |    4      4  0.0s
+Test Summary:                                          | Pass  Total   Time
+RosenbrockAverage vs fine explicit reference (Float32) |    9      9  21.6s
+2M verbose instantaneous parts sum to total (Float64): Test Failed at /home/haakon/cm-p3-l2an/test/rosenbrock_verbose_tests.jl:54
+  Expression: psum == full
+   Evaluated: [0.0, 0.0, 0.0, 0.0, -3.5857595064077175e-6, -4229.499570106689, -2.2410996915048234e-6, -4.033979444708681e-9] == [0.0, 0.0, 0.0, 0.0, -5.3179590190066435e-5, -35225.643747393384, -3.323724386879152e-5, -5.982703896382472e-8]
+
+Stacktrace:
+ [1] macro expansion
+   @ ~/.julia/juliaup/julia-1.11.9+0.x64.linux.gnu/share/julia/stdlib/v1.11/Test/src/Test.jl:680 [inlined]
+ [2] macro expansion
+   @ ~/cm-p3-l2an/test/rosenbrock_verbose_tests.jl:54 [inlined]
+ [3] macro expansion
+   @ ~/.julia/juliaup/julia-1.11.9+0.x64.linux.gnu/share/julia/stdlib/v1.11/Test/src/Test.jl:1709 [inlined]
+ [4] test_rosenbrock_verbose_2m(FT::Type{Float64})
+   @ Main ~/cm-p3-l2an/test/rosenbrock_verbose_tests.jl:46
+Test Summary:                                         | Pass  Fail  Total  Time
+2M verbose instantaneous parts sum to total (Float64) |    5     1      6  2.5s
+ERROR: LoadError: Some tests did not pass: 5 passed, 1 failed, 0 errored, 0 broken.
+in expression starting at /home/haakon/cm-p3-l2an/test/rosenbrock_verbose_tests.jl:172
+srun: error: clima: task 0: Exited with exit code 1
+Test Summary:                                            | Pass  Total  Time
+rosenbrock_manual() vs fine explicit reference (Float32) |    3      3  5.4s
+Test Summary:                           | Pass  Total  Time
+degenerate and trivial states (Float32) |    2      2  3.9s
+Test Summary:                                   | Pass  Total  Time
+substeps stay finite and non-negative (Float32) |   12     12  0.2s
+Test Summary:                                       | Pass  Total  Time
+near-empty species take the explicit path (Float32) |    4      4  0.0s
+2M verbose instantaneous parts sum to total (Float64): Test Failed at /home/haakon/cm-p3-l2an/test/rosenbrock_verbose_tests.jl:54
+  Expression: psum == full
+   Evaluated: [0.0, 0.0, 0.0, 0.0, -3.5857595064077175e-6, -4229.499570106689, -2.2410996915048234e-6, -4.033979444708681e-9] == [0.0, 0.0, 0.0, 0.0, -5.3179590190066435e-5, -35225.643747393384, -3.323724386879152e-5, -5.982703896382472e-8]
+
+Stacktrace:
+ [1] macro expansion
+   @ ~/.julia/juliaup/julia-1.11.9+0.x64.linux.gnu/share/julia/stdlib/v1.11/Test/src/Test.jl:680 [inlined]
+ [2] macro expansion
+   @ ~/cm-p3-l2an/test/rosenbrock_verbose_tests.jl:54 [inlined]
+ [3] macro expansion
+   @ ~/.julia/juliaup/julia-1.11.9+0.x64.linux.gnu/share/julia/stdlib/v1.11/Test/src/Test.jl:1709 [inlined]
+ [4] test_rosenbrock_verbose_2m(FT::Type{Float64})
+   @ Main ~/cm-p3-l2an/test/rosenbrock_verbose_tests.jl:46
+Test Summary:                                         | Pass  Fail  Total  Time
+2M verbose instantaneous parts sum to total (Float64) |    5     1      6  2.5s
+ERROR: LoadError: Some tests did not pass: 5 passed, 1 failed, 0 errored, 0 broken.
+in expression starting at /home/haakon/cm-p3-l2an/test/rosenbrock_verbose_tests.jl:172
+srun: error: clima: task 1: Exited with exit code 1
