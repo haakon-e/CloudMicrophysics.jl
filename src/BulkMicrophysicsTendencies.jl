@@ -742,9 +742,15 @@ Used by both warm-only and warm+ice dispatch methods to reduce code duplication.
     sb = warm_rain.seifert_beheng
     aps = warm_rain.air_properties
 
-    # Convert to number densities for CM2 functions
-    N_lcl = ρ * n_lcl
-    N_rai = ρ * n_rai
+    # Convert to number densities for CM2 functions. Process rates are
+    # evaluated at the mean-mass-bounded populations; the number adjustments
+    # relax the prognostic numbers toward the same bounds.
+    n_lcl_b = CM2.number_bounded_by_mass_limits(
+        (; x_min = sb.pdf_c.xc_min, x_max = sb.pdf_c.xc_max), q_lcl, n_lcl)
+    n_rai_b = CM2.number_bounded_by_mass_limits(
+        (; x_min = sb.pdf_r.xr_min, x_max = sb.pdf_r.xr_max), q_rai, n_rai)
+    N_lcl = ρ * n_lcl_b
+    N_rai = ρ * n_rai_b
 
     # Initialize tendencies
     FT = typeof(ρ)
@@ -949,11 +955,17 @@ to be non-Nothing, eliminating runtime type checks and dynamic dispatch.
     q_rim = UT.clamp_to_nonneg(q_rim)
     b_rim = UT.clamp_to_nonneg(b_rim)
 
-    # Convert to volumetric quantities for P3 functions
+    # Convert to volumetric quantities for P3 functions. Rates are evaluated
+    # at the mean-mass-bounded populations (see `warm_rain_tendencies_2m`).
+    sb_wr = mp.warm_rain.seifert_beheng
+    n_lcl_b = CM2.number_bounded_by_mass_limits(
+        (; x_min = sb_wr.pdf_c.xc_min, x_max = sb_wr.pdf_c.xc_max), q_lcl, n_lcl)
+    n_rai_b = CM2.number_bounded_by_mass_limits(
+        (; x_min = sb_wr.pdf_r.xr_min, x_max = sb_wr.pdf_r.xr_max), q_rai, n_rai)
     L_lcl = q_lcl * ρ  # [kg lcl / m³ air]
     L_rai = q_rai * ρ  # [kg rai / m³ air]
-    N_lcl = n_lcl * ρ  # [1 / m³ air]
-    N_rai = n_rai * ρ  # [1 / m³ air]
+    N_lcl = n_lcl_b * ρ  # [1 / m³ air]
+    N_rai = n_rai_b * ρ  # [1 / m³ air]
     L_ice = q_ice * ρ  # [kg ice / m³ air]
     N_ice = n_ice * ρ  # [1 / m³ air]
     L_rim = q_rim * ρ  # [kg rim / m³ air]

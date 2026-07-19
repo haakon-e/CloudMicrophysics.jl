@@ -848,12 +848,12 @@ end
 """
     _numadj_derivs(FT, q, n, x_min, x_max, τ, qmin)
 
-The two non-zero closed-form derivatives `(∂q, ∂n)` of
+The implicit derivatives `(∂q, ∂n)` of
 [`CM2.number_tendency_from_mass_limits`](@ref) `∂ₜn = (n_target − n)/τ` with
-`n_target = clamp(n, q/x_max, q/x_min)`: interior (no clamp) ⇒ both zero; the
-low clamp `n_target = q/x_max` ⇒ `(1/(x_max·τ), −1/τ)`; the high clamp
-`n_target = q/x_min` ⇒ `(1/(x_min·τ), −1/τ)`; the empty arm `q < qmin`
-(`n_target = 0`) ⇒ `(0, −1/τ)`.
+`n_target = clamp(n, q/x_max, q/x_min)`: the relaxation diagonal `∂n = −1/τ`
+on the clamped and empty arms, zero in the interior. The target's mass
+coupling (`1/(x_min·τ)` on the high clamp, a gain up to `1/x_min` per unit
+`τ`) is treated explicitly: `∂q = 0`.
 """
 @inline function _numadj_derivs(::Type{FT}, q, n, x_min, x_max, τ, qmin) where {FT}
     empty = q < qmin
@@ -861,9 +861,8 @@ low clamp `n_target = q/x_max` ⇒ `(1/(x_max·τ), −1/τ)`; the high clamp
     hi = q / x_min
     clamp_low = !empty && n < lo
     clamp_high = !empty && n > hi
-    ∂q = ifelse(clamp_low, 1 / (x_max * τ), ifelse(clamp_high, 1 / (x_min * τ), zero(FT)))
     ∂n = ifelse(empty || clamp_low || clamp_high, -1 / τ, zero(FT))
-    return (∂q, ∂n)
+    return (zero(FT), ∂n)
 end
 
 #####
