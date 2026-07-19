@@ -1,0 +1,64 @@
+Precompiling CloudMicrophysics...
+   5330.3 ms  ✓ CloudMicrophysics
+  1 dependency successfully precompiled in 6 seconds. 51 already precompiled.
+Test Summary:      | Pass  Broken  Total   Time
+P3 tests (Float64) | 3427      11   3438  20.1s
+Test Summary:      | Pass  Broken  Total   Time
+P3 tests (Float32) | 3418      11   3429  22.0s
+Test Summary:                                          | Pass  Total   Time
+RosenbrockAverage vs fine explicit reference (Float64) |    9      9  13.2s
+Test Summary:                                            | Pass  Total  Time
+rosenbrock_manual() vs fine explicit reference (Float64) |    3      3  4.2s
+Test Summary:                           | Pass  Total  Time
+degenerate and trivial states (Float64) |    2      2  2.5s
+Test Summary:                                   | Pass  Total  Time
+substeps stay finite and non-negative (Float64) |   12     12  0.1s
+Test Summary:                                       | Pass  Total  Time
+near-empty species take the explicit path (Float64) |    4      4  0.0s
+Test Summary:                                          | Pass  Total   Time
+RosenbrockAverage vs fine explicit reference (Float32) |    9      9  20.2s
+Test Summary:                                            | Pass  Total  Time
+rosenbrock_manual() vs fine explicit reference (Float32) |    3      3  5.7s
+Test Summary:                           | Pass  Total  Time
+degenerate and trivial states (Float32) |    2      2  4.2s
+Test Summary:                                   | Pass  Total  Time
+substeps stay finite and non-negative (Float32) |   12     12  0.2s
+Test Summary:                                       | Pass  Total  Time
+near-empty species take the explicit path (Float32) |    4      4  0.0s
+Test Summary:                                         | Pass  Total  Time
+2M verbose instantaneous parts sum to total (Float64) |    6      6  0.5s
+Test Summary:                                     | Pass  Total  Time
+2M verbose attribution reconstructs net (Float64) |   18     18  7.5s
+Test Summary:                                   | Pass  Total   Time
+2M verbose net equals non-verbose net (Float64) |    6      6  10.8s
+Test Summary:                                       | Pass  Total  Time
+2M verbose on a non-Exact Jacobian throws (Float64) |    1      1  0.0s
+Test Summary:                                         | Pass  Total  Time
+2M verbose instantaneous parts sum to total (Float32) |    6      6  0.5s
+Test Summary:                                     | Pass  Total  Time
+2M verbose attribution reconstructs net (Float32) |   18     18  7.2s
+Test Summary:                                   | Pass  Total   Time
+2M verbose net equals non-verbose net (Float32) |    6      6  10.4s
+Test Summary:                                       | Pass  Total  Time
+2M verbose on a non-Exact Jacobian throws (Float32) |    1      1  0.0s
+Test Summary:                                         | Pass  Total  Time
+1M verbose instantaneous parts sum to total (Float64) |    8      8  0.5s
+Test Summary:                                   | Pass  Total  Time
+1M verbose net equals non-verbose net (Float64) |   12     12  1.8s
+Test Summary:                                     | Pass  Total  Time
+1M verbose attribution reconstructs net (Float64) |   24     24  0.0s
+Test Summary:                                         | Pass  Total  Time
+1M verbose instantaneous parts sum to total (Float32) |    8      8  0.4s
+Test Summary:                                   | Pass  Total  Time
+1M verbose net equals non-verbose net (Float32) |   12     12  1.7s
+Test Summary:                                     | Pass  Total  Time
+1M verbose attribution reconstructs net (Float32) |   24     24  0.0s
+Test Summary:                          | Pass  Total   Time
+Bulk Microphysics Tendencies (Float64) |  143    143  12.5s
+Test Summary:                          | Pass  Total   Time
+Bulk Microphysics Tendencies (Float32) |  143    143  14.6s
+Test Summary:                   | Pass  Total   Time
+Microphysics 2M Tests (Float64) |  251    251  12.6s
+Test Summary:                   | Pass  Total   Time
+Microphysics 2M Tests (Float32) |  251    251  13.0s
+ALL-SUITES-DONE

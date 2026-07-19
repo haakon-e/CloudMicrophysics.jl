@@ -931,6 +931,20 @@ function number_tendency_from_mass_limits((; x_min, x_max, τ), q, n)
     return (n_target - n) / τ
 end
 
+"""
+    number_bounded_by_mass_limits((; x_min, x_max), q, n)
+
+Specific number bounded by the mean-particle-mass limits `[x_min, x_max]` [kg]:
+`clamp(n, q / x_max, q / x_min)` for `q ≥ ϵₘ`, `n` otherwise. Matches the
+target population of [`number_tendency_from_mass_limits`](@ref), so process
+rates evaluated at this number are consistent with the adjusted mean mass.
+"""
+function number_bounded_by_mass_limits((; x_min, x_max), q, n)
+    FT = UT.promote_typeof(q, n)
+    ϵₘ = UT.ϵ_numerics_2M_M(FT)
+    return ifelse(q < ϵₘ, FT(n), clamp(FT(n), q / x_max, q / x_min))
+end
+
 # Additional double moment autoconversion and accretion parametrizations:
 # - Khairoutdinov and Kogan (2000)
 # - Beheng (1994)

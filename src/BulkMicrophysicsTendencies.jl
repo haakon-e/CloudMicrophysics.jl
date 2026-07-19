@@ -276,10 +276,10 @@ rosenbrock_exact() =
     rosenbrock_manual()
 
 [`RosenbrockAverage`](@ref) with the hand-built 2M+P3 [`ManualJacobian`](@ref),
-implicit growth, and the end-state saturation adjustment.
+the explicit growth diagonal, and the end-state saturation adjustment.
 """
 rosenbrock_manual() =
-    RosenbrockAverage(ManualJacobian(), ImplicitGrowth(), EndStateSaturationAdjustment())
+    RosenbrockAverage(ManualJacobian(), ExplicitGrowthDiagonal(), EndStateSaturationAdjustment())
 
 """
     Verbose(mode) <: TendencyMode
