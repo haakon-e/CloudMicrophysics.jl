@@ -180,6 +180,19 @@ block.
 struct ManualJacobian <: Jacobian end
 
 """
+    TemperatureCoupledJacobian <: Jacobian
+
+The [`ManualJacobian`](@ref) extended to the temperature-coupled substep state
+`(q_lcl, n_lcl, q_rai, n_rai, q_ice, n_ice, q_rim, b_rim, T)`. The phase-change
+rates carry their bare relaxation `−1/τ` (the psychrometric damping emerges
+from the coupled `(q, T)` block instead of the folded `−1/(τ·Γ)`), the
+temperature column carries the saturation shift `−∂q_sat/∂T / τ` and the
+melting rate's linear temperature dependence, and the temperature row is the
+latent-heating combination of the species rows.
+"""
+struct TemperatureCoupledJacobian <: Jacobian end
+
+"""
     GrowthTreatment
 
 Abstract type selecting how the positive (growth) diagonal of the Jacobian
@@ -280,6 +293,17 @@ the explicit growth diagonal, and the end-state saturation adjustment.
 """
 rosenbrock_manual() =
     RosenbrockAverage(ManualJacobian(), ExplicitGrowthDiagonal(), EndStateSaturationAdjustment())
+
+"""
+    rosenbrock_manual_temperature()
+
+[`RosenbrockAverage`](@ref) on the temperature-coupled substep state with the
+[`TemperatureCoupledJacobian`](@ref), the explicit growth diagonal, and no
+increment limiter: temperature evolves implicitly inside each substep, so the
+saturation-overshoot adjustment is not required.
+"""
+rosenbrock_manual_temperature() =
+    RosenbrockAverage(TemperatureCoupledJacobian(), ExplicitGrowthDiagonal(), NoLimiter())
 
 """
     Verbose(mode) <: TendencyMode
