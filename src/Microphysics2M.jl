@@ -380,7 +380,9 @@ function get_size_distribution_bounds(
 )
     FT = UT.promote_typeof(q, ρₐ, N)
     (; Dr_mean) = pdf_rain_parameters(pdf, q, ρₐ, N)
-    iszero(Dr_mean) && return (FT(0), FT(0))
+    # A non-positive or non-finite mean diameter is a degenerate (empty)
+    # population; return an empty interval rather than a quantile of it.
+    (isfinite(Dr_mean) && Dr_mean > 0) || return (FT(0), FT(0))
     D_min = DT.exponential_quantile(Dr_mean, p)
     D_max = DT.exponential_quantile(Dr_mean, 1 - p)
     return D_min, D_max
@@ -390,6 +392,7 @@ function get_size_distribution_bounds(
 )
     FT = UT.promote_typeof(q, ρₐ, N)
     (; λc, νcD, μcD) = pdf_cloud_parameters(pdf, q, ρₐ, N)
+    (isfinite(λc) && λc > 0 && μcD > 0) || return (FT(0), FT(0))
     D_min = FT(DT.generalized_gamma_quantile(νcD, μcD, λc, p))
     D_max = FT(DT.generalized_gamma_quantile(νcD, μcD, λc, 1 - p))
     return D_min, D_max
