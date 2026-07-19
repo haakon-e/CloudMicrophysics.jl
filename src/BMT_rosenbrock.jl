@@ -113,11 +113,19 @@ sides `f_p` for the linear post-solve attribution and is not differentiated.
     # q_ice, n_ice, q_rim, b_rim) order shared with the entry's accumulators
     Z() = MicroState2MP3(o, o, o, o, o, o, o, o)
 
+    # Process rates are evaluated at the mean-mass-bounded populations; the
+    # number adjustments relax the prognostic numbers toward the same bounds.
+    sb = mp.warm_rain.seifert_beheng
+    n_lcl_b = CM2.number_bounded_by_mass_limits(
+        (; x_min = sb.pdf_c.xc_min, x_max = sb.pdf_c.xc_max), q_lcl, n_lcl)
+    n_rai_b = CM2.number_bounded_by_mass_limits(
+        (; x_min = sb.pdf_r.xr_min, x_max = sb.pdf_r.xr_max), q_rai, n_rai)
+
     # Volumetric quantities for P3 functions (entry convention).
     L_lcl = q_lcl * ρ
     L_rai = q_rai * ρ
-    N_lcl = n_lcl * ρ
-    N_rai = n_rai * ρ
+    N_lcl = n_lcl_b * ρ
+    N_rai = n_rai_b * ρ
     L_ice = q_ice * ρ
     N_ice = n_ice * ρ
     L_rim = q_rim * ρ
@@ -130,9 +138,8 @@ sides `f_p` for the linear post-solve attribution and is not differentiated.
     ##### Warm-rain processes (mirrors `warm_rain_tendencies_2m`)
     #####
     warm_rain = mp.warm_rain
-    sb = warm_rain.seifert_beheng
-    N_lcl_wr = ρ * n_lcl
-    N_rai_wr = ρ * n_rai
+    N_lcl_wr = ρ * n_lcl_b
+    N_rai_wr = ρ * n_rai_b
 
     # activation (cloud number only): no activation source
     dn_lcl_activation_dt = o
@@ -376,7 +383,9 @@ increments sum to the full-step increment.
 
 One linearized-implicit (Rosenbrock-Euler) substep: build the equilibrated
 system ([`_rosenbrock_system`](@ref)) for `(I/h - B) Δx = f` with the masked
-Jacobian `B = P J P`, solve it ([`_rosenbrock_solve`](@ref)), and return
+Jacobian `B = P J P`, solve it ([`_rosenbrock_solve`](@ref)), replace an
+increment outside the well-conditioned-solve bound
+([`_solve_increment_acceptable`](@ref)) with the explicit update, and return
 `max.(x + Δx, 0)`.
 """
 @inline function _rosenbrock_update(
@@ -384,7 +393,29 @@ Jacobian `B = P J P`, solve it ([`_rosenbrock_solve`](@ref)), and return
 ) where {N, FT}
     S, S⁻¹, A = _rosenbrock_system(x, f, J, z, h)
     Δx = _rosenbrock_solve(S, S⁻¹, A, f)
+    Δx = _solve_increment_acceptable(S⁻¹ * Δx, S⁻¹ * f, h) ? Δx : h .* f
     return max.(x .+ Δx, 0)
+end
+
+# Acceptance bound for the linearized-implicit increment relative to the
+# explicit-step scale. A well-conditioned solve of `(I/h - B) Δx = f` satisfies
+# `‖Δx‖∞ = O(h ‖f‖∞)`; increments far beyond that scale indicate a
+# near-singular system matrix.
+const ROSENBROCK_INCREMENT_LIMIT = 10
+
+"""
+    _solve_increment_acceptable(d, f, h)
+
+Whether the Rosenbrock increment `d` is consistent with a well-conditioned
+solve, `‖d‖∞ ≤ $(ROSENBROCK_INCREMENT_LIMIT) h ‖f‖∞`, with both vectors in the
+equilibrated units of [`_rosenbrock_system`](@ref) (`S⁻¹ Δx` and `S⁻¹ f`), so
+the bound is relative to each component's own scale. A rejected increment is
+replaced with the explicit update `h f`. Non-finite entries in `d` fail the
+bound.
+"""
+@inline function _solve_increment_acceptable(d, f, h)
+    FT = eltype(d)
+    return maximum(abs, Tuple(d)) <= FT(ROSENBROCK_INCREMENT_LIMIT) * h * maximum(abs, Tuple(f))
 end
 
 bulk_microphysics_tendencies(::RosenbrockAverage, ::Microphysics2Moment, args...) = throw(
@@ -629,9 +660,13 @@ The entries are tiered:
 
     # cloud condensation / evaporation (row q_lcl), branch matched to the primal;
     # τ matches the entry's capacitance-integral timescale
+    pdf_c_j = mp.warm_rain.seifert_beheng.pdf_c
+    n_lcl_j = CM2.number_bounded_by_mass_limits(
+        (; x_min = pdf_c_j.xc_min, x_max = pdf_c_j.xc_max),
+        UT.clamp_to_nonneg(q_lcl), UT.clamp_to_nonneg(n_lcl))
     τ_l = CM2.cloud_condensation_timescale(
-        mp.warm_rain.seifert_beheng.pdf_c, mp.warm_rain.air_properties, tps, T, ρ,
-        UT.clamp_to_nonneg(q_lcl), UT.clamp_to_nonneg(n_lcl) * ρ)
+        pdf_c_j, mp.warm_rain.air_properties, tps, T, ρ,
+        UT.clamp_to_nonneg(q_lcl), n_lcl_j * ρ)
     qᵥ_sat_liq = TDI.saturation_vapor_specific_content_over_liquid(tps, T, ρ)
     dqsl_dT = CMNonEq.dqcld_dT(qᵥ_sat_liq, Lᵥ, Rᵥ, T)
     Γₗ = CMNonEq.gamma_helper(Lᵥ, cp_air, dqsl_dT)
@@ -1345,9 +1380,11 @@ function _rosenbrock_substep_verbose(g, g_verbose, J, z, x::SA.StaticVector{N, F
     if all(isfinite, x) && all(isfinite, J)
         S, S⁻¹, A = _rosenbrock_system(x, f, J, z, h)
         Δx = _rosenbrock_solve(S, S⁻¹, A, f)
-        Δxp = map(fp_i -> _rosenbrock_solve(S, S⁻¹, A, fp_i), fp)
-        x_new = max.(x .+ Δx, 0)
-        return x_new, Δxp, (x_new - x) - Δx
+        if _solve_increment_acceptable(S⁻¹ * Δx, S⁻¹ * f, h)
+            Δxp = map(fp_i -> _rosenbrock_solve(S, S⁻¹, A, fp_i), fp)
+            x_new = max.(x .+ Δx, 0)
+            return x_new, Δxp, (x_new - x) - Δx
+        end
     end
     Δx = h .* f
     Δxp = map(fp_i -> h .* fp_i, fp)
