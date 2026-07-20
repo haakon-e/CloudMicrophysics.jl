@@ -416,10 +416,14 @@ function immersion_limit_rate(
     τ = oftype(T, 300), inpc_log_shift = zero(T),
     n_active = zero(T),
 )
-    T ≥ opt.T_freeze && return (; ∂ₜn_frz = zero(T))
+    # The early return must carry the element type the main path produces, or a
+    # differentiated (Dual `n_active`) kernel gets a type-unstable NamedTuple and
+    # faults at runtime. See UT.promote_typeof.
+    FT = UT.promote_typeof(T, ρ, inpc_log_shift, n_active, τ)
+    T ≥ opt.T_freeze && return (; ∂ₜn_frz = zero(FT))
     log_inpc = INP_concentration_mean(opt, T) + inpc_log_shift
     INPC_per_kg = exp(log_inpc) / ρ                  # [kg⁻¹(air)]
-    ∂ₜn_frz = max(zero(T), INPC_per_kg - n_active) / τ # [kg⁻¹(air) s⁻¹]
+    ∂ₜn_frz = max(zero(FT), INPC_per_kg - n_active) / τ # [kg⁻¹(air) s⁻¹]
     return (; ∂ₜn_frz)
 end
 

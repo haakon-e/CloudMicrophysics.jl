@@ -288,6 +288,7 @@ Compute the coefficients for the Chen 2022 terminal velocity parametrization.
 See [Chen2022](@cite) for more details.
 """
 @inline function Chen2022_vel_coeffs(coeffs::CMP.Chen2022VelTypeRain, ρₐ)
+    FT = eltype(coeffs)
     (; ρ0, a, a3_pow, b, b_ρ, c) = coeffs
     ρₐ = max(ρₐ, zero(ρₐ))
     # Table B1
@@ -296,7 +297,7 @@ See [Chen2022](@cite) for more details.
     bi = (b[1] - b_ρ * ρₐ, b[2] - b_ρ * ρₐ, b[3] - b_ρ * ρₐ)
     ci = (c[1], c[2], c[3])
     # unit conversions
-    aiu = ai .* 1000 .^ bi
+    aiu = ai .* FT(1000) .^ bi
     ciu = ci .* 1000
     return (aiu, bi, ciu)
 end
@@ -321,7 +322,7 @@ end
     bi = (Bs + ρₐ * Cs, Bs + ρₐ * Cs)
     ci = (FT(0), Gs)
     # unit conversions
-    aiu = ai .* 1000 .^ bi
+    aiu = ai .* FT(1000) .^ bi
     ciu = ci .* 1000
     return (aiu, bi, ciu)
 end
@@ -347,7 +348,7 @@ end
     bi = (Cl, Fl)
     ci = (FT(0), Gl)
     # unit conversions
-    aiu = ai .* 1000 .^ bi
+    aiu = ai .* FT(1000) .^ bi
     ciu = ci .* 1000
     return (aiu, bi, ciu)
 end
