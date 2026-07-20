@@ -698,7 +698,13 @@ function test_p3_bulk_liquid_ice_collisions(FT)
     @testset "local rime density" begin
         Tₐ = T_freeze - 1 // 10
         ρ′_rim_func = P3.compute_local_rime_density(vel_params, ρₐ, Tₐ, state)
-        @test ρ′_rim_func(D̄, D̄) ≈ FT(159.5) rtol = 1e-6
+        # Corrected for the Cober-List sign fix (previously pinned at the Rᵢ = 1 floor, 159.5).
+        @test ρ′_rim_func(D̄, D̄) ≈ FT(282.8765520969483) rtol = 2e-4
+
+        # Rᵢ > 0 for T < T_freeze, so ρ′_rim densifies toward ρ_ice as T → T_freeze.
+        Dₗ = FT(200e-6)
+        ρ′_rim(T) = P3.compute_local_rime_density(vel_params, ρₐ, FT(T), state)(D̄, Dₗ)
+        @test issorted(ρ′_rim.((240, 250, 260, 265, 270)))
 
         a, b, c = 51, 114, -11 // 2 # coeffs for Eq. 17 in Cober and List (1993), converted to [kg / m³]
         ρ′_rim_CL93(Rᵢ) = a + b * Rᵢ + c * Rᵢ^2  # Eq. 17 in Cober and List (1993), in [kg / m³], valid for 1 ≤ Rᵢ ≤ 8
@@ -851,8 +857,9 @@ function test_p3_bulk_liquid_ice_collisions(FT)
         @test QRSHD ≈ 3.6526001759370415e-6 rtol = 5e-4
         @test NRCOL ≈ 172.61819652435105 rtol = 5e-4
         @test ∫M_col ≈ 7.067566695764388e-5 rtol = 5e-4
-        @test BCCOL ≈ 3.725687492783128e-9 rtol = 5e-4
-        @test BRCOL ≈ 4.164686317018988e-7 rtol = 5e-4
+        # BCCOL, BRCOL updated for the Cober-List sign fix in compute_local_rime_density.
+        @test BCCOL ≈ 3.50892649473301e-9 rtol = 5e-4
+        @test BRCOL ≈ 7.247197349759124e-8 rtol = 5e-4
         @test ∫𝟙_wet_M_col ≈ 1.5520362321253953e-5 rtol = 5e-4
 
         ### Test the bulk source function
