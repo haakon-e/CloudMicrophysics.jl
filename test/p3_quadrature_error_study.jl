@@ -3,13 +3,18 @@ Quadrature error study for the P3-ice integrals.
 
 Measure the relative error of every quadrature-consuming P3 quantity against a
 high-order Gauss-Legendre reference, across a set of physically plausible
-column states, and attribute it to one of three levels:
+column states, and attribute it to one of five levels:
 
 - `transport`: the sedimentation velocities and melt rate.
-- `collision_efficiency`: the components proportional to the collision
+- `collision_efficiency`: the pooled components proportional to the collision
   efficiency (`E = 1` assumed): the liquid-ice collision sources and ice
   self-collection. Their parameterization uncertainty exceeds the quadrature
   error, so they tolerate a coarser rule than the transport components.
+- `collision`: the liquid-ice collision sources alone, a subset of
+  `collision_efficiency` reported separately since it dominates the
+  runtime cost of the two.
+- `selfcol`: ice self-collection alone, the other `collision_efficiency`
+  component.
 - `bulk`: the full `bulk_microphysics_tendencies` vector.
 
 The states are `generate_column_states` plus graupel/hail cores
@@ -319,7 +324,10 @@ function run_quadrature_error_study(;
     println("order | level | median | p95 | max")
     for n in orders
         mp = make_mp(n)
-        errs = Dict(:bulk => FT[], :collision_efficiency => FT[], :transport => FT[])
+        errs = Dict(
+            :bulk => FT[], :collision_efficiency => FT[], :transport => FT[],
+            :collision => FT[], :selfcol => FT[],
+        )
         worst = Tuple{FT, Int, Int}[]
         for (si, (s, r)) in enumerate(zip(states, refs))
             e = evaluate_quadrature_levels(mp, tps, s)
@@ -327,11 +335,12 @@ function run_quadrature_error_study(;
                 for (i, (a, b, f)) in enumerate(zip(e[k], r[k], floors[k]))
                     err = abs(a - b) / max(abs(a), abs(b), f)
                     push!(errs[error_study_level(k)], err)
+                    k in (:collision, :selfcol) && push!(errs[k], err)
                     k == :bulk && push!(worst, (err, si, i))
                 end
             end
         end
-        for level in (:transport, :collision_efficiency, :bulk)
+        for level in (:transport, :collision_efficiency, :collision, :selfcol, :bulk)
             v = errs[level]
             row = (;
                 order = n, level,
