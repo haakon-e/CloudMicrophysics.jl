@@ -416,20 +416,76 @@ function closed_rain_inner_NM(v_i_at_Dᵢ, Dstar, rᵢ, ρw, ai, bi, ci, D_min, 
 end
 
 """
+    closed_cloud_inner_NM(
+        v_i_at_Dᵢ, Dstar, rᵢ, ρw, ai, bi, ci, D_min, D_max, logN₀c, νcD, μcD, λc,
+    )
+
+Closed-form `(∂ₜN_col, ∂ₜM_col)` for the cloud inner integral at one outer ice
+diameter, where `v_i_at_Dᵢ` is the ice particle terminal velocity there and
+`Dstar` the fall-speed crossing from [`crossover_diameter`](@ref).
+
+The cloud size distribution `n_c(D) ∝ D^νcD e^{-λc D^μcD}` makes the
+`vᵢ`-weighted term of the integrand close exactly via
+[`generalized_gamma_inc_moment`](@ref); the `vₗ`-weighted term additionally
+carries `e^{-cⱼD}`, closed by a 5-term Taylor series in `D` (accurate to
+double precision for the physical range of `cⱼD_max`).
+
+The PSD normalization enters as `logN₀c` (not `N₀c`) and is folded into each
+[`generalized_gamma_inc_moment`](@ref) call rather than applied once at the
+end: `N₀c` and the unscaled moments are individually many orders of magnitude
+apart (`N₀c` compensates `λc`'s own huge magnitude in `D^μcD` space), so
+forming either on its own risks over/underflow that the final product would
+not have.
+"""
+function closed_cloud_inner_NM(v_i_at_Dᵢ, Dstar, rᵢ, ρw, ai, bi, ci, D_min, D_max, logN₀c, νcD, μcD, λc)
+    FT = float(eltype(ai))
+    K = 4  # Taylor order in `k`; 5 terms saturate to floating-point accuracy
+
+    coeffs = SA.SVector(collision_cross_section_ice_liquid_coeffs(rᵢ))
+    function Iᵖ(a, b, p)
+        acc = @inbounds coeffs[1] * generalized_gamma_inc_moment(a, b, p, νcD, μcD, λc, logN₀c)
+        @inbounds for i in 2:lastindex(coeffs)
+            acc += coeffs[i] * generalized_gamma_inc_moment(a, b, p + (i - 1), νcD, μcD, λc, logN₀c)
+        end
+        return acc
+    end
+    function flux(a, b, p)  # ≡ ∫ₐᵇ K(Dᵢ, Dₗ) ⋅ (vᵢ(Dᵢ) - vₗ(Dₗ)) ⋅ n_c(Dₗ) dDₗ
+        s = v_i_at_Dᵢ * Iᵖ(a, b, p)  # vᵢ ⋅ ∫ₐᵇ K ⋅ n_c dDₗ
+        @inbounds for j in eachindex(ai)  # - ∫ₐᵇ K ⋅ vₗ ⋅ n_c dDₗ, e^{-cⱼD} Taylor series in k
+            fact = one(FT)
+            ck = one(FT)
+            for k in 0:K
+                if k > 0
+                    fact *= k
+                    ck *= -ci[j]
+                end
+                s -= ai[j] * ck / fact * Iᵖ(a, b, p + bi[j] + k)
+            end
+        end
+        return s
+    end
+    crossing(p) = flux(D_min, Dstar, p) - flux(Dstar, D_max, p)  # sign flip at Dstar
+    mfac = ρw * CO.volume_sphere_D(one(FT))  # m_liq(D) = mfac Dₗ³
+    return (crossing(FT(0)), mfac * crossing(FT(3)))  # number: D⁰, mass: D³
+end
+
+"""
     get_liquid_integrals_rain_closed(
         psd_r::RainParticlePDF_SB2006,
-        n_r, ρₐ, L_r, N_r, state, ∂ₜV, m_liq, ρ′_rim, bounds_r; quad
+        n_r, ρₐ, L_r, N_r, state, logλ, ∂ₜV, m_liq, ρ′_rim, bounds_r; quad
     )
 
 Return a function `liquid_integrals(Dᵢ) -> (∂ₜN_col, ∂ₜM_col, ∂ₜB_col)`
-where N and M are the exact incomplete-gamma closed form and
-B_rim is computed by quadrature, split at the fall-speed crossing.
+where N and M are the exact incomplete-gamma closed form. `∂ₜB_col` (rime
+volume) uses the mean-diameter pullout `∂ₜM_col / ρ′_rim(D̄_i, D̄_r)`, with
+`ρ′_rim` evaluated once at the mass-weighted mean ice diameter ([`D_m`](@ref))
+and mean rain diameter, matching the P3 reference (Cober and List, 1993).
 The velocities and the rain velocity-curve coefficients come from the
 [`VolumetricCollisionRate`](@ref) `∂ₜV`.
 """
 @inline function get_liquid_integrals_rain_closed(
     psd_r::CMP.RainParticlePDF_SB2006,
-    n_r, ρₐ, L_r, N_r, state, ∂ₜV, m_liq, ρ′_rim, bounds_r; quad,
+    n_r, ρₐ, L_r, N_r, state, logλ, ∂ₜV, m_liq, ρ′_rim, bounds_r; quad,
 )
     FT = promote_type(eltype(state), UT.promote_typeof(ρₐ, L_r, N_r))
     ρw = psd_r.ρw
@@ -438,6 +494,9 @@ The velocities and the rain velocity-curve coefficients come from the
     ai, bi, ci = SA.SVector(v_l.ai), SA.SVector(v_l.bi), SA.SVector(v_l.ci)
     D_min, D_max = bounds_r
     zero_rates = (zero(FT), zero(FT), zero(FT))
+    D̄_i = D_m(state, logλ)
+    D̄_r = 4 * Dr_mean  # mass-weighted mean diameter of an exponential PSD
+    inv_ρ′_rim = inv(ρ′_rim(D̄_i, D̄_r))
     function liquid_integrals(Dᵢ)
         if iszero(N₀r) || !(D_max > D_min)
             return zero_rates
@@ -452,11 +511,7 @@ The velocities and the rain velocity-curve coefficients come from the
         if !(isfinite(∂ₜN_col) && isfinite(∂ₜM_col))
             return zero_rates
         end
-        ∂ₜB_col = integrate(
-            D -> ∂ₜV(Dᵢ, D) * n_r(D) * m_liq(D) / ρ′_rim(Dᵢ, D),
-            (D_min, clamp(Dstar, D_min, D_max), D_max),
-            quad,
-        )
+        ∂ₜB_col = ∂ₜM_col * inv_ρ′_rim
         return (∂ₜN_col, ∂ₜM_col, ∂ₜB_col)
     end
     return liquid_integrals
@@ -465,14 +520,83 @@ end
 @inline _rain_inner_integrals(
     psd_r::CMP.RainParticlePDF_SB2006,
     n_r, ∂ₜV::VolumetricCollisionRate{<:Any, <:Any, <:CO.Chen2022VelocityCurve},
-    m_liq, ρ′_rim, bounds_r, ρₐ, L_r, N_r, state; quad,
+    m_liq, ρ′_rim, bounds_r, ρₐ, L_r, N_r, state, logλ; quad,
 ) = get_liquid_integrals_rain_closed(
-    psd_r, n_r, ρₐ, L_r, N_r, state, ∂ₜV, m_liq, ρ′_rim, bounds_r;
+    psd_r, n_r, ρₐ, L_r, N_r, state, logλ, ∂ₜV, m_liq, ρ′_rim, bounds_r;
     quad,
 )
 @inline _rain_inner_integrals(
-    psd_r, n_r, ∂ₜV, m_liq, ρ′_rim, bounds_r, ρₐ, L_r, N_r, state; quad,
+    psd_r, n_r, ∂ₜV, m_liq, ρ′_rim, bounds_r, ρₐ, L_r, N_r, state, logλ; quad,
 ) = get_liquid_integrals(n_r, ∂ₜV, m_liq, ρ′_rim, bounds_r; quad)
+
+"""
+    get_liquid_integrals_cloud_closed(
+        psd_c::CloudParticlePDF_SB2006,
+        n_c, ρₐ, L_c, N_c, state, ∂ₜV, m_liq, ρ′_rim, bounds_c; quad
+    )
+
+Return a function `liquid_integrals(Dᵢ) -> (∂ₜN_col, ∂ₜM_col, ∂ₜB_col)`
+where N and M are the exact incomplete-gamma closed form and
+B_rim is computed by quadrature, split at the fall-speed crossing.
+The velocities and the cloud velocity-curve coefficients come from the
+[`VolumetricCollisionRate`](@ref) `∂ₜV`.
+
+Cloud droplets fall far slower than the ice sizes where the fall-speed
+crossing matters, so `crossover_diameter`'s root-solve is skipped whenever
+`vᵢ(Dᵢ)` cannot cross `vₗ` over the cloud size-distribution support.
+"""
+@inline function get_liquid_integrals_cloud_closed(
+    psd_c::CMP.CloudParticlePDF_SB2006,
+    n_c, ρₐ, L_c, N_c, state, ∂ₜV, m_liq, ρ′_rim, bounds_c; quad,
+)
+    FT = promote_type(eltype(state), UT.promote_typeof(ρₐ, L_c, N_c))
+    ρw = psd_c.ρw
+    (; logN₀c, λc, νcD, μcD) = CM2.pdf_cloud_parameters(psd_c, L_c / ρₐ, ρₐ, N_c)
+    (; v_i, v_l) = ∂ₜV
+    ai, bi, ci = SA.SVector(v_l.ai), SA.SVector(v_l.bi), SA.SVector(v_l.ci)
+    D_min, D_max = bounds_c
+    zero_rates = (zero(FT), zero(FT), zero(FT))
+    function liquid_integrals(Dᵢ)
+        if !isfinite(logN₀c) || !(D_max > D_min)
+            return zero_rates
+        end
+        v_i_at_Dᵢ = v_i(Dᵢ)
+        rᵢ = sqrt(ice_area(state, Dᵢ) / π)
+        Dstar = if v_i_at_Dᵢ > v_l(D_max)
+            D_max  # vᵢ > vₗ everywhere: no crossing, single interval
+        elseif v_i_at_Dᵢ < v_l(D_min)
+            D_min  # vᵢ < vₗ everywhere: no crossing, single interval
+        else
+            crossover_diameter(v_i_at_Dᵢ, v_l, D_min, D_max)
+        end
+        ∂ₜN_col, ∂ₜM_col = closed_cloud_inner_NM(
+            v_i_at_Dᵢ, Dstar, rᵢ, ρw, ai, bi, ci,
+            D_min, D_max, logN₀c, νcD, μcD, λc,
+        )
+        if !(isfinite(∂ₜN_col) && isfinite(∂ₜM_col))
+            return zero_rates
+        end
+        ∂ₜB_col = integrate(
+            D -> ∂ₜV(Dᵢ, D) * n_c(D) * m_liq(D) / ρ′_rim(Dᵢ, D),
+            (D_min, clamp(Dstar, D_min, D_max), D_max),
+            quad,
+        )
+        return (∂ₜN_col, ∂ₜM_col, ∂ₜB_col)
+    end
+    return liquid_integrals
+end
+
+@inline _cloud_inner_integrals(
+    psd_c::CMP.CloudParticlePDF_SB2006,
+    n_c, ∂ₜV::VolumetricCollisionRate{<:Any, <:Any, <:CO.Chen2022VelocityCurve},
+    m_liq, ρ′_rim, bounds_c, ρₐ, L_c, N_c, state, logλ; quad,
+) = get_liquid_integrals_cloud_closed(
+    psd_c, n_c, ρₐ, L_c, N_c, state, ∂ₜV, m_liq, ρ′_rim, bounds_c;
+    quad,
+)
+@inline _cloud_inner_integrals(
+    psd_c, n_c, ∂ₜV, m_liq, ρ′_rim, bounds_c, ρₐ, L_c, N_c, state, logλ; quad,
+) = get_liquid_integrals(n_c, ∂ₜV, m_liq, ρ′_rim, bounds_c; quad)
 
 """
     ∫liquid_ice_collisions(
@@ -609,12 +733,15 @@ A tuple `(QCFRZ, QCSHD, NCCOL, QRFRZ, QRSHD, NRCOL, ∫M_col, BCCOL, BRCOL, ∫�
         ),
     )
 
-    cloud_integrals = get_liquid_integrals(n_c, ∂ₜV, m_liq, ρ′_rim, bounds_c; quad)  # (∂ₜN_c_col, ∂ₜM_c_col, ∂ₜB_c_col)
-    # Rain inner: exact closed form for the (SB2006-exp PSD, Chen-2022) pair
-    # Numerical fallback for any other PSD/velocity type.
+    # Cloud and rain inner: exact closed form for the (SB2006 PSD, Chen-2022) pair,
+    # numerical fallback for any other PSD/velocity type.
+    cloud_integrals = _cloud_inner_integrals(
+        psd_c, n_c, ∂ₜV, m_liq, ρ′_rim, bounds_c,
+        ρₐ, L_c, N_c, state, logλ; quad,
+    )  # (∂ₜN_c_col, ∂ₜM_c_col, ∂ₜB_c_col)
     rain_integrals = _rain_inner_integrals(
         psd_r, n_r, ∂ₜV, m_liq, ρ′_rim, bounds_r,
-        ρₐ, L_r, N_r, state; quad,
+        ρₐ, L_r, N_r, state, logλ; quad,
     )  # (∂ₜN_r_col, ∂ₜM_r_col, ∂ₜB_r_col)
 
     return ∫liquid_ice_collisions(n_i, ∂ₜM_max, cloud_integrals, rain_integrals, ice_bounds; quad)
@@ -649,9 +776,15 @@ function wet_growth_onset_diameter(
     (; v_i, v_l) = ∂ₜV
     FT = promote_type(eltype(state), UT.promote_typeof(L_c, N_c, L_r, N_r, ρₐ))
     πFT = FT(π)
-    # Cloud collection with the droplet fall speed neglected:
-    #   ∫ K(D, Dₗ) n_c(Dₗ) m_liq(Dₗ) dDₗ = ∑ⱼ Kⱼ(rᵢ) (ρw π/6) M⁽ʲ⁺³⁾,
-    # with K quadratic in Dₗ and M⁽ᵏ⁾ the cloud size-distribution moments
+    # Locate the onset window with the cloud droplet fall speed neglected (valid:
+    # cloud droplets fall far slower than the ice sizes that matter here) and the
+    # rain fall speed evaluated once at the mean rain diameter (rain and ice fall
+    # speeds are comparable, so dropping it entirely biases the search):
+    #   ∫ K(D, Dₗ) n(Dₗ) m_liq(Dₗ) dDₗ = ∑ⱼ Kⱼ(rᵢ) (ρw π/6) M⁽ʲ⁺³⁾,
+    # with K quadratic in Dₗ and M⁽ᵏ⁾ the (untruncated) size-distribution
+    # moments. The onset diameters only bound the outer-integral subintervals;
+    # the collision rates entering the physics keep the full fall-speed
+    # difference (`closed_cloud_inner_NM`, `closed_rain_inner_NM`).
     (; λc, νcD, μcD) = CM2.pdf_cloud_parameters(psd_c, L_c / ρₐ, ρₐ, N_c)
     ρw = psd_c.ρw
     mfac = ρw * CO.volume_sphere_D(one(FT))
@@ -660,24 +793,18 @@ function wet_growth_onset_diameter(
     M₅ = mfac * DT.generalized_gamma_Mⁿ(νcD, μcD, λc, N_c, 5)
 
     (; N₀r, Dr_mean) = CM2.pdf_rain_parameters(psd_r, L_r / ρₐ, ρₐ, N_r)
-    ai, bi, ci = SA.SVector(v_l.ai), SA.SVector(v_l.bi), SA.SVector(v_l.ci)
-    D_min_r, D_max_r = bounds_r
-    rain_active = !iszero(N₀r) && (D_max_r > D_min_r)
+    mfac_r = psd_r.ρw * CO.volume_sphere_D(one(FT))
+    M₃r = mfac_r * N₀r * FT(6) * Dr_mean^4    # k=3: k! = 6
+    M₄r = mfac_r * N₀r * FT(24) * Dr_mean^5   # k=4: k! = 24
+    M₅r = mfac_r * N₀r * FT(120) * Dr_mean^6  # k=5: k! = 120
+    v_l_r = v_l(Dr_mean)
 
     function excess_mass_rate(D)
         v = v_i(D)
         rᵢ = sqrt(ice_area(state, D) / πFT)
         (k₀, k₁, k₂) = collision_cross_section_ice_liquid_coeffs(rᵢ)
         cloud_rate = v * (k₀ * M₃ + k₁ * M₄ + k₂ * M₅)
-        rain_rate = if rain_active
-            Dstar = crossover_diameter(v, v_l, D_min_r, D_max_r)
-            (_, ∂ₜM_col_r) = closed_rain_inner_NM(
-                v, Dstar, rᵢ, ρw, ai, bi, ci, D_min_r, D_max_r, N₀r, Dr_mean,
-            )
-            ifelse(isfinite(∂ₜM_col_r), ∂ₜM_col_r, zero(∂ₜM_col_r))
-        else
-            zero(v)
-        end
+        rain_rate = abs(v - v_l_r) * (k₀ * M₃r + k₁ * M₄r + k₂ * M₅r)
         return cloud_rate + rain_rate - ∂ₜM_max(D)
     end
     # The balance can cross twice (a wet-growth window: collection outgrows the

@@ -133,6 +133,29 @@ See also [`loggamma_inc_moment`](@ref)
 end
 
 """
+    generalized_gamma_inc_moment(D₁, D₂, p, ν, μ, λ, logscale = 0)
+
+`scale ⋅ ∫_{D₁}^{D₂} D^(p+ν) e^{-λ D^μ} dD`, with `scale = exp(logscale)`, via
+the substitution `u = D^μ` onto [`loggamma_inc_moment`](@ref):
+`exp(loggamma_inc_moment(D₁^μ, D₂^μ, (p+ν+1)/μ - 1, log(λ)) + logscale) / μ`.
+
+Routed through log space (rather than [`gamma_inc_moment`](@ref) directly)
+because `λ` (a slope parameter in `D^μ`, not `D`) can be many orders of
+magnitude larger than a typical `D`-space slope, making `λ^z` overflow before
+the division that would otherwise cancel it against `Γ(z)`. `logscale` folds
+a separate scale factor (e.g. a PSD normalization `N₀`) into the same
+log-space evaluation, ahead of the final `exp`, so a huge `N₀` and a tiny
+unscaled moment do not need to survive as separate floating-point values.
+
+`μ = 1, ν = 0, logscale = 0` recovers `gamma_inc_moment(D₁, D₂, p, λ)` exactly.
+"""
+@inline function generalized_gamma_inc_moment(D₁, D₂, p, ν, μ, λ, logscale = 0)
+    λ > 0 || return oftype(float(λ), NaN)
+    q = (p + ν + 1) / μ - 1
+    return exp(loggamma_inc_moment(D₁^μ, D₂^μ, q, log(λ)) + logscale) / μ
+end
+
+"""
     loggamma_moment(μ, logλ; [k = 0], [scale = 1])
 
 Compute `log(scale ⋅ ∫_0^∞ G(D) D^k dD)`, 

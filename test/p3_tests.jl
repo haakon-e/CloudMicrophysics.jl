@@ -698,7 +698,7 @@ function test_p3_bulk_liquid_ice_collisions(FT)
     @testset "local rime density" begin
         Tₐ = T_freeze - 1 // 10
         ρ′_rim_func = P3.compute_local_rime_density(vel_params, ρₐ, Tₐ, state)
-        @test ρ′_rim_func(D̄, D̄) ≈ FT(159.5) rtol = 1e-6
+        @test ρ′_rim_func(D̄, D̄) ≈ FT(282.8765520969483) rtol = 5e-4
 
         a, b, c = 51, 114, -11 // 2 # coeffs for Eq. 17 in Cober and List (1993), converted to [kg / m³]
         ρ′_rim_CL93(Rᵢ) = a + b * Rᵢ + c * Rᵢ^2  # Eq. 17 in Cober and List (1993), in [kg / m³], valid for 1 ≤ Rᵢ ≤ 8
@@ -845,15 +845,15 @@ function test_p3_bulk_liquid_ice_collisions(FT)
         # `rtol = 5e-4` admits both Float32 and Float64 against these (Float64)
         # reference values.
         @test QCFRZ ≈ 5.942471550989089e-7 rtol = 5e-4
-        @test QCSHD ≈ 2.0728862241368704e-9 rtol = 5e-4
+        @test QCSHD ≈ 2.076119837477249e-9 rtol = 5e-4
         @test NCCOL ≈ 60651.35670910096 rtol = 5e-4
         @test QRFRZ ≈ 6.642674674038379e-5 rtol = 5e-4
-        @test QRSHD ≈ 3.6526001759370415e-6 rtol = 5e-4
+        @test QRSHD ≈ 3.64983632601051e-6 rtol = 5e-4
         @test NRCOL ≈ 172.61819652435105 rtol = 5e-4
         @test ∫M_col ≈ 7.067566695764388e-5 rtol = 5e-4
-        @test BCCOL ≈ 3.725687492783128e-9 rtol = 5e-4
-        @test BRCOL ≈ 4.164686317018988e-7 rtol = 5e-4
-        @test ∫𝟙_wet_M_col ≈ 1.5520362321253953e-5 rtol = 5e-4
+        @test BCCOL ≈ 3.5089061306725346e-9 rtol = 5e-4
+        @test BRCOL ≈ 7.246592188317922e-8 rtol = 5e-4
+        @test ∫𝟙_wet_M_col ≈ 1.7043104560568167e-5 rtol = 5e-4
 
         ### Test the bulk source function
         state = P3.P3State(params, Lᵢ, Nᵢ, F_rim, ρ_rim)
@@ -945,6 +945,7 @@ function test_p3_closed_form_rain_inner(FT)
             (L_r, N_r) in ((1e-6, 1e4), (1e-4, 1e3), (2e-3, 5e2))
 
             state = P3.P3State(params, FT(L_ice), FT(N_ice), FT(F_rim), FT(ρ_rim))
+            logλ = P3.get_distribution_logλ(state)
             n_r = DT.size_distribution(psd_r, FT(L_r) / ρₐ, ρₐ, FT(N_r))
             ∂ₜV = P3.volumetric_collision_rate_integrand(vel, ρₐ, state)
             ρ′_rim = P3.compute_local_rime_density(vel, ρₐ, FT(270), state)
@@ -952,7 +953,7 @@ function test_p3_closed_form_rain_inner(FT)
             D_max > D_min || continue
             v_i = ∂ₜV.v_i
             rc = P3.get_liquid_integrals_rain_closed(
-                psd_r, n_r, ρₐ, FT(L_r), FT(N_r), state, ∂ₜV,
+                psd_r, n_r, ρₐ, FT(L_r), FT(N_r), state, logλ, ∂ₜV,
                 m_liq, ρ′_rim, bnds; quad = P3.GaussLegendre(FT, 6),
             )
             rn = P3.get_liquid_integrals(  # numerical fallback
@@ -972,8 +973,10 @@ function test_p3_closed_form_rain_inner(FT)
                 @test isapprox(Nc, Nref; rtol)
                 @test isapprox(Mc, Mref; rtol)
 
-                # B: closed quadrature vs numerical fallback at the same order
-                @test isapprox(Bc, rn(Dᵢ)[3]; rtol = sqrt(eps(FT)))
+                # B: mean-diameter pullout (ρ′_rim evaluated once at the mass-weighted
+                # mean ice and rain diameters) vs the pointwise quadrature reference;
+                # an approximation, not a re-derivation, so only a loose bound applies.
+                @test isapprox(Bc, rn(Dᵢ)[3]; rtol = FT(0.1), atol = eps(FT))
 
                 # smoke test: collision cross section has form: `π(rᵢ + Dₗ/2)²`, with rᵢ derived from `P3.ice_area`
                 rᵢ = sqrt(P3.ice_area(state, Dᵢ) / FT(π))
@@ -1086,7 +1089,8 @@ function test_p3_closed_form_rain_inner(FT)
         psd_r = CMP.SB2006(FT).pdf_r
         state = P3.P3State(params, FT(1e-3), FT(1e6), FT(0.5), FT(500))
         ∂ₜV = P3.volumetric_collision_rate_integrand(vel, FT(1), state)
-        rest = (identity, identity, (FT(0), FT(1)), FT(1), FT(1e-4), FT(1e3), state)
+        logλ = P3.get_distribution_logλ(state)
+        rest = (identity, identity, (FT(0), FT(1)), FT(1), FT(1e-4), FT(1e3), state, logλ)
         # closed-form eligibility: SB2006 rain PSD with a Chen velocity curve on the kernel
         m_closed = which(P3._rain_inner_integrals, typeof((psd_r, identity, ∂ₜV, rest...)))
         m_fallback = which(P3._rain_inner_integrals, typeof((1.0, identity, identity, rest...)))
