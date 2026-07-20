@@ -89,7 +89,7 @@ P3IceParams(toml_dict::CP.ParamDict;
     is_limited = true,
     quadrature_order = 6,
     quad = QUAD.GaussLegendre(CP.float_type(toml_dict), quadrature_order),
-    inp_depletion_model = NIceProxyDepletion(τ_act = 300),
+    inp_depletion_model = NIceProxyDepletion(τ_act = CP.float_type(toml_dict)(300)),
 ) = P3IceParams(;
     scheme = ParametersP3(toml_dict),
     terminal_velocity = Chen2022VelType(toml_dict),
@@ -154,7 +154,7 @@ Microphysics2MParams(toml_dict::CP.ParamDict;
     with_ice = false, is_limited = true,
     quadrature_order = 6,
     quad = QUAD.GaussLegendre(CP.float_type(toml_dict), quadrature_order),
-    inp_depletion_model = NIceProxyDepletion(τ_act = 300),
+    inp_depletion_model = NIceProxyDepletion(τ_act = CP.float_type(toml_dict)(300)),
 ) = Microphysics2MParams(;
     # Warm rain parameters (always present)
     warm_rain = WarmRainParams2M(toml_dict; is_limited),
