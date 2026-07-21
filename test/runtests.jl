@@ -30,5 +30,6 @@ TT.@testset "All tests" begin
     include("DistributionTools_tests.jl")
     include("gamma_inc_tests.jl")
     include("unrolled_logsumexp.jl")
+    include("utilities_tests.jl")
 end
 nothing
