@@ -494,9 +494,17 @@ The velocities and the rain velocity-curve coefficients come from the
     ai, bi, ci = SA.SVector(v_l.ai), SA.SVector(v_l.bi), SA.SVector(v_l.ci)
     D_min, D_max = bounds_r
     zero_rates = (zero(FT), zero(FT), zero(FT))
-    D̄_i = D_m(state, logλ)
-    D̄_r = 4 * Dr_mean  # mass-weighted mean diameter of an exponential PSD
-    inv_ρ′_rim = inv(ρ′_rim(D̄_i, D̄_r))
+    # `ρ′_rim` evaluates the liquid terminal velocity at `D̄_r`; skip it
+    # entirely (not just discard the result) when rain is absent, since
+    # `D̄_r = 4Dr_mean → 0` there and the velocity closure's power-law terms
+    # are not differentiable at `D = 0`.
+    inv_ρ′_rim = if iszero(N₀r)
+        zero(FT)
+    else
+        D̄_i = D_m(state, logλ)
+        D̄_r = 4 * Dr_mean  # mass-weighted mean diameter of an exponential PSD
+        inv(ρ′_rim(D̄_i, D̄_r))
+    end
     function liquid_integrals(Dᵢ)
         if iszero(N₀r) || !(D_max > D_min)
             return zero_rates

@@ -96,14 +96,27 @@ See also [`gamma_inc_moment`](@ref)
 """
 function loggamma_inc_moment(D₁, D₂, μ, logλ, k = 0, scale = 1)
     FT = UT.promote_typeof(D₁, D₂, μ, logλ)
-    D₁ < D₂ || return log(FT(0))  # return log(0) if D₁ ≥ D₂
+    # `FT(-Inf)`, not `log(FT(0))`: for a `Dual` `FT`, `log` of a zero-partials
+    # zero differentiates as `1/0 * 0 = NaN`; the degenerate-interval return is
+    # a constant and should carry a zero (not NaN) partial.
+    D₁ < D₂ || return FT(-Inf)
     z = k + μ + 1
     # `λ⋅D ≡ xexpy(D, logλ) ≡ D * exp(logλ)` (numerically stable)
     x1 = LogExpFunctions.xexpy(D₁, logλ)
-    x2 = LogExpFunctions.xexpy(D₂, logλ)
     (p1, q1) = UT.gamma_inc(z, x1)
-    (p2, q2) = UT.gamma_inc(z, x2)
-    Δq = x2 < z + 1 ? p2 - p1 : q1 - q2
+    # `D₂ = ∞` (the outer segment boundary, see `segment_boundaries`) is
+    # handled without calling `gamma_inc` at an infinite `x`: the ratio
+    # saturates exactly (`x2 ≡ ∞ ≥ z+1`, so this also reproduces the branch
+    # `gamma_inc` would have taken), but differentiating `gamma_inc`'s
+    # `x^(z-1) e^{-x}` at `x = ∞` is the indeterminate form `∞ ⋅ 0`, not the
+    # true (zero) derivative.
+    Δq = if isinf(D₂)
+        q1 - zero(q1)
+    else
+        x2 = LogExpFunctions.xexpy(D₂, logλ)
+        (p2, q2) = UT.gamma_inc(z, x2)
+        x2 < z + 1 ? p2 - p1 : q1 - q2
+    end
     Δq = max(Δq, eps(FT))
     return -z * logλ + SF.loggamma(z) + log(Δq) + log(FT(scale))
 end
