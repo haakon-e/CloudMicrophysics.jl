@@ -628,14 +628,14 @@ end
 
 Return up to two ice diameters in `[D_lo, D_hi]` where the collected liquid
 mass rate balances the freeze limit `∂ₜM_max` (the boundaries of the wet-growth
-window; `D_lo` stands in for absent crossings). The balance is
-evaluated in closed form: the cloud collection term neglects the droplet fall
-speed relative to the ice fall speed, making it a polynomial moment of the
-cloud size distribution, and the rain term is the closed-form mass component
-from [`closed_rain_inner_NM`](@ref). Crossings are located on a log-spaced
-scan of the interval and refined by fixed-iteration bisection.
+window; `D_lo` stands in for absent crossings). The balance is evaluated with
+the liquid fall speeds simplified: the cloud collection term neglects the
+droplet fall speed relative to the ice fall speed, and the rain term evaluates
+the rain fall speed once at the mean rain diameter, so both reduce to polynomial
+moments of their size distributions. Crossings are located on a log-spaced scan
+of the interval and refined by fixed-iteration bisection.
 
-The closed form applies to the (`CMP.CloudParticlePDF_SB2006`,
+This applies to the (`CMP.CloudParticlePDF_SB2006`,
 `CMP.RainParticlePDF_SB2006`) distributions with a
 [`CO.Chen2022VelocityCurve`](@ref) liquid velocity; for any other combination
 `(D_lo, D_lo)` is returned.
@@ -649,9 +649,14 @@ function wet_growth_onset_diameter(
     (; v_i, v_l) = ∂ₜV
     FT = promote_type(eltype(state), UT.promote_typeof(L_c, N_c, L_r, N_r, ρₐ))
     πFT = FT(π)
-    # Cloud collection with the droplet fall speed neglected:
-    #   ∫ K(D, Dₗ) n_c(Dₗ) m_liq(Dₗ) dDₗ = ∑ⱼ Kⱼ(rᵢ) (ρw π/6) M⁽ʲ⁺³⁾,
-    # with K quadratic in Dₗ and M⁽ᵏ⁾ the cloud size-distribution moments
+    # Locate the onset window with the cloud droplet fall speed neglected (cloud
+    # droplets fall far slower than the ice sizes that matter here) and the rain
+    # fall speed evaluated once at the mean rain diameter (rain and ice fall
+    # speeds are comparable, so dropping it entirely biases the search):
+    #   ∫ K(D, Dₗ) n(Dₗ) m_liq(Dₗ) dDₗ = ∑ⱼ Kⱼ(rᵢ) (ρw π/6) M⁽ʲ⁺³⁾,
+    # with K quadratic in Dₗ and M⁽ᵏ⁾ the (untruncated) size-distribution
+    # moments. The onset diameters only bound the outer-integral subintervals;
+    # the collision rates entering the physics keep the full fall-speed difference.
     (; λc, νcD, μcD) = CM2.pdf_cloud_parameters(psd_c, L_c / ρₐ, ρₐ, N_c)
     ρw = psd_c.ρw
     mfac = ρw * CO.volume_sphere_D(one(FT))
@@ -660,24 +665,18 @@ function wet_growth_onset_diameter(
     M₅ = mfac * DT.generalized_gamma_Mⁿ(νcD, μcD, λc, N_c, 5)
 
     (; N₀r, Dr_mean) = CM2.pdf_rain_parameters(psd_r, L_r / ρₐ, ρₐ, N_r)
-    ai, bi, ci = SA.SVector(v_l.ai), SA.SVector(v_l.bi), SA.SVector(v_l.ci)
-    D_min_r, D_max_r = bounds_r
-    rain_active = !iszero(N₀r) && (D_max_r > D_min_r)
+    mfac_r = psd_r.ρw * CO.volume_sphere_D(one(FT))
+    M₃r = mfac_r * N₀r * FT(6) * Dr_mean^4    # k=3: k! = 6
+    M₄r = mfac_r * N₀r * FT(24) * Dr_mean^5   # k=4: k! = 24
+    M₅r = mfac_r * N₀r * FT(120) * Dr_mean^6  # k=5: k! = 120
+    v_l_r = v_l(Dr_mean)
 
     function excess_mass_rate(D)
         v = v_i(D)
         rᵢ = sqrt(ice_area(state, D) / πFT)
         (k₀, k₁, k₂) = collision_cross_section_ice_liquid_coeffs(rᵢ)
         cloud_rate = v * (k₀ * M₃ + k₁ * M₄ + k₂ * M₅)
-        rain_rate = if rain_active
-            Dstar = crossover_diameter(v, v_l, D_min_r, D_max_r)
-            (_, ∂ₜM_col_r) = closed_rain_inner_NM(
-                v, Dstar, rᵢ, ρw, ai, bi, ci, D_min_r, D_max_r, N₀r, Dr_mean,
-            )
-            ifelse(isfinite(∂ₜM_col_r), ∂ₜM_col_r, zero(∂ₜM_col_r))
-        else
-            zero(v)
-        end
+        rain_rate = abs(v - v_l_r) * (k₀ * M₃r + k₁ * M₄r + k₂ * M₅r)
         return cloud_rate + rain_rate - ∂ₜM_max(D)
     end
     # The balance can cross twice (a wet-growth window: collection outgrows the

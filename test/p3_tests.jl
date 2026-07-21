@@ -851,16 +851,16 @@ function test_p3_bulk_liquid_ice_collisions(FT)
         # `rtol = 5e-4` admits both Float32 and Float64 against these (Float64)
         # reference values.
         @test QCFRZ ≈ 5.942471550989089e-7 rtol = 5e-4
-        @test QCSHD ≈ 2.0728862241368704e-9 rtol = 5e-4
+        @test QCSHD ≈ 2.07611985935298e-9 rtol = 5e-4
         @test NCCOL ≈ 60651.35670910096 rtol = 5e-4
         @test QRFRZ ≈ 6.642674674038379e-5 rtol = 5e-4
-        @test QRSHD ≈ 3.6526001759370415e-6 rtol = 5e-4
+        @test QRSHD ≈ 3.64983632601479e-6 rtol = 5e-4
         @test NRCOL ≈ 172.61819652435105 rtol = 5e-4
         @test ∫M_col ≈ 7.067566695764388e-5 rtol = 5e-4
         # BCCOL, BRCOL updated for the Cober-List sign fix in compute_local_rime_density.
         @test BCCOL ≈ 3.50892649473301e-9 rtol = 5e-4
         @test BRCOL ≈ 7.247197349759124e-8 rtol = 5e-4
-        @test ∫𝟙_wet_M_col ≈ 1.5520362321253953e-5 rtol = 5e-4
+        @test ∫𝟙_wet_M_col ≈ 1.7043104560594327e-5 rtol = 5e-4
 
         ### Test the bulk source function
         state = P3.P3State(params, Lᵢ, Nᵢ, F_rim, ρ_rim)
