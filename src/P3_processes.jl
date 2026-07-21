@@ -475,8 +475,69 @@ end
 ) = get_liquid_integrals(n_r, ∂ₜV, m_liq, ρ′_rim, bounds_r; quad)
 
 """
+    MomentMatched{N}
+    MomentMatched(N)
+
+Outer ice-integration strategy for `∫ n_i(D) φ(D) dD`: an `N`-node generalized
+Gauss-Laguerre rule matched to the ice number distribution's own generalized-gamma
+weight `Dᵘ e^{-λD}`. The nodes and weights are placed by the distribution's shape
+`(μ, λ)` and number `N`, so `φ` (the integrand without the `n_i` factor) is sampled
+where the distribution has mass. Only `N = 2` is implemented, with analytic nodes
+and weights. A [`Quadrature.QuadratureRule`](@ref) selects Gauss-Legendre instead.
+"""
+struct MomentMatched{N} end
+MomentMatched(N::Integer) = MomentMatched{N}()
+
+"""
+    integrate_psd_weighted(φ, n_i, shape, bounds, strategy)
+
+Integrate `∫ n_i(D) φ(D) dD`, where `n_i` is a generalized-gamma number distribution
+with `shape = (; μ, λ, N)`. With a [`Quadrature.QuadratureRule`](@ref), `n_i` is folded
+back into the integrand and integrated by Gauss-Legendre over `bounds` (reproducing a
+direct `integrate(D -> n_i(D) φ(D), bounds, quad)`). With a [`MomentMatched`](@ref)
+rule, the nodes are placed from `shape` and `n_i` is not evaluated: the rule's weights
+already integrate it.
+"""
+@inline integrate_psd_weighted(φ, n_i, shape, bounds, quad::QuadratureRule) =
+    integrate(D -> n_i(D) * φ(D), bounds, quad)
+@inline function integrate_psd_weighted(φ, n_i, shape, bounds, ::MomentMatched{2})
+    (; μ, λ, N) = shape
+    # Two-node generalized Gauss-Laguerre for weight `xᵘ e^{-x}` (x = λD): roots of
+    # `L₂⁽ᵘ⁾` at `x = (μ+2) ∓ √(μ+2)`. The `Γ(μ+1)` in the weights cancels the `N/Γ(μ+1)`
+    # distribution prefactor, leaving weights `N (1 ± s) / (2s)`, s = √(μ+2).
+    s = sqrt(μ + 2)
+    D₁ = clamp((μ + 2 - s) / λ, first(bounds), last(bounds))
+    D₂ = clamp((μ + 2 + s) / λ, first(bounds), last(bounds))
+    return N * ((1 + s) / (2s) * φ(D₁) + (s - 1) / (2s) * φ(D₂))
+end
+
+"""
+    augment_bounds_with_onset(strategy, bounds, onset)
+
+Ice bounds for the collision outer integral. A [`Quadrature.QuadratureRule`](@ref)
+resolves the freeze/shed kink at the wet-growth onset, so `onset()` is evaluated and
+its diameters are inserted into `bounds` as subinterval boundaries. A
+[`MomentMatched`](@ref) rule places its nodes by the distribution shape and does not
+resolve interior breakpoints, so `bounds` is returned unchanged and `onset` is never
+evaluated (the onset search is skipped).
+"""
+@inline augment_bounds_with_onset(::MomentMatched, bounds, onset) = bounds
+@inline function augment_bounds_with_onset(::QuadratureRule, bounds, onset)
+    (D_wet₁, D_wet₂) = onset()
+    return Tuple(
+        SA.sort(
+            SA.SVector(
+                bounds...,
+                clamp(D_wet₁, first(bounds), last(bounds)),
+                clamp(D_wet₂, first(bounds), last(bounds)),
+            ),
+        ),
+    )
+end
+
+"""
     ∫liquid_ice_collisions(
-        n_i, ∂ₜM_max, cloud_integrals, rain_integrals, ice_bounds; [quad]
+        n_i, ∂ₜM_max, cloud_integrals, rain_integrals, ice_bounds; quad, ice_shape
     )
 
 Computes the bulk collision rate integrands between ice and liquid particles.
@@ -494,8 +555,13 @@ Computes the bulk collision rate integrands between ice and liquid particles.
 # Returns
 A tuple of 8 integrands, see [`∫liquid_ice_collisions`](@ref) for details.
 """
-@inline function ∫liquid_ice_collisions(n_i, ∂ₜM_max, cloud_integrals, rain_integrals, ice_bounds; quad)
-    function liquid_ice_collisions_integrands(Dᵢ)
+@inline function ∫liquid_ice_collisions(
+    n_i, ∂ₜM_max, cloud_integrals, rain_integrals, ice_bounds; quad, ice_shape = nothing,
+)
+    # `φ(Dᵢ)`: the 10 per-ice-particle collision-rate components, without the `n_i(Dᵢ)`
+    # weight. The outer strategy folds `n_i` in (see [`integrate_psd_weighted`](@ref)):
+    # ∂ₜX = ∫ ∂ₜX(Dᵢ) n_i(Dᵢ) dDᵢ, `[X / s / m]` --> `[X / s]`.
+    @inline function φ(Dᵢ)
         # Inner integrals over liquid particle diameters
         ∂ₜN_c_col, ∂ₜM_c_col, ∂ₜB_c_col = cloud_integrals(Dᵢ)
         ∂ₜN_r_col, ∂ₜM_r_col, ∂ₜB_r_col = rain_integrals(Dᵢ)
@@ -507,23 +573,20 @@ A tuple of 8 integrands, see [`∫liquid_ice_collisions`](@ref) for details.
         f_frz = iszero(∂ₜM_col) ? zero(∂ₜM_frz) : ∂ₜM_frz / ∂ₜM_col
         𝟙_wet = ∂ₜM_col > ∂ₜM_frz  # Used for wet densification
 
-        n = n_i(Dᵢ)
-        # Integrating over `Dᵢ` gives another unit of `[m]`, so `[X / s / m]` --> `[X / s]`
-        # ∂ₜX = ∫ ∂ₜX(Dᵢ) nᵢ(Dᵢ) dDᵢ
         return SA.SVector(
-            n * ∂ₜM_c_col * f_frz,        # QCFRZ
-            n * ∂ₜM_c_col * (1 - f_frz),  # QCSHD
-            n * ∂ₜN_c_col,                # NCCOL
-            n * ∂ₜM_r_col * f_frz,        # QRFRZ
-            n * ∂ₜM_r_col * (1 - f_frz),  # QRSHD
-            n * ∂ₜN_r_col,                # NRCOL
-            n * ∂ₜM_col,                  # ∫M_col,      total collision rate
-            n * ∂ₜB_c_col * f_frz,        # BCCOL,       ∂ₜB_rim source
-            n * ∂ₜB_r_col * f_frz,        # BRCOL,       ∂ₜB_rim source
-            n * 𝟙_wet * ∂ₜM_col,          # ∫𝟙_wet_M_col, wet growth indicator
+            ∂ₜM_c_col * f_frz,        # QCFRZ
+            ∂ₜM_c_col * (1 - f_frz),  # QCSHD
+            ∂ₜN_c_col,                # NCCOL
+            ∂ₜM_r_col * f_frz,        # QRFRZ
+            ∂ₜM_r_col * (1 - f_frz),  # QRSHD
+            ∂ₜN_r_col,                # NRCOL
+            ∂ₜM_col,                  # ∫M_col,      total collision rate
+            ∂ₜB_c_col * f_frz,        # BCCOL,       ∂ₜB_rim source
+            ∂ₜB_r_col * f_frz,        # BRCOL,       ∂ₜB_rim source
+            𝟙_wet * ∂ₜM_col,          # ∫𝟙_wet_M_col, wet growth indicator
         )
     end
-    return integrate(liquid_ice_collisions_integrands, ice_bounds, quad)
+    return integrate_psd_weighted(φ, n_i, ice_shape, ice_bounds, quad)
 end
 
 """
@@ -569,7 +632,7 @@ A tuple `(QCFRZ, QCSHD, NCCOL, QRFRZ, QRSHD, NRCOL, ∫M_col, BCCOL, BRCOL, ∫�
 @inline function ∫liquid_ice_collisions(
     state, logλ,
     psd_c, psd_r, L_c, N_c, L_r, N_r,
-    aps, tps, vel, ρₐ, T, m_liq; quad,
+    aps, tps, vel, ρₐ, T, m_liq; quad, ice_outer = quad,
 )
     FT = eltype(state)
 
@@ -587,27 +650,21 @@ A tuple `(QCFRZ, QCSHD, NCCOL, QRFRZ, QRSHD, NRCOL, ∫M_col, BCCOL, BRCOL, ∫�
     ∂ₜM_max = compute_max_freeze_rate(aps, tps, vel, ρₐ, T, state)  # ∂ₜM_max(Dᵢ)
 
     p = FT(0.00001)
-    ice_bounds = velocity_integral_bounds(state, logλ, ∂ₜV.v_i; p)
+    base_bounds = velocity_integral_bounds(state, logλ, ∂ₜV.v_i; p)
     bounds_c = CM2.get_size_distribution_bounds(psd_c, L_c / ρₐ, ρₐ, N_c, p)
     bounds_r = CM2.get_size_distribution_bounds(psd_r, L_r / ρₐ, ρₐ, N_r, p)
 
     # The freeze/shed partition and the wet-growth indicator change branch at the
-    # wet-growth onset diameter, so the onset is a subinterval boundary of the
-    # outer integral
-    (D_wet₁, D_wet₂) = wet_growth_onset_diameter(
+    # wet-growth onset diameter. Gauss-Legendre resolves it as a subinterval boundary
+    # of the outer integral; `MomentMatched` places its nodes by the distribution shape
+    # and skips the onset search (see [`augment_bounds_with_onset`](@ref)).
+    onset() = wet_growth_onset_diameter(
         psd_c, psd_r, ∂ₜV, ∂ₜM_max, state,
         L_c, N_c, L_r, N_r, ρₐ, bounds_r,
-        first(ice_bounds), last(ice_bounds),
+        first(base_bounds), last(base_bounds),
     )
-    ice_bounds = Tuple(
-        SA.sort(
-            SA.SVector(
-                ice_bounds...,
-                clamp(D_wet₁, first(ice_bounds), last(ice_bounds)),
-                clamp(D_wet₂, first(ice_bounds), last(ice_bounds)),
-            ),
-        ),
-    )
+    ice_bounds = augment_bounds_with_onset(ice_outer, base_bounds, onset)
+    ice_shape = (; μ = get_μ(state, logλ), λ = exp(logλ), N = state.ρn_ice)
 
     cloud_integrals = get_liquid_integrals(n_c, ∂ₜV, m_liq, ρ′_rim, bounds_c; quad)  # (∂ₜN_c_col, ∂ₜM_c_col, ∂ₜB_c_col)
     # Rain inner: exact closed form for the (SB2006-exp PSD, Chen-2022) pair
@@ -617,7 +674,9 @@ A tuple `(QCFRZ, QCSHD, NCCOL, QRFRZ, QRSHD, NRCOL, ∫M_col, BCCOL, BRCOL, ∫�
         ρₐ, L_r, N_r, state; quad,
     )  # (∂ₜN_r_col, ∂ₜM_r_col, ∂ₜB_r_col)
 
-    return ∫liquid_ice_collisions(n_i, ∂ₜM_max, cloud_integrals, rain_integrals, ice_bounds; quad)
+    return ∫liquid_ice_collisions(
+        n_i, ∂ₜM_max, cloud_integrals, rain_integrals, ice_bounds; quad = ice_outer, ice_shape,
+    )
 end
 
 """
@@ -760,7 +819,7 @@ A `NamedTuple` of `(; ∂ₜq_c, ∂ₜq_r, ∂ₜN_c, ∂ₜN_r, ∂ₜL_rim, �
 @inline function bulk_liquid_ice_collision_sources(
     state, logλ,
     psd_c, psd_r, L_c, N_c, L_r, N_r,
-    aps, tps, vel, ρₐ, T; quad,
+    aps, tps, vel, ρₐ, T; quad, ice_outer = quad,
 )
     FT = promote_type(eltype(state), UT.promote_typeof(L_c, N_c, L_r, N_r, ρₐ, T))
     (; τ_wet, ρ_i) = state.params
@@ -773,7 +832,7 @@ A `NamedTuple` of `(; ∂ₜq_c, ∂ₜq_r, ∂ₜN_c, ∂ₜN_r, ∂ₜL_rim, �
     rates = ∫liquid_ice_collisions(
         state, logλ,
         psd_c, psd_r, L_c, N_c, L_r, N_r,
-        aps, tps, vel, ρₐ, T, m_liq; quad,
+        aps, tps, vel, ρₐ, T, m_liq; quad, ice_outer,
     )
     (QCFRZ, QCSHD, NCCOL, QRFRZ, QRSHD, NRCOL, ∫∂ₜM_col, BCCOL, BRCOL, ∫𝟙_wet_M_col) = rates
 
