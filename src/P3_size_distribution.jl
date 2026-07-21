@@ -183,6 +183,86 @@ unscaled moment do not need to survive as separate floating-point values.
     return exp(loggamma_inc_moment(D₁^μ, D₂^μ, q, log(λ)) + logscale) / μ
 end
 
+# `L` incomplete-gamma-moment values at a single integer-spaced shape-order
+# chain, seeded once (`z0`) then advanced by the DLMF 8.8.2 recurrence. Shared
+# by `generalized_gamma_inc_moment_chain6`/`chain10`'s three residue-mod-`μ`
+# sub-chains, since the shape order only advances by `1/μ` per unit `p`.
+@inline function _gamma_inc_moment_residue_chain(x1, x2, z0, logλ, logscale, μ, ::Val{L}) where {L}
+    FT = float(promote_type(typeof(x1), typeof(x2), typeof(z0)))
+    loggamma_z = SF.loggamma(z0)
+    (P1, Q1) = UT.gamma_inc(z0, x1)
+    (P2, Q2) = UT.gamma_inc(z0, x2)
+    t1 = exp(z0 * log(x1) - x1 - loggamma_z) / z0
+    t2 = exp(z0 * log(x2) - x2 - loggamma_z) / z0
+    vals = SA.MVector{L, FT}(undef)
+    z = z0
+    for step in 1:L
+        Δq = x2 < z + 1 ? P2 - P1 : Q1 - Q2
+        Δq = max(Δq, eps(FT))
+        vals[step] = exp(-z * logλ + loggamma_z + log(Δq) + logscale) / μ
+        if step < L
+            Q1 += t1
+            P1 = 1 - Q1
+            Q2 += t2
+            P2 = 1 - Q2
+            t1 *= x1 / (z + 1)
+            t2 *= x2 / (z + 1)
+            loggamma_z += log(z)
+            z += 1
+        end
+    end
+    return SA.SVector(vals)
+end
+
+"""
+    generalized_gamma_inc_moment_chain6(D₁, D₂, base_p, ν, μ, λ, logscale)
+
+`SA.SVector` of `generalized_gamma_inc_moment(D₁, D₂, base_p + o, ν, μ, λ,
+logscale)` for `o = 0, ..., 5`, for `μ = 3`. Groups the 6 shape orders by
+`o mod 3` (the incomplete-gamma recurrence only advances the shape order by
+integer steps, and `o mod μ` shares one integer step per unit `o`): 3 chains
+of length 2 (one seed evaluation plus one recurrence step each) instead of 6
+independent [`generalized_gamma_inc_moment`](@ref) evaluations.
+
+See also [`generalized_gamma_inc_moment_chain10`](@ref).
+"""
+@inline function generalized_gamma_inc_moment_chain6(D₁, D₂, base_p, ν, μ, λ, logscale = 0)
+    FT = float(promote_type(typeof(D₁), typeof(D₂), typeof(λ)))
+    D₂ > D₁ || return SA.SVector(ntuple(_ -> zero(FT), Val(6)))
+    λ > 0 || return SA.SVector(ntuple(_ -> FT(NaN), Val(6)))
+    x1 = λ * D₁^μ
+    x2 = λ * D₂^μ
+    logλ = log(λ)
+    r0 = _gamma_inc_moment_residue_chain(x1, x2, (base_p + ν + 1) / μ, logλ, logscale, μ, Val(2))       # o = 0, 3
+    r1 = _gamma_inc_moment_residue_chain(x1, x2, (base_p + 1 + ν + 1) / μ, logλ, logscale, μ, Val(2))   # o = 1, 4
+    r2 = _gamma_inc_moment_residue_chain(x1, x2, (base_p + 2 + ν + 1) / μ, logλ, logscale, μ, Val(2))   # o = 2, 5
+    return SA.SVector(r0[1], r1[1], r2[1], r0[2], r1[2], r2[2])
+end
+
+"""
+    generalized_gamma_inc_moment_chain10(D₁, D₂, base_p, ν, μ, λ, logscale)
+
+`SA.SVector` of `generalized_gamma_inc_moment(D₁, D₂, base_p + o, ν, μ, λ,
+logscale)` for `o = 0, ..., 9`, for `μ = 3`. Groups the 10 shape orders by
+`o mod 3` into 3 chains of length 4 (`o = 0,3,6,9`), 3 (`o = 1,4,7`), and 3
+(`o = 2,5,8`), instead of 10 independent
+[`generalized_gamma_inc_moment`](@ref) evaluations.
+
+See also [`generalized_gamma_inc_moment_chain6`](@ref).
+"""
+@inline function generalized_gamma_inc_moment_chain10(D₁, D₂, base_p, ν, μ, λ, logscale = 0)
+    FT = float(promote_type(typeof(D₁), typeof(D₂), typeof(λ)))
+    D₂ > D₁ || return SA.SVector(ntuple(_ -> zero(FT), Val(10)))
+    λ > 0 || return SA.SVector(ntuple(_ -> FT(NaN), Val(10)))
+    x1 = λ * D₁^μ
+    x2 = λ * D₂^μ
+    logλ = log(λ)
+    r0 = _gamma_inc_moment_residue_chain(x1, x2, (base_p + ν + 1) / μ, logλ, logscale, μ, Val(4))       # o = 0, 3, 6, 9
+    r1 = _gamma_inc_moment_residue_chain(x1, x2, (base_p + 1 + ν + 1) / μ, logλ, logscale, μ, Val(3))   # o = 1, 4, 7
+    r2 = _gamma_inc_moment_residue_chain(x1, x2, (base_p + 2 + ν + 1) / μ, logλ, logscale, μ, Val(3))   # o = 2, 5, 8
+    return SA.SVector(r0[1], r1[1], r2[1], r0[2], r1[2], r2[2], r0[3], r1[3], r2[3], r0[4])
+end
+
 """
     loggamma_moment(μ, logλ; [k = 0], [scale = 1])
 
