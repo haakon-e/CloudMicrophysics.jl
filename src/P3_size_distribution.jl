@@ -53,6 +53,22 @@ DT.size_distribution(state::P3State, logλ) = P3SizeDistributionFunctor(logN′i
 ### ------------------------------------------------ ###
 
 """
+    paired_gamma_inc(z, x1, x2)
+
+`(gamma_inc(z, x1), gamma_inc(z, x2))`, sharing one `loggamma(z)` evaluation
+between the two boundary evaluations when `x1, x2` are plain (not `Dual`)
+floats. `gamma_inc(a::Real, x::Dual)`'s analytic `x`-derivative rule reads
+`loggamma(a)` internally on every call already, so there is nothing to share
+when either `x` carries a differentiated shape; that case falls back to two
+independent `gamma_inc` calls.
+"""
+@inline function paired_gamma_inc(z, x1::AbstractFloat, x2::AbstractFloat)
+    loggamma_z = SF.loggamma(z)
+    return (UT._gamma_inc(z, x1, loggamma_z), UT._gamma_inc(z, x2, loggamma_z))
+end
+@inline paired_gamma_inc(z, x1, x2) = (UT.gamma_inc(z, x1), UT.gamma_inc(z, x2))
+
+"""
     loggamma_inc_moment(D₁, D₂, μ, logλ, [k = 0], [scale = 1])
 
 Compute `log(Iᵏ)` where `Iᵏ` is the following integral:
@@ -103,7 +119,6 @@ function loggamma_inc_moment(D₁, D₂, μ, logλ, k = 0, scale = 1)
     z = k + μ + 1
     # `λ⋅D ≡ xexpy(D, logλ) ≡ D * exp(logλ)` (numerically stable)
     x1 = LogExpFunctions.xexpy(D₁, logλ)
-    (p1, q1) = UT.gamma_inc(z, x1)
     # `D₂ = ∞` (the outer segment boundary, see `segment_boundaries`) is
     # handled without calling `gamma_inc` at an infinite `x`: the ratio
     # saturates exactly (`x2 ≡ ∞ ≥ z+1`, so this also reproduces the branch
@@ -111,10 +126,11 @@ function loggamma_inc_moment(D₁, D₂, μ, logλ, k = 0, scale = 1)
     # `x^(z-1) e^{-x}` at `x = ∞` is the indeterminate form `∞ ⋅ 0`, not the
     # true (zero) derivative.
     Δq = if isinf(D₂)
+        (_, q1) = UT.gamma_inc(z, x1)
         q1 - zero(q1)
     else
         x2 = LogExpFunctions.xexpy(D₂, logλ)
-        (p2, q2) = UT.gamma_inc(z, x2)
+        ((p1, q1), (p2, q2)) = paired_gamma_inc(z, x1, x2)
         x2 < z + 1 ? p2 - p1 : q1 - q2
     end
     Δq = max(Δq, eps(FT))
@@ -138,8 +154,7 @@ See also [`loggamma_inc_moment`](@ref)
     z = p + 1
     x1 = α * D₁
     x2 = α * D₂
-    (p1, q1) = UT.gamma_inc(z, x1)
-    (p2, q2) = UT.gamma_inc(z, x2)
+    ((p1, q1), (p2, q2)) = paired_gamma_inc(z, x1, x2)
     Δq = x2 < z + 1 ? p2 - p1 : q1 - q2
     Δq = max(Δq, zero(FT))
     return SF.gamma(z) * Δq / α^z

@@ -381,6 +381,60 @@ function crossover_diameter(v_target, v_l::F, D_min, D_max) where {F}
 end
 
 """
+    gamma_inc_moment_NM_chain(coeffs, a, b, p_base, α)
+
+`(N-part, M-part)` of `∫ₐᵇ K(D) e^{-α D} dD` and `∫ₐᵇ K(D) D³ e^{-α D} dD`,
+where `K(D) = coeffs[1] + coeffs[2] D + coeffs[3] D²` (the ice-liquid
+collision cross-section), i.e. `gamma_inc_moment(a,b,p_base+i-1,α)` for
+`i ∈ 1:3` (N: `p_base`), summed against `coeffs`, and again at `p_base+3`
+(M). The six needed shape orders `z = p_base+1, ..., p_base+6` are
+consecutive integer-spaced, so they form a single incomplete-gamma
+recurrence chain (DLMF 8.8.2): one seed evaluation per boundary, then five
+cheap multiply-add steps, instead of six independent [`gamma_inc_moment`](@ref)
+calls per boundary.
+"""
+@inline function gamma_inc_moment_NM_chain(coeffs, a, b, p_base, α)
+    FT = float(promote_type(typeof(a), typeof(b), typeof(α)))
+    b > a || return (zero(FT), zero(FT))
+    α > 0 || return (FT(NaN), FT(NaN))
+    x1 = α * a
+    x2 = α * b
+    z0 = p_base + 1
+    (P1, Q1) = UT.gamma_inc(z0, x1)
+    (P2, Q2) = UT.gamma_inc(z0, x2)
+    loggamma_z0 = SF.loggamma(z0)  # z0 is a plain (never-differentiated) shape order
+    t1 = exp(z0 * log(x1) - x1 - loggamma_z0) / z0  # recurrence increment, Q(z0+1,x1) = Q(z0,x1) + t1
+    t2 = exp(z0 * log(x2) - x2 - loggamma_z0) / z0
+    gz = SF.gamma(z0)
+    αz = α^z0
+    N_sum = zero(FT)
+    M_sum = zero(FT)
+    for k in 0:5
+        z = z0 + k
+        Δq = x2 < z + 1 ? P2 - P1 : Q1 - Q2
+        Δq = max(Δq, zero(FT))
+        val = gz * Δq / αz
+        c = @inbounds coeffs[mod(k, 3) + 1]
+        if k < 3
+            N_sum += c * val
+        else
+            M_sum += c * val
+        end
+        if k < 5
+            Q1 += t1
+            P1 = 1 - Q1
+            Q2 += t2
+            P2 = 1 - Q2
+            t1 *= x1 / (z + 1)
+            t2 *= x2 / (z + 1)
+            gz *= z          # Γ(z+1) = z Γ(z)
+            αz *= α          # α^(z+1) = α ⋅ α^z
+        end
+    end
+    return (N_sum, M_sum)
+end
+
+"""
     closed_rain_inner_NM(
         v_i_at_Dᵢ, Dstar, rᵢ, ρw, ai, bi, ci, D_min, D_max, N₀r, Dr_mean,
     )
@@ -393,26 +447,25 @@ function closed_rain_inner_NM(v_i_at_Dᵢ, Dstar, rᵢ, ρw, ai, bi, ci, D_min, 
     FT = float(eltype(ai))
     λ = inv(Dr_mean)  # rain PSD slope: n_r(D) ∝ e^{-λ D}
 
-    # Compute rain PSD incomplete moments weighted by ice-liquid collision
-    # cross-section `K`, and sedimentation velocity difference `|vᵢ - vₗ|`
+    # Rain PSD incomplete moments weighted by ice-liquid collision cross-section
+    # `K` and sedimentation velocity difference `|vᵢ - vₗ|`; N and M share one
+    # gamma_inc_moment_NM_chain call per (boundary interval, velocity term).
     coeffs = SA.SVector(collision_cross_section_ice_liquid_coeffs(rᵢ))
-    function Iᵖ(a, b, p, α)
-        acc = @inbounds coeffs[1] * gamma_inc_moment(a, b, p, α)
-        @inbounds for i in 2:lastindex(coeffs)
-            acc += coeffs[i] * gamma_inc_moment(a, b, p + (i - 1), α)
-        end
-        return acc
-    end
-    function flux(a, b, p)  # ≡ ∫ₐᵇ K(Dᵢ, Dₗ) ⋅ (vᵢ(Dᵢ) - vₗ(Dₗ)) ⋅ n_r(Dₗ) dDₗ
-        s = v_i_at_Dᵢ * Iᵖ(a, b, p, λ)  # vᵢ ⋅ ∫ₐᵇ K ⋅ n_r dDₗ
+    function flux(a, b)  # ≡ ∫ₐᵇ K(Dᵢ, Dₗ) ⋅ (vᵢ(Dᵢ) - vₗ(Dₗ)) ⋅ n_r(Dₗ) dDₗ, (N, M)
+        (Nvi, Mvi) = gamma_inc_moment_NM_chain(coeffs, a, b, zero(FT), λ)
+        Ns = v_i_at_Dᵢ * Nvi  # vᵢ ⋅ ∫ₐᵇ K ⋅ n_r dDₗ
+        Ms = v_i_at_Dᵢ * Mvi
         @inbounds for j in eachindex(ai)  # - ∫ₐᵇ K ⋅ vₗ ⋅ n_r dDₗ
-            s -= ai[j] * Iᵖ(a, b, p + bi[j], λ + ci[j])
+            (Nj, Mj) = gamma_inc_moment_NM_chain(coeffs, a, b, bi[j], λ + ci[j])
+            Ns -= ai[j] * Nj
+            Ms -= ai[j] * Mj
         end
-        return s
+        return (Ns, Ms)
     end
-    crossing(p) = flux(D_min, Dstar, p) - flux(Dstar, D_max, p)  # sign flip at Dstar
+    (Nlo, Mlo) = flux(D_min, Dstar)
+    (Nhi, Mhi) = flux(Dstar, D_max)  # sign flip at Dstar
     mfac = ρw * CO.volume_sphere_D(one(FT))  # m_liq(D) = mfac Dₗ³
-    return (N₀r * crossing(FT(0)), N₀r * mfac * crossing(FT(3)))  # number: D⁰, mass: D³
+    return (N₀r * (Nlo - Nhi), N₀r * mfac * (Mlo - Mhi))  # number: D⁰, mass: D³
 end
 
 """
