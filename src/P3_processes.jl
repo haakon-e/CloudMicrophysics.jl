@@ -484,31 +484,27 @@ carries `e^{-cⱼD}`, closed by a 5-term Taylor series in `D` (accurate to
 double precision for the physical range of `cⱼD_max`).
 
 The PSD normalization enters as `logN₀c` (not `N₀c`) and is folded into each
-`generalized_gamma_inc_moment` evaluation rather than applied once at the
+[`generalized_gamma_inc_moment`](@ref) call rather than applied once at the
 end: `N₀c` and the unscaled moments are individually many orders of magnitude
 apart (`N₀c` compensates `λc`'s own huge magnitude in `D^μcD` space), so
 forming either on its own risks over/underflow that the final product would
 not have.
-
-`μcD = 3` makes the needed shape orders (the cross-section power `m ∈ 0:2`
-combined with the Taylor index `k ∈ 0:4`, for both N and M) span 6
-(`vᵢ`-weighted term) or 10 (per velocity term) consecutive integer offsets
-from a term-specific base; [`generalized_gamma_inc_moment_chain6`](@ref) and
-[`generalized_gamma_inc_moment_chain10`](@ref) evaluate each such group via 3
-short incomplete-gamma recurrence chains (one per residue class mod `μcD`)
-instead of independent evaluations.
 """
 function closed_cloud_inner_NM(v_i_at_Dᵢ, Dstar, rᵢ, ρw, ai, bi, ci, D_min, D_max, logN₀c, νcD, μcD, λc)
     FT = float(eltype(ai))
     K = 4  # Taylor order in `k`; 5 terms saturate to floating-point accuracy
 
     coeffs = SA.SVector(collision_cross_section_ice_liquid_coeffs(rᵢ))
-    function side(a, b)  # ≡ (∫ₐᵇ K(Dᵢ,Dₗ) ⋅ (vᵢ(Dᵢ)-vₗ(Dₗ)) ⋅ n_c(Dₗ) D⁰ dDₗ, ⋯ D³ dDₗ)
-        chA = generalized_gamma_inc_moment_chain6(a, b, zero(FT), νcD, μcD, λc, logN₀c)
-        N_s = v_i_at_Dᵢ * (@inbounds coeffs[1] * chA[1] + coeffs[2] * chA[2] + coeffs[3] * chA[3])
-        M_s = v_i_at_Dᵢ * (@inbounds coeffs[1] * chA[4] + coeffs[2] * chA[5] + coeffs[3] * chA[6])
+    function Iᵖ(a, b, p)
+        acc = @inbounds coeffs[1] * generalized_gamma_inc_moment(a, b, p, νcD, μcD, λc, logN₀c)
+        @inbounds for i in 2:lastindex(coeffs)
+            acc += coeffs[i] * generalized_gamma_inc_moment(a, b, p + (i - 1), νcD, μcD, λc, logN₀c)
+        end
+        return acc
+    end
+    function flux(a, b, p)  # ≡ ∫ₐᵇ K(Dᵢ, Dₗ) ⋅ (vᵢ(Dᵢ) - vₗ(Dₗ)) ⋅ n_c(Dₗ) dDₗ
+        s = v_i_at_Dᵢ * Iᵖ(a, b, p)  # vᵢ ⋅ ∫ₐᵇ K ⋅ n_c dDₗ
         @inbounds for j in eachindex(ai)  # - ∫ₐᵇ K ⋅ vₗ ⋅ n_c dDₗ, e^{-cⱼD} Taylor series in k
-            chj = generalized_gamma_inc_moment_chain10(a, b, bi[j], νcD, μcD, λc, logN₀c)
             fact = one(FT)
             ck = one(FT)
             for k in 0:K
@@ -516,20 +512,14 @@ function closed_cloud_inner_NM(v_i_at_Dᵢ, Dstar, rᵢ, ρw, ai, bi, ci, D_min,
                     fact *= k
                     ck *= -ci[j]
                 end
-                w = ai[j] * ck / fact
-                for m in 0:2
-                    c = coeffs[m + 1]
-                    N_s -= c * w * chj[m + k + 1]
-                    M_s -= c * w * chj[m + 3 + k + 1]
-                end
+                s -= ai[j] * ck / fact * Iᵖ(a, b, p + bi[j] + k)
             end
         end
-        return (N_s, M_s)
+        return s
     end
-    (Nlo, Mlo) = side(D_min, Dstar)
-    (Nhi, Mhi) = side(Dstar, D_max)  # sign flip at Dstar
+    crossing(p) = flux(D_min, Dstar, p) - flux(Dstar, D_max, p)  # sign flip at Dstar
     mfac = ρw * CO.volume_sphere_D(one(FT))  # m_liq(D) = mfac Dₗ³
-    return (Nlo - Nhi, mfac * (Mlo - Mhi))  # number: D⁰, mass: D³
+    return (crossing(FT(0)), mfac * crossing(FT(3)))  # number: D⁰, mass: D³
 end
 
 """
