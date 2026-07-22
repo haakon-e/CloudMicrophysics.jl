@@ -153,36 +153,53 @@ end
 @inline _moment_partials(::Type{T}, Z, x) where {T} = Z
 
 """
-    gamma_inc_moment_pair(D_min, Dstar, D_max, p, α)
+    gamma_inc_moment_setup(p, α, D_min, D_max)
 
-Return the pair `(∫_{D_min}^{Dstar} D^p e^{-α D} dD, ∫_{Dstar}^{D_max} D^p e^{-α D} dD)`,
-the two [`gamma_inc_moment`](@ref) halves split at a shared interior point `Dstar`.
-Shares the `gamma_inc` evaluation at `Dstar` and the `(p, α)`-only factor
-`Γ(p+1) / α^{p+1}` between both halves, rather than recomputing each independently.
+Precompute the pieces of a crossing-split [`gamma_inc_moment`](@ref) pair that
+do not depend on the crossing diameter itself: the incomplete-gamma pair at
+the two fixed endpoints `D_min`, `D_max`, and the `(p, α)`-only scale factor
+`Γ(p+1) / α^{p+1}`. Pass the result to [`gamma_inc_moment_finish`](@ref) once
+the crossing diameter is known.
 
 An `Integer` order `p` routes `α^(p+1)` through `Base.power_by_squaring` instead of
 the general real-exponent path; `SF.gamma` is still called with a float argument,
 since `SF.gamma` on small integers reads a host-memory factorial table.
 """
-@inline function gamma_inc_moment_pair(D_min, Dstar, D_max, p, α)
+@inline function gamma_inc_moment_setup(p, α, D_min, D_max)
     z = p + 1
-    return _gamma_inc_moment_pair(D_min, Dstar, D_max, z, z, α)
+    return _gamma_inc_moment_setup(z, z, α, D_min, D_max)
 end
-@inline function gamma_inc_moment_pair(D_min, Dstar, D_max, p::Integer, α)
+@inline function gamma_inc_moment_setup(p::Integer, α, D_min, D_max)
     z = p + 1
-    FT = float(promote_type(typeof(D_min), typeof(Dstar), typeof(D_max), typeof(α)))
-    return _gamma_inc_moment_pair(D_min, Dstar, D_max, FT(z), z, α)
+    FT = float(promote_type(typeof(α), typeof(D_min), typeof(D_max)))
+    return _gamma_inc_moment_setup(FT(z), z, α, D_min, D_max)
 end
-@inline function _gamma_inc_moment_pair(D_min, Dstar, D_max, zf, zpow, α)
-    FT = float(promote_type(typeof(D_min), typeof(Dstar), typeof(D_max), typeof(α)))
-    α > 0 || return (FT(NaN), FT(NaN))
-    x_min = α * D_min
-    x_star = α * Dstar
+@inline function _gamma_inc_moment_setup(zf, zpow, α, D_min, D_max)
+    FT = float(promote_type(typeof(zf), typeof(α), typeof(D_min), typeof(D_max)))
+    if !(α > 0)
+        nan = FT(NaN)
+        return (; zf, α, p_min = nan, q_min = nan, p_max = nan, q_max = nan, x_max = nan, scale = nan)
+    end
+    (p_min, q_min) = UT.gamma_inc(zf, α * D_min)
     x_max = α * D_max
-    (p_min, q_min) = UT.gamma_inc(zf, x_min)
-    (p_star, q_star) = UT.gamma_inc(zf, x_star)
     (p_max, q_max) = UT.gamma_inc(zf, x_max)
     scale = SF.gamma(zf) / α^zpow
+    return (; zf, α, p_min, q_min, p_max, q_max, x_max, scale)
+end
+
+"""
+    gamma_inc_moment_finish(setup, D_min, Dstar, D_max)
+
+Combine the outer-diameter-independent [`gamma_inc_moment_setup`](@ref) with a
+fresh incomplete-gamma evaluation at the crossing diameter `Dstar`, returning
+the crossing-split moment pair
+`(∫_{D_min}^{Dstar} D^p e^{-α D} dD, ∫_{Dstar}^{D_max} D^p e^{-α D} dD)`.
+"""
+@inline function gamma_inc_moment_finish(setup, D_min, Dstar, D_max)
+    (; zf, α, p_min, q_min, p_max, q_max, x_max, scale) = setup
+    FT = typeof(scale)
+    x_star = α * Dstar
+    (p_star, q_star) = UT.gamma_inc(zf, x_star)
     Δq_lo = x_star < zf + 1 ? p_star - p_min : q_min - q_star
     Δq_hi = x_max < zf + 1 ? p_max - p_star : q_star - q_max
     m_lo = D_min < Dstar ? scale * max(Δq_lo, zero(FT)) : zero(FT)
