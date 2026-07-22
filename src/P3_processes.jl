@@ -439,26 +439,42 @@ function closed_rain_inner_NM(v_i_at_Dᵢ, Dstar, rᵢ, ρw, ai, bi, ci, D_min, 
     FT = float(eltype(ai))
     λ = inv(Dr_mean)  # rain PSD slope: n_r(D) ∝ e^{-λ D}
 
-    # Compute rain PSD incomplete moments weighted by ice-liquid collision
-    # cross-section `K`, and sedimentation velocity difference `|vᵢ - vₗ|`
+    # Compute the rain PSD incomplete moments weighted by ice-liquid collision
+    # cross-section `K` and sedimentation velocity difference `|vᵢ - vₗ|`, as the
+    # `(D_min, Dstar)` / `(Dstar, D_max)` pair sharing the `Dstar` endpoint, since
+    # `crossing(p)` below needs both halves at the same `(order, α)`.
     coeffs = SA.SVector(collision_cross_section_ice_liquid_coeffs(rᵢ))
-    function Iᵖ(a, b, p, α)
-        acc = @inbounds coeffs[1] * gamma_inc_moment(a, b, p, α)
+    function Iᵖ_pair(p, α)
+        (lo0, hi0) = gamma_inc_moment_pair(D_min, Dstar, D_max, p, α)
+        lo = @inbounds coeffs[1] * lo0
+        hi = @inbounds coeffs[1] * hi0
         @inbounds for i in 2:lastindex(coeffs)
-            acc += coeffs[i] * gamma_inc_moment(a, b, p + (i - 1), α)
+            (lo_i, hi_i) = gamma_inc_moment_pair(D_min, Dstar, D_max, p + (i - 1), α)
+            lo += coeffs[i] * lo_i
+            hi += coeffs[i] * hi_i
         end
-        return acc
+        return (lo, hi)
     end
-    function flux(a, b, p)  # ≡ ∫ₐᵇ K(Dᵢ, Dₗ) ⋅ (vᵢ(Dᵢ) - vₗ(Dₗ)) ⋅ n_r(Dₗ) dDₗ
-        s = v_i_at_Dᵢ * Iᵖ(a, b, p, λ)  # vᵢ ⋅ ∫ₐᵇ K ⋅ n_r dDₗ
-        @inbounds for j in eachindex(ai)  # - ∫ₐᵇ K ⋅ vₗ ⋅ n_r dDₗ
-            s -= ai[j] * Iᵖ(a, b, p + bi[j], λ + ci[j])
+    function flux_pair(p)  # ≡ (∫_{D_min}^{Dstar}, ∫_{Dstar}^{D_max}) K ⋅ (vᵢ - vₗ) ⋅ n_r dDₗ
+        (Ilo, Ihi) = Iᵖ_pair(p, λ)  # vᵢ ⋅ ∫ K ⋅ n_r dDₗ
+        s_lo = v_i_at_Dᵢ * Ilo
+        s_hi = v_i_at_Dᵢ * Ihi
+        @inbounds for j in eachindex(ai)  # - ∫ K ⋅ vₗ ⋅ n_r dDₗ
+            (Ilo_j, Ihi_j) = Iᵖ_pair(p + bi[j], λ + ci[j])
+            s_lo -= ai[j] * Ilo_j
+            s_hi -= ai[j] * Ihi_j
         end
-        return s
+        return (s_lo, s_hi)
     end
-    crossing(p) = flux(D_min, Dstar, p) - flux(Dstar, D_max, p)  # sign flip at Dstar
+    function crossing(p)  # sign flip at Dstar
+        (s_lo, s_hi) = flux_pair(p)
+        return s_lo - s_hi
+    end
     mfac = ρw * CO.volume_sphere_D(one(FT))  # m_liq(D) = mfac Dₗ³
-    return (N₀r * crossing(FT(0)), N₀r * mfac * crossing(FT(3)))  # number: D⁰, mass: D³
+    # `p::Int` here routes the vᵢ-term's `Iᵖ_pair` through `gamma_inc_moment_pair`'s
+    # integer-order method; the rain-velocity terms' `p + bi[j]` still promote to a
+    # real exponent, since `bi` is not integer-valued in general.
+    return (N₀r * crossing(0), N₀r * mfac * crossing(3))  # number: D⁰, mass: D³
 end
 
 """
