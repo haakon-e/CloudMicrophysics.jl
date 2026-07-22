@@ -153,58 +153,101 @@ end
 @inline _moment_partials(::Type{T}, Z, x) where {T} = Z
 
 """
-    gamma_inc_moment_setup(p, α, D_min, D_max)
+    gamma_inc_Q_chain(zf0, x, invΓ)
 
-Precompute the pieces of a crossing-split [`gamma_inc_moment`](@ref) pair that
-do not depend on the crossing diameter itself: the incomplete-gamma pair at
-the two fixed endpoints `D_min`, `D_max`, and the `(p, α)`-only scale factor
-`Γ(p+1) / α^{p+1}`. Pass the result to [`gamma_inc_moment_finish`](@ref) once
-the crossing diameter is known.
-
-An `Integer` order `p` routes `α^(p+1)` through `Base.power_by_squaring` instead of
-the general real-exponent path; `SF.gamma` is still called with a float argument,
-since `SF.gamma` on small integers reads a host-memory factorial table.
+Return `(Q(zf0,x), Q(zf0+1,x), ..., Q(zf0+5,x))`, the regularized upper
+incomplete gamma at six consecutive orders starting at `zf0`, via one
+`gamma_inc` evaluation at `zf0` and the upward recurrence
+`Q(p+1,x) = Q(p,x) + x^p e^{-x} / Γ(p+1)` for the remaining five orders.
+`invΓ` holds `1/Γ(zf0+1), ..., 1/Γ(zf0+5)` (from
+[`gamma_inc_moment_channel_setup`](@ref)); the boundary term's `x^p` shares
+one `log(x)` across all five steps.
 """
-@inline function gamma_inc_moment_setup(p, α, D_min, D_max)
-    z = p + 1
-    return _gamma_inc_moment_setup(z, z, α, D_min, D_max)
+@inline function gamma_inc_Q_chain(zf0, x, invΓ)
+    (_, q0) = UT.gamma_inc(zf0, x)
+    logx = log(x)
+    ex = exp(-x)
+    q1 = q0 + exp(zf0 * logx) * ex * invΓ[1]
+    q2 = q1 + exp((zf0 + 1) * logx) * ex * invΓ[2]
+    q3 = q2 + exp((zf0 + 2) * logx) * ex * invΓ[3]
+    q4 = q3 + exp((zf0 + 3) * logx) * ex * invΓ[4]
+    q5 = q4 + exp((zf0 + 4) * logx) * ex * invΓ[5]
+    return (q0, q1, q2, q3, q4, q5)
 end
-@inline function gamma_inc_moment_setup(p::Integer, α, D_min, D_max)
-    z = p + 1
+
+"""
+    gamma_inc_moment_channel_setup(p0, α, D_min, D_max)
+
+Precompute, for one collision-rate channel (six consecutive moment orders
+`p0, ..., p0 + 5` at rate `α`), the pieces of the crossing-split moment that
+do not depend on the crossing diameter: the `Q`-chain reciprocal-Γ
+denominators, the six per-order scale factors `Γ(p0+k+1) / α^(p0+k+1)`, and
+the `Q`-chains at the two fixed endpoints `D_min`, `D_max`. Pass the result to
+[`gamma_inc_moment_channel_finish`](@ref) once the crossing diameter is known.
+
+An `Integer` order `p0` routes `α^(p0+1)` through `Base.power_by_squaring`
+instead of the general real-exponent path, and `Γ(p0+1)` through `UT.fac`
+(`= p0!`) instead of `SF.gamma`, since `SF.gamma` on small integers reads a
+host-memory factorial table.
+"""
+@inline function gamma_inc_moment_channel_setup(p0, α, D_min, D_max)
+    z0 = p0 + 1
+    return _gamma_inc_moment_channel_setup(z0, z0, SF.gamma(z0), α, D_min, D_max)
+end
+@inline function gamma_inc_moment_channel_setup(p0::Integer, α, D_min, D_max)
+    z0 = p0 + 1
     FT = float(promote_type(typeof(α), typeof(D_min), typeof(D_max)))
-    return _gamma_inc_moment_setup(FT(z), z, α, D_min, D_max)
+    return _gamma_inc_moment_channel_setup(FT(z0), z0, FT(UT.fac(p0)), α, D_min, D_max)
 end
-@inline function _gamma_inc_moment_setup(zf, zpow, α, D_min, D_max)
-    FT = float(promote_type(typeof(zf), typeof(α), typeof(D_min), typeof(D_max)))
+@inline function _gamma_inc_moment_channel_setup(zf0, zpow0, Γ0, α, D_min, D_max)
+    FT = float(promote_type(typeof(zf0), typeof(Γ0), typeof(α), typeof(D_min), typeof(D_max)))
     if !(α > 0)
         nan = FT(NaN)
-        return (; zf, α, p_min = nan, q_min = nan, p_max = nan, q_max = nan, x_max = nan, scale = nan)
+        nan6 = (nan, nan, nan, nan, nan, nan)
+        return (; zf0, α, invΓ = (nan, nan, nan, nan, nan), scale = nan6, Q_min = nan6, Q_max = nan6)
     end
-    (p_min, q_min) = UT.gamma_inc(zf, α * D_min)
-    x_max = α * D_max
-    (p_max, q_max) = UT.gamma_inc(zf, x_max)
-    scale = SF.gamma(zf) / α^zpow
-    return (; zf, α, p_min, q_min, p_max, q_max, x_max, scale)
+    # Γ(z0+k) = (z0+k-1) Γ(z0+k-1), shared by the Q-chain's boundary-term
+    # denominators (invΓ) and the per-order scale factors below.
+    Γ1 = zf0 * Γ0
+    Γ2 = (zf0 + 1) * Γ1
+    Γ3 = (zf0 + 2) * Γ2
+    Γ4 = (zf0 + 3) * Γ3
+    Γ5 = (zf0 + 4) * Γ4
+    invΓ = (inv(Γ1), inv(Γ2), inv(Γ3), inv(Γ4), inv(Γ5))
+
+    invα = inv(α)
+    scale0 = Γ0 / α^zpow0
+    scale1 = scale0 * zf0 * invα
+    scale2 = scale1 * (zf0 + 1) * invα
+    scale3 = scale2 * (zf0 + 2) * invα
+    scale4 = scale3 * (zf0 + 3) * invα
+    scale5 = scale4 * (zf0 + 4) * invα
+    scale = (scale0, scale1, scale2, scale3, scale4, scale5)
+
+    Q_min = gamma_inc_Q_chain(zf0, α * D_min, invΓ)
+    Q_max = gamma_inc_Q_chain(zf0, α * D_max, invΓ)
+    return (; zf0, α, invΓ, scale, Q_min, Q_max)
 end
 
 """
-    gamma_inc_moment_finish(setup, D_min, Dstar, D_max)
+    gamma_inc_moment_channel_finish(setup, D_min, Dstar, D_max)
 
-Combine the outer-diameter-independent [`gamma_inc_moment_setup`](@ref) with a
-fresh incomplete-gamma evaluation at the crossing diameter `Dstar`, returning
-the crossing-split moment pair
+Combine a channel's outer-diameter-independent
+[`gamma_inc_moment_channel_setup`](@ref) with a fresh `Q`-chain evaluation at
+the crossing diameter `Dstar`, returning the six consecutive-order
+crossing-split moment pairs
 `(∫_{D_min}^{Dstar} D^p e^{-α D} dD, ∫_{Dstar}^{D_max} D^p e^{-α D} dD)`.
 """
-@inline function gamma_inc_moment_finish(setup, D_min, Dstar, D_max)
-    (; zf, α, p_min, q_min, p_max, q_max, x_max, scale) = setup
-    FT = typeof(scale)
-    x_star = α * Dstar
-    (p_star, q_star) = UT.gamma_inc(zf, x_star)
-    Δq_lo = x_star < zf + 1 ? p_star - p_min : q_min - q_star
-    Δq_hi = x_max < zf + 1 ? p_max - p_star : q_star - q_max
-    m_lo = D_min < Dstar ? scale * max(Δq_lo, zero(FT)) : zero(FT)
-    m_hi = Dstar < D_max ? scale * max(Δq_hi, zero(FT)) : zero(FT)
-    return (m_lo, m_hi)
+@inline function gamma_inc_moment_channel_finish(setup, D_min, Dstar, D_max)
+    (; zf0, α, invΓ, scale, Q_min, Q_max) = setup
+    FT = typeof(scale[1])
+    Q_star = gamma_inc_Q_chain(zf0, α * Dstar, invΓ)
+    z0 = zero(FT)
+    return ntuple(Val(6)) do k
+        m_lo = D_min < Dstar ? scale[k] * max(Q_min[k] - Q_star[k], z0) : z0
+        m_hi = Dstar < D_max ? scale[k] * max(Q_star[k] - Q_max[k], z0) : z0
+        (m_lo, m_hi)
+    end
 end
 
 """
