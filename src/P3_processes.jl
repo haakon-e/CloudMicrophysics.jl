@@ -427,40 +427,75 @@ function crossover_diameter(v_target, v_l::F, D_min, D_max) where {F}
 end
 
 """
+    closed_rain_channel_setups(p0, α, D_min, D_max)
+
+The six consecutive-order [`gamma_inc_moment_setup`](@ref)s (moment orders
+`p0, p0 + 1, ..., p0 + 5`, from the 3 collision cross-section terms x the
+`{N, M}` moment orders `{0, 3}`) one [`closed_rain_inner_NM`](@ref) velocity
+channel needs, independent of the outer ice diameter.
+"""
+@inline closed_rain_channel_setups(p0, α, D_min, D_max) =
+    ntuple(k -> gamma_inc_moment_setup(p0 + (k - 1), α, D_min, D_max), Val(6))
+
+"""
+    closed_rain_inner_NM_setup(ai, bi, ci, D_min, D_max, λ)
+
+Precompute, once per point, the [`closed_rain_channel_setups`](@ref) for the
+ice-velocity channel (rate `λ`, moment orders `0:5`) and for each
+rain-velocity channel `j` (rate `λ + ci[j]`, moment orders `bi[j] .+ (0:5)`).
+Pass the result to [`closed_rain_inner_NM`](@ref)'s `channel_setups` argument
+to avoid rebuilding it at every outer ice diameter.
+"""
+@inline function closed_rain_inner_NM_setup(ai, bi, ci, D_min, D_max, λ)
+    ice_setups = closed_rain_channel_setups(0, λ, D_min, D_max)
+    rain_setups = map((b, c) -> closed_rain_channel_setups(b, λ + c, D_min, D_max), bi, ci)
+    return (ice_setups, rain_setups)
+end
+
+"""
     closed_rain_inner_NM(
-        v_i_at_Dᵢ, Dstar, rᵢ, ρw, ai, bi, ci, D_min, D_max, N₀r, Dr_mean,
+        v_i_at_Dᵢ, Dstar, rᵢ, ρw, ai, bi, ci, D_min, D_max, N₀r, Dr_mean;
+        [channel_setups],
     )
 
 Closed-form `(∂ₜN_col, ∂ₜM_col)` for the rain inner integral at one outer ice
 diameter, where `v_i_at_Dᵢ` is the ice particle terminal velocity there and
 `Dstar` the fall-speed crossing from [`crossover_diameter`](@ref).
+`channel_setups` defaults to a fresh [`closed_rain_inner_NM_setup`](@ref);
+pass the per-point value from [`get_liquid_integrals_rain_closed`](@ref) to
+avoid rebuilding it at every outer ice diameter.
 """
-function closed_rain_inner_NM(v_i_at_Dᵢ, Dstar, rᵢ, ρw, ai, bi, ci, D_min, D_max, N₀r, Dr_mean)
+
+function closed_rain_inner_NM(
+    v_i_at_Dᵢ, Dstar, rᵢ, ρw, ai, bi, ci, D_min, D_max, N₀r, Dr_mean;
+    channel_setups = closed_rain_inner_NM_setup(ai, bi, ci, D_min, D_max, inv(Dr_mean)),
+)
     FT = float(eltype(ai))
-    λ = inv(Dr_mean)  # rain PSD slope: n_r(D) ∝ e^{-λ D}
+    (ice_setups, rain_setups) = channel_setups
 
     # Compute the rain PSD incomplete moments weighted by ice-liquid collision
-    # cross-section `K` and sedimentation velocity difference `|vᵢ - vₗ|`, as the
-    # `(D_min, Dstar)` / `(Dstar, D_max)` pair sharing the `Dstar` endpoint, since
-    # `crossing(p)` below needs both halves at the same `(order, α)`.
+    # cross-section `K` and sedimentation velocity difference `|vᵢ - vₗ|`. The
+    # `D_min`/`D_max` incomplete-gamma pieces and the `(order, α)`-only scale
+    # factor live in `channel_setups`, independent of the outer ice diameter;
+    # only the `Dstar` evaluation happens here.
     coeffs = SA.SVector(collision_cross_section_ice_liquid_coeffs(rᵢ))
-    function Iᵖ_pair(p, α)
-        (lo0, hi0) = gamma_inc_moment_pair(D_min, Dstar, D_max, p, α)
+    function Iᵖ_pair(setups, p)  # p ∈ {0, 3}; setups holds moment orders p0:(p0+5)
+        (lo0, hi0) = gamma_inc_moment_finish(setups[p + 1], D_min, Dstar, D_max)
         lo = @inbounds coeffs[1] * lo0
         hi = @inbounds coeffs[1] * hi0
         @inbounds for i in 2:lastindex(coeffs)
-            (lo_i, hi_i) = gamma_inc_moment_pair(D_min, Dstar, D_max, p + (i - 1), α)
+            (lo_i, hi_i) = gamma_inc_moment_finish(setups[p + i], D_min, Dstar, D_max)
             lo += coeffs[i] * lo_i
             hi += coeffs[i] * hi_i
         end
         return (lo, hi)
     end
     function flux_pair(p)  # ≡ (∫_{D_min}^{Dstar}, ∫_{Dstar}^{D_max}) K ⋅ (vᵢ - vₗ) ⋅ n_r dDₗ
-        (Ilo, Ihi) = Iᵖ_pair(p, λ)  # vᵢ ⋅ ∫ K ⋅ n_r dDₗ
+        (Ilo, Ihi) = Iᵖ_pair(ice_setups, p)  # vᵢ ⋅ ∫ K ⋅ n_r dDₗ
         s_lo = v_i_at_Dᵢ * Ilo
         s_hi = v_i_at_Dᵢ * Ihi
         @inbounds for j in eachindex(ai)  # - ∫ K ⋅ vₗ ⋅ n_r dDₗ
-            (Ilo_j, Ihi_j) = Iᵖ_pair(p + bi[j], λ + ci[j])
+            (Ilo_j, Ihi_j) = Iᵖ_pair(rain_setups[j], p)
             s_lo -= ai[j] * Ilo_j
             s_hi -= ai[j] * Ihi_j
         end
@@ -471,9 +506,6 @@ function closed_rain_inner_NM(v_i_at_Dᵢ, Dstar, rᵢ, ρw, ai, bi, ci, D_min, 
         return s_lo - s_hi
     end
     mfac = ρw * CO.volume_sphere_D(one(FT))  # m_liq(D) = mfac Dₗ³
-    # `p::Int` here routes the vᵢ-term's `Iᵖ_pair` through `gamma_inc_moment_pair`'s
-    # integer-order method; the rain-velocity terms' `p + bi[j]` still promote to a
-    # real exponent, since `bi` is not integer-valued in general.
     return (N₀r * crossing(0), N₀r * mfac * crossing(3))  # number: D⁰, mass: D³
 end
 
@@ -500,6 +532,10 @@ The velocities and the rain velocity-curve coefficients come from the
     ai, bi, ci = SA.SVector(v_l.ai), SA.SVector(v_l.bi), SA.SVector(v_l.ci)
     D_min, D_max = bounds_r
     zero_rates = (zero(FT), zero(FT), zero(FT))
+    # `D_min`, `D_max`, and the rain PSD slope `λ = inv(Dr_mean)` do not depend
+    # on the outer ice diameter; build the closed-form channels' incomplete-gamma
+    # setup once per point instead of once per outer node.
+    channel_setups = closed_rain_inner_NM_setup(ai, bi, ci, D_min, D_max, inv(Dr_mean))
     function liquid_integrals(Dᵢ)
         if iszero(N₀r) || !(D_max > D_min)
             return zero_rates
@@ -510,7 +546,7 @@ The velocities and the rain velocity-curve coefficients come from the
         Dstar = crossover_diameter(v_i_at_Dᵢ, v_l, D_min, D_max)
         ∂ₜN_col, ∂ₜM_col = closed_rain_inner_NM(
             v_i_at_Dᵢ, Dstar, rᵢ, ρw, ai, bi, ci,
-            D_min, D_max, N₀r, Dr_mean,
+            D_min, D_max, N₀r, Dr_mean; channel_setups,
         )
         if !(isfinite(∂ₜN_col) && isfinite(∂ₜM_col))
             return zero_rates
