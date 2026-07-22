@@ -354,24 +354,41 @@ See also [`LocalRimeDensity`](@ref CloudMicrophysics.Parameters.LocalRimeDensity
  For rain drops, they use a value near the solid bulk ice density, ``ρ^* = 900 kg/m^3``.
  We do not consider this distinction, and use this parameterization for all liquid particles.
 """
+struct RimeDensityRate{R, FT, VI, VL} <: Function
+    ρ_rim_local::R
+    T°C::FT
+    v_ice::VI
+    v_liq::VL
+end
+@inline function (ρ′::RimeDensityRate)(Dᵢ, Dₗ)
+    v_term = abs(ρ′.v_ice(Dᵢ) - ρ′.v_liq(Dₗ))
+    return rime_density_at(ρ′, v_term, Dₗ)
+end
+
+"""
+    rime_density_at(ρ′::RimeDensityRate, v_term, Dₗ)
+
+Local rime density [kg/m³] at a precomputed sedimentation velocity difference
+`v_term = |v_ice(Dᵢ) - v_liq(Dₗ)|`, shared between the collision-rate and rime-density
+evaluations at the same liquid diameter node. See [`compute_local_rime_density`](@ref).
+"""
+@inline function rime_density_at(ρ′::RimeDensityRate, v_term, Dₗ)
+    μm = 1_000_000  # m to μm factor, c.f. units of rₘ in Eq. 16 in Cober and List (1993)
+    # Leading minus: Cober and List (1993), Eq. 16, and fortran `microphy_p3.f90`
+    # (`Ri = -(0.5e6*D_c)*V_impact*iTc`); T°C < 0 then makes Rᵢ positive.
+    Rᵢ = -(Dₗ * μm * v_term) / (2 * ρ′.T°C)
+    return ρ′.ρ_rim_local(Rᵢ)
+end
+
 function compute_local_rime_density(velocity_params, ρₐ, T, state)
     (; T_freeze, ρ_rim_local) = state.params
     # Sub-zero surface temperature [°C], bounded strictly below 0°C. The bound is a
     # numerical guard against R_i → ∞ as T°C → 0, carried over from the fortran code
     # `microphy_p3.f90` Line 3380 (`iTc = 1/min(-0.001, Tc)`).
     T°C = min(T - T_freeze, -oftype(T_freeze, 1e-3))
-    μm = 1_000_000  # m to μm factor, c.f. units of rₘ in Eq. 16 in Cober and List (1993)
-
     v_ice = ice_particle_terminal_velocity(velocity_params, ρₐ, state)
     v_liq = CO.particle_terminal_velocity(velocity_params.rain, ρₐ)
-    function ρ′_rim(Dᵢ, Dₗ)
-        v_term = abs(v_ice(Dᵢ) - v_liq(Dₗ))
-        # Leading minus: Cober and List (1993), Eq. 16, and fortran `microphy_p3.f90`
-        # (`Ri = -(0.5e6*D_c)*V_impact*iTc`); T°C < 0 then makes Rᵢ positive.
-        Rᵢ = -(Dₗ * μm * v_term) / (2 * T°C)
-        return ρ_rim_local(Rᵢ)
-    end
-    return ρ′_rim
+    return RimeDensityRate(ρ_rim_local, T°C, v_ice, v_liq)
 end
 
 """
@@ -415,24 +432,53 @@ The function `liquid_integrals(Dᵢ)` returns a tuple `(∂ₜN_col, ∂ₜM_col
     return liquid_integrals
 end
 
+# `∂ₜV.v_i(Dᵢ)` and the cross-section coefficients derived from `ice_area(state, Dᵢ)`
+# depend only on the outer diameter `Dᵢ`; hoist both once per outer node instead of
+# reevaluating them at every inner quadrature node. `∂ₜV.v_l(D)` is likewise shared
+# between the collision-rate and rime-density evaluations at each inner node.
+@inline function get_liquid_integrals(
+    n, ∂ₜV::VolumetricCollisionRate, m_liq, ρ′_rim::RimeDensityRate, liq_bounds; quad,
+)
+    function liquid_integrals(Dᵢ)
+        v_i_at_Dᵢ = ∂ₜV.v_i(Dᵢ)
+        coeffs = collision_cross_section_ice_liquid_coeffs(∂ₜV.state, Dᵢ)
+        integrand = D -> begin
+            v_l_at_D = ∂ₜV.v_l(D)
+            v_term = abs(v_i_at_Dᵢ - v_l_at_D)
+            E = one(v_term)  # TODO - Make collision efficiency a function of Dᵢ and Dₗ
+            ∂ₜN = E * evalpoly(D, coeffs) * v_term * n(D)  # number collision rate
+            ∂ₜM = ∂ₜN * m_liq(D)                           # mass collision rate
+            ∂ₜB = ∂ₜM / rime_density_at(ρ′_rim, v_term, D)  # rime volume collision rate
+            return SA.SVector(∂ₜN, ∂ₜM, ∂ₜB)
+        end
+        bnds = crossing_integral_bounds(liq_bounds, ∂ₜV, Dᵢ, v_i_at_Dᵢ)
+        (∂ₜN_col, ∂ₜM_col, ∂ₜB_col) = integrate(integrand, bnds, quad)
+        return ∂ₜN_col, ∂ₜM_col, ∂ₜB_col
+    end
+    return liquid_integrals
+end
+
 """
-    crossing_integral_bounds(liq_bounds, ∂ₜV, Dᵢ)
+    crossing_integral_bounds(liq_bounds, ∂ₜV, Dᵢ, [v_i_at_Dᵢ])
 
 Insert the fall-speed crossing `∂ₜV.v_l(D) = ∂ₜV.v_i(Dᵢ)` into `liq_bounds`, so
 that the derivative discontinuity of `|v_i(Dᵢ) - v_l(D)|` lies on a subinterval
-boundary.
+boundary. `v_i_at_Dᵢ` defaults to `∂ₜV.v_i(Dᵢ)`; pass it explicitly to reuse an
+already-computed value.
 
 For a collision-rate integrand that does not carry the terminal-velocity
 closures, the bounds are returned unchanged.
 
 Called from [`get_liquid_integrals`](@ref).
 """
-@inline function crossing_integral_bounds(liq_bounds::NTuple{2, Any}, ∂ₜV::VolumetricCollisionRate, Dᵢ)
+@inline function crossing_integral_bounds(
+    liq_bounds::NTuple{2, Any}, ∂ₜV::VolumetricCollisionRate, Dᵢ, v_i_at_Dᵢ = ∂ₜV.v_i(Dᵢ),
+)
     (D_min, D_max) = liq_bounds
-    Dstar = crossover_diameter(∂ₜV.v_i(Dᵢ), ∂ₜV.v_l, D_min, D_max)
+    Dstar = crossover_diameter(v_i_at_Dᵢ, ∂ₜV.v_l, D_min, D_max)
     return (D_min, clamp(Dstar, D_min, D_max), D_max)
 end
-@inline crossing_integral_bounds(liq_bounds, ∂ₜV, Dᵢ) = liq_bounds
+@inline crossing_integral_bounds(liq_bounds, ∂ₜV, Dᵢ, v_i_at_Dᵢ = nothing) = liq_bounds
 
 """
     crossover_diameter(v_target, v_l, D_min, D_max)
@@ -499,7 +545,7 @@ The velocities and the rain velocity-curve coefficients come from the
 """
 @inline function get_liquid_integrals_rain_closed(
     psd_r::CMP.RainParticlePDF_SB2006,
-    n_r, ρₐ, L_r, N_r, state, ∂ₜV, m_liq, ρ′_rim, bounds_r; quad,
+    n_r, ρₐ, L_r, N_r, state, ∂ₜV::VolumetricCollisionRate, m_liq, ρ′_rim::RimeDensityRate, bounds_r; quad,
 )
     FT = promote_type(eltype(state), UT.promote_typeof(ρₐ, L_r, N_r))
     ρw = psd_r.ρw
@@ -514,6 +560,7 @@ The velocities and the rain velocity-curve coefficients come from the
         end
         v_i_at_Dᵢ = v_i(Dᵢ)
         rᵢ = sqrt(ice_area(state, Dᵢ) / π)
+        coeffs = collision_cross_section_ice_liquid_coeffs(rᵢ)
         Dstar = crossover_diameter(v_i_at_Dᵢ, v_l, D_min, D_max)
         ∂ₜN_col, ∂ₜM_col = closed_rain_inner_NM(
             v_i_at_Dᵢ, Dstar, rᵢ, ρw, ai, bi, ci,
@@ -522,8 +569,15 @@ The velocities and the rain velocity-curve coefficients come from the
         if !(isfinite(∂ₜN_col) && isfinite(∂ₜM_col))
             return zero_rates
         end
+        # Reuse `v_i_at_Dᵢ` and `coeffs` (hoisted above) and share `v_l(D)` between the
+        # collision rate and the rime density at each inner node.
         ∂ₜB_col = integrate(
-            D -> ∂ₜV(Dᵢ, D) * n_r(D) * m_liq(D) / ρ′_rim(Dᵢ, D),
+            D -> begin
+                v_l_at_D = v_l(D)
+                v_term = abs(v_i_at_Dᵢ - v_l_at_D)
+                E = one(v_term)  # TODO - Make collision efficiency a function of Dᵢ and Dₗ
+                E * evalpoly(D, coeffs) * v_term * n_r(D) * m_liq(D) / rime_density_at(ρ′_rim, v_term, D)
+            end,
             (D_min, clamp(Dstar, D_min, D_max), D_max),
             quad,
         )
