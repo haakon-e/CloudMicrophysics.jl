@@ -153,6 +153,44 @@ end
 @inline _moment_partials(::Type{T}, Z, x) where {T} = Z
 
 """
+    gamma_inc_moment_pair(D_min, Dstar, D_max, p, α)
+
+Return the pair `(∫_{D_min}^{Dstar} D^p e^{-α D} dD, ∫_{Dstar}^{D_max} D^p e^{-α D} dD)`,
+the two [`gamma_inc_moment`](@ref) halves split at a shared interior point `Dstar`.
+Shares the `gamma_inc` evaluation at `Dstar` and the `(p, α)`-only factor
+`Γ(p+1) / α^{p+1}` between both halves, rather than recomputing each independently.
+
+An `Integer` order `p` routes `α^(p+1)` through `Base.power_by_squaring` instead of
+the general real-exponent path; `SF.gamma` is still called with a float argument,
+since `SF.gamma` on small integers reads a host-memory factorial table.
+"""
+@inline function gamma_inc_moment_pair(D_min, Dstar, D_max, p, α)
+    z = p + 1
+    return _gamma_inc_moment_pair(D_min, Dstar, D_max, z, z, α)
+end
+@inline function gamma_inc_moment_pair(D_min, Dstar, D_max, p::Integer, α)
+    z = p + 1
+    FT = float(promote_type(typeof(D_min), typeof(Dstar), typeof(D_max), typeof(α)))
+    return _gamma_inc_moment_pair(D_min, Dstar, D_max, FT(z), z, α)
+end
+@inline function _gamma_inc_moment_pair(D_min, Dstar, D_max, zf, zpow, α)
+    FT = float(promote_type(typeof(D_min), typeof(Dstar), typeof(D_max), typeof(α)))
+    α > 0 || return (FT(NaN), FT(NaN))
+    x_min = α * D_min
+    x_star = α * Dstar
+    x_max = α * D_max
+    (p_min, q_min) = UT.gamma_inc(zf, x_min)
+    (p_star, q_star) = UT.gamma_inc(zf, x_star)
+    (p_max, q_max) = UT.gamma_inc(zf, x_max)
+    scale = SF.gamma(zf) / α^zpow
+    Δq_lo = x_star < zf + 1 ? p_star - p_min : q_min - q_star
+    Δq_hi = x_max < zf + 1 ? p_max - p_star : q_star - q_max
+    m_lo = D_min < Dstar ? scale * max(Δq_lo, zero(FT)) : zero(FT)
+    m_hi = Dstar < D_max ? scale * max(Δq_hi, zero(FT)) : zero(FT)
+    return (m_lo, m_hi)
+end
+
+"""
     loggamma_moment(μ, logλ; [k = 0], [scale = 1])
 
 Compute `log(scale ⋅ ∫_0^∞ G(D) D^k dD)`, 
