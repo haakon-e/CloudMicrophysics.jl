@@ -302,11 +302,11 @@ function run_quadrature_error_study(;
     orders = (5, 6, 7, 8, 10, 12),
     reference_order = 128,
     include_timing = false,
+    states = vcat(generate_column_states(FT), hail_core_states(FT, STUDY_HAIL_CORES)),
 )
     tps = TDI.TD.Parameters.ThermodynamicsParameters(FT)
     make_mp(n) =
         CMP.Microphysics2MParams(FT; with_ice = true, quad = CM.Quadrature.GaussLegendre(FT, n))
-    states = vcat(generate_column_states(FT), hail_core_states(FT, STUDY_HAIL_CORES))
 
     refs = [evaluate_quadrature_levels(make_mp(reference_order), tps, s) for s in states]
     floors = Dict(
