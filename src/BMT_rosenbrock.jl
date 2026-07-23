@@ -501,8 +501,25 @@ tendency cache (droplet activation is added by the host, not the substep loop).
     )
 end
 
-@inline _tendency_and_jacobian(::ManualJacobian, g::Instantaneous2MP3Tendency, x) =
-    (g(x), _jacobian_2mp3_manual(g, x))
+"""
+    _tendency_and_jacobian(::ManualJacobian, g::Instantaneous2MP3Tendency, x)
+
+The raw tendency and the [`ManualJacobian`](@ref) substep matrix from a single
+[`_per_process_2mp3`](@ref) evaluation: the tendency is the component-wise sum
+of the per-process breakdown, equal to `g(x)` (see the "verbose instantaneous
+parts sum to total" test), and [`_jacobian_2mp3_manual`](@ref) consumes the
+same breakdown for its Tier-2/Tier-3 donor coefficients. This shares the
+mixed-phase quadrature kernels between the tendency and the Jacobian instead
+of replaying them once for each.
+"""
+@inline function _tendency_and_jacobian(
+    ::ManualJacobian, g::Instantaneous2MP3Tendency, x::SA.StaticVector{8},
+)
+    (q_lcl, n_lcl, q_rai, n_rai, q_ice, n_ice, q_rim, b_rim) = x
+    pp = _per_process_2mp3(g.mp, g.tps, g.ρ, g.T, eltype(x)(g.q_tot),
+        q_lcl, n_lcl, q_rai, n_rai, q_ice, n_ice, q_rim, b_rim, g.logλ)
+    return (sum(values(pp)), _jacobian_2mp3_manual(g, x, pp))
+end
 
 """
     _jacobian_2mp3(FT; lcl_lcl, lcl_rai, ..., brim_brim)
@@ -591,10 +608,13 @@ of `∂ₜq`.
 end
 
 """
-    _jacobian_2mp3_manual(g::Instantaneous2MP3Tendency, x::MicroState2MP3)
+    _jacobian_2mp3_manual(g::Instantaneous2MP3Tendency, x::MicroState2MP3, pp)
 
 The hand-built 2M+P3 substep Jacobian for [`ManualJacobian`](@ref), evaluated at
-the same `(ρ, Tsub, q_tot, logλ, x)` as the raw tendency `f = g(x)`.
+the same `(ρ, Tsub, q_tot, logλ, x)` as the raw tendency `f = g(x)`. `pp` is the
+[`_per_process_2mp3`](@ref) breakdown at that state, computed once by
+[`_tendency_and_jacobian`](@ref) and shared with the raw tendency rather than
+recomputed here.
 
 The entries are tiered:
 
@@ -619,7 +639,7 @@ The entries are tiered:
     is frozen and only the donor dependence is linearized.
 """
 @inline function _jacobian_2mp3_manual(
-    g::Instantaneous2MP3Tendency, x::MicroState2MP3{FT},
+    g::Instantaneous2MP3Tendency, x::MicroState2MP3{FT}, pp,
 ) where {FT}
     mp = g.mp
     tps = g.tps
@@ -635,10 +655,6 @@ The entries are tiered:
     # donor floor for the Tier-2 linearizations (the 1M donor recipe's `q_min`)
     q_floor = FT(TDI.TD.Parameters.q_min(tps))
     n_floor = q_floor
-
-    # per-process primal rates (Tier-2 donor coefficients reuse these)
-    pp = _per_process_2mp3(mp, tps, ρ, T, q_tot,
-        q_lcl, n_lcl, q_rai, n_rai, q_ice, n_ice, q_rim, b_rim, logλ)
 
     # --- shared thermodynamic constants (T, ρ, q_tot frozen in the substep) ---
     Rᵥ = TDI.Rᵥ(tps)
@@ -1646,23 +1662,37 @@ struct Temperature2MP3Tendency{P, H, F}
     q_tot::F
     logλ::F
 end
+"""
+    _temperature_2mp3_tendency(T, pp, ctx)
+
+The temperature-coupled tendency [`MicroState2MP3T`](@ref) from a
+[`_per_process_2mp3`](@ref) breakdown `pp` and a
+[`_phase_relaxation_context`](@ref) `ctx` at temperature `T`: the
+component-wise sum of `pp`, corrected from the folded to the bare
+condensation/deposition relaxation (the psychrometric `1/Γ` factor is instead
+carried by the coupled temperature), with the latent-heating temperature rate
+appended.
+"""
+@inline function _temperature_2mp3_tendency(T, pp, ctx)
+    f8 = reduce(+, values(pp)) +
+         (ctx.Γₗ - 1) * pp.cloud_condevap + (ctx.Γᵢ - 1) * pp.ice_depsub
+    fT = (ctx.Lᵥ * (f8.q_lcl + f8.q_rai) + ctx.Lₛ * f8.q_ice) / ctx.cp_air
+    return MicroState2MP3T(Tuple(f8)..., fT)
+end
 @inline function (g::Temperature2MP3Tendency)(y::SA.StaticVector{9, FT}) where {FT}
     (q_lcl, n_lcl, q_rai, n_rai, q_ice, n_ice, q_rim, b_rim, T) = y
     pp = _per_process_2mp3(g.mp, g.tps, g.ρ, T, FT(g.q_tot),
         q_lcl, n_lcl, q_rai, n_rai, q_ice, n_ice, q_rim, b_rim, g.logλ)
     ctx = _phase_relaxation_context(g.mp, g.tps, g.ρ, T, FT(g.q_tot),
         q_lcl, n_lcl, q_rai, n_rai, q_ice, n_ice, q_rim, b_rim, g.logλ)
-    f8 = reduce(+, values(pp)) +
-         (ctx.Γₗ - 1) * pp.cloud_condevap + (ctx.Γᵢ - 1) * pp.ice_depsub
-    fT = (ctx.Lᵥ * (f8.q_lcl + f8.q_rai) + ctx.Lₛ * f8.q_ice) / ctx.cp_air
-    return MicroState2MP3T(Tuple(f8)..., fT)
+    return _temperature_2mp3_tendency(T, pp, ctx)
 end
 
 # Minimum temperature excess of the melting-rate linearization [K].
 const MELT_LINEARIZATION_ΔT_MIN = 1e-3
 
 """
-    _jacobian_2mp3t_manual(g::Temperature2MP3Tendency, y::MicroState2MP3T)
+    _jacobian_2mp3t_manual(g::Temperature2MP3Tendency, y::MicroState2MP3T, pp, ctx)
 
 The temperature-coupled 9×9 substep Jacobian. The species block is the
 [`_jacobian_2mp3_manual`](@ref) 8×8 with the folded phase-change entries
@@ -1672,18 +1702,20 @@ column carries the saturation shift of condensation and deposition
 pathway) and the melting rate's linear dependence on `T − T_freeze`; the
 temperature row is the latent-heating combination of the species rows. The
 freezing rates' exponential temperature dependence is not carried (explicit).
+`pp` (the [`_per_process_2mp3`](@ref) breakdown) and `ctx` (the
+[`_phase_relaxation_context`](@ref)) are computed once by
+[`_tendency_and_jacobian`](@ref) at the same state and shared with the raw
+tendency rather than recomputed here.
 """
-function _jacobian_2mp3t_manual(g::Temperature2MP3Tendency, y::MicroState2MP3T{FT}) where {FT}
+function _jacobian_2mp3t_manual(
+    g::Temperature2MP3Tendency, y::MicroState2MP3T{FT}, pp, ctx,
+) where {FT}
     (q_lcl, n_lcl, q_rai, n_rai, q_ice, n_ice, q_rim, b_rim, T) = y
     o = zero(FT)
     q_tot = FT(g.q_tot)
     x8 = MicroState2MP3(q_lcl, n_lcl, q_rai, n_rai, q_ice, n_ice, q_rim, b_rim)
     g8 = Instantaneous2MP3Tendency(g.mp, g.tps, g.ρ, T, q_tot, g.logλ)
-    J8 = _jacobian_2mp3_manual(g8, x8)
-    pp = _per_process_2mp3(g.mp, g.tps, g.ρ, T, q_tot,
-        q_lcl, n_lcl, q_rai, n_rai, q_ice, n_ice, q_rim, b_rim, g.logλ)
-    ctx = _phase_relaxation_context(g.mp, g.tps, g.ρ, T, q_tot,
-        q_lcl, n_lcl, q_rai, n_rai, q_ice, n_ice, q_rim, b_rim, g.logλ)
+    J8 = _jacobian_2mp3_manual(g8, x8, pp)
     (; Lᵥ, Lₛ, cp_air, τ_l, dqsl_dT, Γₗ, sat_excess_l,
         τ_i, dqsi_dT, Γᵢ, sat_excess_i, T_freeze) = ctx
 
@@ -1739,8 +1771,26 @@ function _jacobian_2mp3t_manual(g::Temperature2MP3Tendency, y::MicroState2MP3T{F
     return vcat(hcat(J8c, col9), row9')
 end
 
-@inline _tendency_and_jacobian(::TemperatureCoupledJacobian, g::Temperature2MP3Tendency, y) =
-    (g(y), _jacobian_2mp3t_manual(g, y))
+"""
+    _tendency_and_jacobian(::TemperatureCoupledJacobian, g::Temperature2MP3Tendency, y)
+
+The temperature-coupled tendency and 9×9 substep Jacobian from a single
+[`_per_process_2mp3`](@ref) and [`_phase_relaxation_context`](@ref)
+evaluation, shared between [`_temperature_2mp3_tendency`](@ref) and
+[`_jacobian_2mp3t_manual`](@ref) instead of each replaying the mixed-phase
+quadrature kernels independently.
+"""
+@inline function _tendency_and_jacobian(
+    ::TemperatureCoupledJacobian, g::Temperature2MP3Tendency, y::SA.StaticVector{9, FT},
+) where {FT}
+    (q_lcl, n_lcl, q_rai, n_rai, q_ice, n_ice, q_rim, b_rim, T) = y
+    q_tot = FT(g.q_tot)
+    pp = _per_process_2mp3(g.mp, g.tps, g.ρ, T, q_tot,
+        q_lcl, n_lcl, q_rai, n_rai, q_ice, n_ice, q_rim, b_rim, g.logλ)
+    ctx = _phase_relaxation_context(g.mp, g.tps, g.ρ, T, q_tot,
+        q_lcl, n_lcl, q_rai, n_rai, q_ice, n_ice, q_rim, b_rim, g.logλ)
+    return (_temperature_2mp3_tendency(T, pp, ctx), _jacobian_2mp3t_manual(g, y, pp, ctx))
+end
 @inline _species_mask(::TemperatureCoupledJacobian, ::GrowthTreatment) = _full_species_mask
 
 @inline function bulk_microphysics_tendencies(
