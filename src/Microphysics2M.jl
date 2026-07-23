@@ -463,15 +463,20 @@ function autoconversion(
     safe_N_lcl = max(N_lcl, UT.ϵ_numerics_2M_N(FT))
     L_lcl = ρ * safe_q_lcl
     x_lcl = min(x_star, L_lcl / safe_N_lcl)
+    bound_factor = mean_mass_bound_factor(L_lcl / safe_N_lcl, x_star)
     safe_q_rai = max(0, q_rai)
     τ = 1 - safe_q_lcl / (safe_q_lcl + safe_q_rai)  # Eq. (5) from SB2006
     # τ^a has a vertical tangent at τ = 0; the ifelse keeps the ForwardDiff
     # derivative w.r.t. q_rai finite at q_rai = 0 (and the code branch-free)
     ϕ_au = ifelse(q_rai < UT.ϵ_numerics_2M_M(FT), zero(τ), A * τ^a * (1 - τ^a)^b)
 
+    # Eq. (4) from SB2006, scaled by `bound_factor` so the whole event rate
+    # (mass and number together) vanishes continuously as the mean droplet
+    # mass approaches `x_star` from below, instead of saturating at a fixed
+    # value once `x_lcl` reaches the `min(x_star, ...)` clamp above.
     dL_rai_dt =
         kcc / 20 / x_star * (νc + 2) * (νc + 4) / (νc + 1)^2 *
-        L_lcl^2 * x_lcl^2 * (1 + ϕ_au / (1 - τ)^2) * ρ0 / ρ  # Eq. (4) from SB2006
+        L_lcl^2 * x_lcl^2 * (1 + ϕ_au / (1 - τ)^2) * ρ0 / ρ * bound_factor
     dN_rai_dt = dL_rai_dt / x_star
     dL_lcl_dt = -dL_rai_dt
     dN_lcl_dt = -2 * dN_rai_dt

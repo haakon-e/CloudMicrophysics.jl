@@ -223,6 +223,7 @@ function test_microphysics2M(FT)
             Lc = ρ * q_lcl
             Lr = ρ * q_rai
             xc = min(x_star, Lc / N_lcl)
+            bound_factor_au = CM2.mean_mass_bound_factor(Lc / N_lcl, x_star)
             bound_factor_sc = CM2.mean_mass_bound_factor(Lc / N_lcl, x_star)
             τ = 1 - Lc / (Lc + Lr)
             ϕ_au = 400 * τ^0.7 * (1 - τ^0.7)^3
@@ -231,7 +232,7 @@ function test_microphysics2M(FT)
                 Lc^2 *
                 xc^2 *
                 (1 + ϕ_au / (1 - τ)^2) *
-                (ρ0 / ρ) / ρ
+                (ρ0 / ρ) / ρ * bound_factor_au
             dqcdt_au = -dqrdt_au
             dNcdt_au = 2 / x_star * ρ * dqcdt_au
             dNrdt_au = -0.5 * dNcdt_au
