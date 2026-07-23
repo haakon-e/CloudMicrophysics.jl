@@ -166,8 +166,8 @@ sides `f_p` for the linear post-solve attribution and is not differentiated.
         acnv.dq_lcl_dt, acnv.dN_lcl_dt / ρ, acnv.dq_rai_dt, acnv.dN_rai_dt / ρ, o, o, o, o,
     )
 
-    # cloud self-collection (cloud number only)
-    ∂ₜN_lcl_sc = CM2.cloud_liquid_self_collection(sb.acnv, sb.pdf_c, q_lcl, ρ, acnv.dN_lcl_dt)
+    # cloud self-collection (cloud number only), evaluated at the true N_lcl
+    ∂ₜN_lcl_sc = CM2.cloud_liquid_self_collection(sb.acnv, sb.pdf_c, q_lcl, ρ, ρ * n_lcl, acnv.dN_lcl_dt)
     cloud_selfcol = MicroState2MP3(o, ∂ₜN_lcl_sc / ρ, o, o, o, o, o, o)
 
     # accretion (cloud → rain, mass; cloud number)

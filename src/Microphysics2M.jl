@@ -421,6 +421,21 @@ LclRaiRates(dq_lcl_dt, dN_lcl_dt, dq_rai_dt, dN_rai_dt) =
     LclRaiRates(promote(dq_lcl_dt, dN_lcl_dt, dq_rai_dt, dN_rai_dt)...)
 
 """
+    mean_mass_bound_factor(x, x_max; onset = 1 // 2)
+
+Factor in `[0, 1]` for a mean-particle-mass-dependent rate: `1` for
+`x ≤ onset * x_max`, decreasing smoothly (continuous value and slope) to `0`
+as `x` increases from `onset * x_max` to `x_max`, and identically `0` for
+`x ≥ x_max`.
+"""
+@inline function mean_mass_bound_factor(x, x_max; onset = 1 // 2)
+    FT = UT.promote_typeof(x, x_max)
+    r = x / x_max
+    s = clamp((r - FT(onset)) / (1 - FT(onset)), zero(FT), one(FT))
+    return 1 - s^2 * (3 - 2 * s)
+end
+
+"""
     autoconversion(acnv, pdf_c, q_lcl, q_rai, ρ, N_lcl)
 
 Compute autoconversion rates
@@ -514,7 +529,7 @@ function accretion((; accr)::CMP.SB2006, q_lcl, q_rai, ρ, N_lcl)
 end
 
 """
-    cloud_liquid_self_collection(acnv, pdf_c, q_lcl, ρ, dN_lcl_dt_au)
+    cloud_liquid_self_collection(acnv, pdf_c, q_lcl, ρ, N_lcl, dN_lcl_dt_au)
 
 Compute cloud liquid self-collection rate
 
@@ -523,6 +538,7 @@ Compute cloud liquid self-collection rate
  - `pdf_c`: Cloud size distribution parameters, [`CMP.CloudParticlePDF_SB2006`](@ref)
  - `q_lcl`: Cloud liquid water specific content [kg/kg]
  - `ρ`: Air density [kg/m³]
+ - `N_lcl`: Cloud droplet number density [1/m³]
  - `dN_lcl_dt_au`: Rate of change of cloud droplets number density due to autoconversion [1/m³/s]
 
 # Returns
@@ -530,15 +546,18 @@ Compute cloud liquid self-collection rate
     that produce larger cloud droplets (self-collection)
 """
 function cloud_liquid_self_collection(
-    acnv::CMP.AcnvSB2006, pdf_c::CMP.CloudParticlePDF_SB2006, q_lcl, ρ, dN_lcl_dt_au,
+    acnv::CMP.AcnvSB2006, pdf_c::CMP.CloudParticlePDF_SB2006, q_lcl, ρ, N_lcl, dN_lcl_dt_au,
 )
-    FT = UT.promote_typeof(q_lcl, ρ, dN_lcl_dt_au)
-    (; kcc, ρ0) = acnv
+    FT = UT.promote_typeof(q_lcl, ρ, N_lcl, dN_lcl_dt_au)
+    (; kcc, ρ0, x_star) = acnv
     (; νc) = pdf_c
 
     L_lcl = ρ * q_lcl
-    # Eq. (9) from SB2006
-    dN_lcl_dt_sc = -kcc * (νc + 2) / (νc + 1) * (ρ0 / ρ) * L_lcl^2 - dN_lcl_dt_au
+    safe_N_lcl = max(N_lcl, UT.ϵ_numerics_2M_N(FT))
+    bound_factor = mean_mass_bound_factor(L_lcl / safe_N_lcl, x_star)
+    # Eq. (9) from SB2006, scaled by `bound_factor` so the sink vanishes
+    # continuously as the mean droplet mass approaches `x_star` from below.
+    dN_lcl_dt_sc = -kcc * (νc + 2) / (νc + 1) * (ρ0 / ρ) * L_lcl^2 * bound_factor - dN_lcl_dt_au
 
     cond = q_lcl < UT.ϵ_numerics_2M_M(FT)
     return ifelse(cond, FT(0), dN_lcl_dt_sc)
@@ -565,7 +584,7 @@ function autoconversion_and_cloud_liquid_self_collection(
 )
 
     au = autoconversion(acnv, pdf_c, q_lcl, q_rai, ρ, N_lcl)
-    sc = cloud_liquid_self_collection(acnv, pdf_c, q_lcl, ρ, au.dN_lcl_dt)
+    sc = cloud_liquid_self_collection(acnv, pdf_c, q_lcl, ρ, N_lcl, au.dN_lcl_dt)
 
     return (; au, sc)
 end

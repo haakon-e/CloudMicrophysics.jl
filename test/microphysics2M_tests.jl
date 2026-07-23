@@ -209,6 +209,7 @@ function test_microphysics2M(FT)
                 SB.pdf_c,
                 q_lcl,
                 ρ,
+                N_lcl,
                 au.dN_lcl_dt,
             )
             au_sc = CM2.autoconversion_and_cloud_liquid_self_collection(
@@ -222,6 +223,7 @@ function test_microphysics2M(FT)
             Lc = ρ * q_lcl
             Lr = ρ * q_rai
             xc = min(x_star, Lc / N_lcl)
+            bound_factor_sc = CM2.mean_mass_bound_factor(Lc / N_lcl, x_star)
             τ = 1 - Lc / (Lc + Lr)
             ϕ_au = 400 * τ^0.7 * (1 - τ^0.7)^3
             dqrdt_au =
@@ -234,7 +236,7 @@ function test_microphysics2M(FT)
             dNcdt_au = 2 / x_star * ρ * dqcdt_au
             dNrdt_au = -0.5 * dNcdt_au
             dNcdt_sc =
-                -kcc * (νc + 2) / (νc + 1) * (ρ0 / ρ) * Lc^2 - au.dN_lcl_dt
+                -kcc * (νc + 2) / (νc + 1) * (ρ0 / ρ) * Lc^2 * bound_factor_sc - au.dN_lcl_dt
 
             #test
             TT.@test au isa CM2.LclRaiRates
@@ -257,6 +259,7 @@ function test_microphysics2M(FT)
                 SB.pdf_c,
                 FT(0),
                 ρ,
+                N_lcl,
                 au.dN_lcl_dt,
             )
             au_sc = CM2.autoconversion_and_cloud_liquid_self_collection(

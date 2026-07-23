@@ -811,8 +811,8 @@ Used by both warm-only and warm+ice dispatch methods to reduce code duplication.
     dn_lcl_dt += acnv.dN_lcl_dt / ρ
     dn_rai_dt += acnv.dN_rai_dt / ρ
 
-    # --- Cloud liquid self-collection ---
-    ∂ₜN_lcl_sc = CM2.cloud_liquid_self_collection(sb.acnv, sb.pdf_c, q_lcl, ρ, acnv.dN_lcl_dt)
+    # --- Cloud liquid self-collection (evaluated at the true N_lcl) ---
+    ∂ₜN_lcl_sc = CM2.cloud_liquid_self_collection(sb.acnv, sb.pdf_c, q_lcl, ρ, ρ * n_lcl, acnv.dN_lcl_dt)
     dn_lcl_dt += ∂ₜN_lcl_sc / ρ
 
     # --- Accretion ---
