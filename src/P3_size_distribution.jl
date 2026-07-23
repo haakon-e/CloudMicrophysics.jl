@@ -192,7 +192,8 @@ host-memory factorial table.
 """
 @inline function gamma_inc_moment_channel_setup(p0, α, D_min, D_max)
     z0 = p0 + 1
-    return _gamma_inc_moment_channel_setup(z0, z0, SF.gamma(z0), α, D_min, D_max)
+    FT = float(promote_type(typeof(z0), typeof(α), typeof(D_min), typeof(D_max)))
+    return _gamma_inc_moment_channel_setup(FT(z0), z0, FT(SF.gamma(z0)), α, D_min, D_max)
 end
 @inline function gamma_inc_moment_channel_setup(p0::Integer, α, D_min, D_max)
     z0 = p0 + 1
