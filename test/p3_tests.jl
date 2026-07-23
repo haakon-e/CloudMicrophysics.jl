@@ -743,12 +743,26 @@ function test_p3_melting(FT)
         @test rate.dNdt >= 0
         @test rate.dNdt == rate.dLdt / P3.ice_mean_particle_mass_min(FT)
 
-        # A mean mass above the physical range melts number at the upper bound.
+        # A mean mass above the physical range melts number at the true
+        # (unclamped) mean mass, not a fixed ceiling: the number rate is
+        # smaller than a fixed-ceiling rate would give, and shrinks further
+        # as the mean mass grows.
         state₁ = P3.P3State(params, FT(1.2e-3), FT(12), F_rim, ρ_rim)
         logλ₁ = P3.get_distribution_logλ(state₁)
         rate = P3.ice_melt(vel, aps, tps, T_warm, ρₐ, state₁, logλ₁; quad)
         @test isfinite(rate.dNdt)
-        @test rate.dNdt == rate.dLdt / P3.ice_mean_particle_mass_max(FT)
+        @test rate.dNdt == rate.dLdt / (state₁.ρq_ice / state₁.ρn_ice)
+        @test rate.dNdt < rate.dLdt / P3.ice_mean_particle_mass_max(FT)
+
+        # At an even more depleted ρn_ice, the melt number rate keeps tracking
+        # the true (unclamped) mean mass rather than re-saturating at the old
+        # fixed ceiling rate.
+        state_lown = P3.P3State(params, FT(1.2e-3), FT(1e-3), F_rim, ρ_rim)
+        logλ_lown = P3.get_distribution_logλ(state_lown)
+        rate_lown = P3.ice_melt(vel, aps, tps, T_warm, ρₐ, state_lown, logλ_lown; quad)
+        @test isfinite(rate_lown.dNdt)
+        @test rate_lown.dNdt == rate_lown.dLdt / (state_lown.ρq_ice / state_lown.ρn_ice)
+        @test rate_lown.dNdt < rate_lown.dLdt / P3.ice_mean_particle_mass_max(FT)
     end
 end
 

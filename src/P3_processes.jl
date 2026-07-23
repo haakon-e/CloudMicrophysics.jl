@@ -89,14 +89,11 @@ Returns the melting rate of ice (QIMLT in Morrison and Mildbrandt (2015)).
     # only consider melting (not fusion)
     dLdt = max(0, dLdt_unclamped)
     # Remove number in proportion to mass through the mean particle mass,
-    # bounded to the physical range, so the rate stays finite when `ρq_ice`
-    # underflows to zero while `ρn_ice` and the melt integral remain positive.
+    # floored (not ceilinged) so the rate stays finite when `ρq_ice`
+    # underflows to zero while `ρn_ice` and the melt integral remain positive,
+    # and vanishes as `ρn_ice` does rather than saturating at a fixed rate.
     FT = eltype(state)
-    m̄ = clamp(
-        ρq_ice / max(ρn_ice, floatmin(FT)),
-        ice_mean_particle_mass_min(FT),
-        ice_mean_particle_mass_max(FT),
-    )
+    m̄ = max(ρq_ice / max(ρn_ice, floatmin(FT)), ice_mean_particle_mass_min(FT))
     dNdt = dLdt / m̄
 
     return (; dNdt, dLdt)
