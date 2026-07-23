@@ -9,6 +9,7 @@ module Utilities
 import UnrolledUtilities as UU
 import SpecialFunctions as SF
 import ForwardDiff as FD
+import Adapt
 
 export clamp_to_nonneg, ϵ_numerics, ϵ_numerics_2M_M, ϵ_numerics_2M_N, ϵ_numerics_P3_B
 export promote_typeof
@@ -61,21 +62,23 @@ gradient. See `_assert_const_shape`.
 end
 
 # `P, Q` as `Dual`s carrying the analytic x-derivative. `val_a` is the (plain)
-# shape parameter. Shared by the `gamma_inc(::Real, ::Dual)` and
-# `gamma_inc(::Dual, ::Dual)` overloads (the latter after the shape guard).
-@inline function _gamma_inc_dx(val_a::Real, x::FD.Dual)
+# shape parameter and `primal` the `(a, x) -> (P, Q)` function that supplies the
+# values (the iterative `gamma_inc` or a table-backed variant). Shared by the
+# `gamma_inc(::Real, ::Dual)` and `gamma_inc(::Dual, ::Dual)` overloads (the
+# latter after the shape guard).
+@inline function _gamma_inc_dx(primal::F, val_a::Real, x::FD.Dual) where {F}
     val_x = FD.value(x)
-    P, Q = gamma_inc(val_a, val_x)
+    P, Q = primal(val_a, val_x)
     T = FD.tagtype(typeof(x))
     deriv = val_x > 0 ? exp((val_a - 1) * log(val_x) - val_x - SF.loggamma(val_a)) : zero(val_x)
     return (FD.Dual{T}(P, deriv * FD.partials(x)), FD.Dual{T}(Q, -deriv * FD.partials(x)))
 end
 
-@inline gamma_inc(a::Real, x::FD.Dual) = _gamma_inc_dx(a, x)
+@inline gamma_inc(a::Real, x::FD.Dual) = _gamma_inc_dx(gamma_inc, a, x)
 
 @inline function gamma_inc(a::FD.Dual, x::FD.Dual)
     _assert_const_shape(a)
-    return _gamma_inc_dx(FD.value(a), x)
+    return _gamma_inc_dx(gamma_inc, FD.value(a), x)
 end
 
 @inline function gamma_inc(a::FD.Dual, x::Real)
@@ -155,6 +158,142 @@ end
         parameter `a` is not supported (only the x-/p-derivative is implemented).",
     )
     return nothing
+end
+
+export GammaIncTable, build_gamma_inc_table
+
+"""
+    GammaIncTable{FT}
+
+A dense grid of the regularized lower incomplete gamma function `P(a, x)`
+over `(a, log x)`, for bicubic-interpolated evaluation via
+[`gamma_inc(table, a, x)`](@ref gamma_inc). Build with
+[`build_gamma_inc_table`](@ref).
+
+`(a, x)` pairs outside the table's domain fall back to the iterative
+`gamma_inc(a, x)`.
+"""
+struct GammaIncTable{FT, A <: AbstractMatrix{FT}}
+    a_lo::FT
+    a_hi::FT
+    inv_da::FT
+    na::Int
+    lx_lo::FT
+    lx_hi::FT
+    inv_dlx::FT
+    nx::Int
+    data::A
+end
+Base.eltype(::GammaIncTable{FT}) where {FT} = FT
+
+Adapt.adapt_structure(to, t::GammaIncTable) = GammaIncTable(
+    t.a_lo, t.a_hi, t.inv_da, t.na, t.lx_lo, t.lx_hi, t.inv_dlx, t.nx,
+    Adapt.adapt(to, t.data),
+)
+
+"""
+    build_gamma_inc_table(FT = Float32; na = 513, nx = 513, a_bounds = (1, 8.3), logx_bounds = (-11.6, 2.7))
+
+Tabulate the regularized lower incomplete gamma function `P(a, x)` on an
+`na × nx` grid, uniform in `a` and in `log(x)` over `a_bounds` and
+`logx_bounds`. Ground truth is `SpecialFunctions.gamma_inc`, evaluated in
+`Float64` regardless of `FT`.
+
+The default `513 × 513` grid gives a maximum interpolation error of about
+`2e-5` over the P3 collision path's harvested `(a, x)` domain, matching the
+iterative `Float32` primal's own accuracy floor (see `gamma_inc_tests.jl`).
+[`gamma_inc(table, a, x)`](@ref gamma_inc) uses cubic-convolution (not
+prefiltered B-spline) interpolation, which needs a denser grid than a
+prefiltered B-spline would for the same error.
+"""
+function build_gamma_inc_table(
+    ::Type{FT} = Float32;
+    na::Int = 513, nx::Int = 513,
+    a_bounds = (1, 8.3), logx_bounds = (-11.6, 2.7),
+) where {FT}
+    a_lo, a_hi = Float64(a_bounds[1]), Float64(a_bounds[2])
+    lx_lo, lx_hi = Float64(logx_bounds[1]), Float64(logx_bounds[2])
+    as = range(a_lo, a_hi; length = na)
+    lxs = range(lx_lo, lx_hi; length = nx)
+    data = Matrix{FT}(undef, na, nx)
+    for (j, lx) in enumerate(lxs), (i, a) in enumerate(as)
+        data[i, j] = FT(first(SF.gamma_inc(a, exp(lx))))
+    end
+    inv_da = FT((na - 1) / (a_hi - a_lo))
+    inv_dlx = FT((nx - 1) / (lx_hi - lx_lo))
+    return GammaIncTable{FT, typeof(data)}(
+        FT(a_lo), FT(a_hi), inv_da, na, FT(lx_lo), FT(lx_hi), inv_dlx, nx, data,
+    )
+end
+
+# Keys (1981) cubic convolution kernel, `a = -1/2` (interpolates the samples
+# exactly, C¹ continuous; the standard "bicubic" resampling kernel).
+@inline function _cubic_conv_weight(t::FT) where {FT}
+    a = FT(-0.5)
+    s = abs(t)
+    s2 = s * s
+    s3 = s2 * s
+    w_near = (a + 2) * s3 - (a + 3) * s2 + 1
+    w_far = a * s3 - 5a * s2 + 8a * s - 4a
+    return ifelse(s <= 1, w_near, ifelse(s < 2, w_far, zero(FT)))
+end
+
+# Bicubic-convolution lookup of `table.data` at table coordinates `(a, lx)`,
+# both already known to lie in the table's domain. Neighbours that fall off
+# the grid edge clamp to the nearest row/column.
+@inline function _bicubic_lookup(table::GammaIncTable{FT}, a, lx) where {FT}
+    (; a_lo, inv_da, na, lx_lo, inv_dlx, nx, data) = table
+    ta = (a - a_lo) * inv_da
+    tx = (lx - lx_lo) * inv_dlx
+    i0 = clamp(floor(Int, ta), 0, na - 1)
+    j0 = clamp(floor(Int, tx), 0, nx - 1)
+    fa = ta - i0
+    fx = tx - j0
+    acc = zero(FT)
+    for di in -1:2
+        wi = _cubic_conv_weight(fa - di)
+        ii = clamp(i0 + di, 0, na - 1) + 1
+        for dj in -1:2
+            wj = _cubic_conv_weight(fx - dj)
+            jj = clamp(j0 + dj, 0, nx - 1) + 1
+            acc += wi * wj * @inbounds data[ii, jj]
+        end
+    end
+    return acc
+end
+
+"""
+    gamma_inc(table::GammaIncTable, a, x)
+
+Table-backed evaluation of [`gamma_inc`](@ref) via bicubic interpolation of
+`table`. Falls back to the iterative `gamma_inc(a, x)` for `(a, x)` outside
+`table`'s domain.
+"""
+@inline function gamma_inc(table::GammaIncTable{FT}, a::Real, x::Real) where {FT}
+    aFT, xFT = FT(a), FT(x)
+    xFT <= 0 && return (zero(FT), one(FT))
+    lx = log(xFT)
+    if table.a_lo <= aFT <= table.a_hi && table.lx_lo <= lx <= table.lx_hi
+        P = clamp(_bicubic_lookup(table, aFT, lx), zero(FT), one(FT))
+        return (P, one(FT) - P)
+    end
+    return gamma_inc(a, x)
+end
+
+@inline gamma_inc(table::GammaIncTable, a::Real, x::FD.Dual) =
+    _gamma_inc_dx((α, ξ) -> gamma_inc(table, α, ξ), a, x)
+
+@inline function gamma_inc(table::GammaIncTable, a::FD.Dual, x::FD.Dual)
+    _assert_const_shape(a)
+    return _gamma_inc_dx((α, ξ) -> gamma_inc(table, α, ξ), FD.value(a), x)
+end
+
+@inline function gamma_inc(table::GammaIncTable, a::FD.Dual, x::Real)
+    _assert_const_shape(a)
+    P, Q = gamma_inc(table, FD.value(a), x)
+    T = FD.tagtype(typeof(a))
+    z = zero(FD.partials(a))
+    return (FD.Dual{T}(P, z), FD.Dual{T}(Q, z))
 end
 
 """

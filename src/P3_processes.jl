@@ -427,24 +427,27 @@ function crossover_diameter(v_target, v_l::F, D_min, D_max) where {F}
 end
 
 """
-    closed_rain_inner_NM_setup(ai, bi, ci, D_min, D_max, λ)
+    closed_rain_inner_NM_setup(ai, bi, ci, D_min, D_max, λ, [table])
 
 Precompute, once per point, the [`gamma_inc_moment_channel_setup`](@ref) for
 the ice-velocity channel (rate `λ`, moment orders `0:5`) and for each
 rain-velocity channel `j` (rate `λ + ci[j]`, moment orders `bi[j] .+ (0:5)`).
 Pass the result to [`closed_rain_inner_NM`](@ref)'s `channel_setups` argument
 to avoid rebuilding it at every outer ice diameter.
+
+`table`, a [`UT.GammaIncTable`](@ref), is forwarded to
+[`gamma_inc_moment_channel_setup`](@ref).
 """
-@inline function closed_rain_inner_NM_setup(ai, bi, ci, D_min, D_max, λ)
-    ice_setup = gamma_inc_moment_channel_setup(0, λ, D_min, D_max)
-    rain_setups = map((b, c) -> gamma_inc_moment_channel_setup(b, λ + c, D_min, D_max), bi, ci)
+@inline function closed_rain_inner_NM_setup(ai, bi, ci, D_min, D_max, λ, table = nothing)
+    ice_setup = gamma_inc_moment_channel_setup(0, λ, D_min, D_max, table)
+    rain_setups = map((b, c) -> gamma_inc_moment_channel_setup(b, λ + c, D_min, D_max, table), bi, ci)
     return (ice_setup, rain_setups)
 end
 
 """
     closed_rain_inner_NM(
         v_i_at_Dᵢ, Dstar, rᵢ, ρw, ai, bi, ci, D_min, D_max, N₀r, Dr_mean;
-        [channel_setups],
+        [channel_setups], [table],
     )
 
 Closed-form `(∂ₜN_col, ∂ₜM_col)` for the rain inner integral at one outer ice
@@ -452,11 +455,15 @@ diameter, where `v_i_at_Dᵢ` is the ice particle terminal velocity there and
 `Dstar` the fall-speed crossing from [`crossover_diameter`](@ref).
 `channel_setups` defaults to a fresh [`closed_rain_inner_NM_setup`](@ref);
 pass the per-point value from [`get_liquid_integrals_rain_closed`](@ref) to
-avoid rebuilding it at every outer ice diameter.
+avoid rebuilding it at every outer ice diameter. `table`, a
+[`UT.GammaIncTable`](@ref), is forwarded to
+[`gamma_inc_moment_channel_finish`](@ref); it should match the `table` (if
+any) that built `channel_setups`.
 """
 function closed_rain_inner_NM(
     v_i_at_Dᵢ, Dstar, rᵢ, ρw, ai, bi, ci, D_min, D_max, N₀r, Dr_mean;
-    channel_setups = closed_rain_inner_NM_setup(ai, bi, ci, D_min, D_max, inv(Dr_mean)),
+    table = nothing,
+    channel_setups = closed_rain_inner_NM_setup(ai, bi, ci, D_min, D_max, inv(Dr_mean), table),
 )
     FT = float(eltype(ai))
     (ice_setup, rain_setups) = channel_setups
@@ -469,7 +476,7 @@ function closed_rain_inner_NM(
     # channel's velocity-curve weight (`v_i_at_Dᵢ` for the ice channel,
     # `-ai[j]` for rain channel `j`).
     function channel_NM(setup, weight)
-        moments = gamma_inc_moment_channel_finish(setup, D_min, Dstar, D_max)
+        moments = gamma_inc_moment_channel_finish(setup, D_min, Dstar, D_max, table)
         N_lo = @inbounds coeffs[1] * moments[1][1]
         N_hi = @inbounds coeffs[1] * moments[1][2]
         M_lo = @inbounds coeffs[1] * moments[4][1]
@@ -498,7 +505,7 @@ end
 """
     get_liquid_integrals_rain_closed(
         psd_r::RainParticlePDF_SB2006,
-        n_r, ρₐ, L_r, N_r, state, ∂ₜV, m_liq, ρ′_rim, bounds_r; quad
+        n_r, ρₐ, L_r, N_r, state, ∂ₜV, m_liq, ρ′_rim, bounds_r; quad, [gamma_table],
     )
 
 Return a function `liquid_integrals(Dᵢ) -> (∂ₜN_col, ∂ₜM_col, ∂ₜB_col)`
@@ -506,10 +513,15 @@ where N and M are the exact incomplete-gamma closed form and
 B_rim is computed by quadrature, split at the fall-speed crossing.
 The velocities and the rain velocity-curve coefficients come from the
 [`VolumetricCollisionRate`](@ref) `∂ₜV`.
+
+`gamma_table`, a [`UT.GammaIncTable`](@ref), routes the closed-form N/M
+incomplete-gamma evaluations through a table lookup instead of the iterative
+primal; by default (`gamma_table = nothing`) the iterative primal is used.
 """
 @inline function get_liquid_integrals_rain_closed(
     psd_r::CMP.RainParticlePDF_SB2006,
-    n_r, ρₐ, L_r, N_r, state, ∂ₜV::VolumetricCollisionRate, m_liq, ρ′_rim::RimeDensityRate, bounds_r; quad,
+    n_r, ρₐ, L_r, N_r, state, ∂ₜV::VolumetricCollisionRate, m_liq, ρ′_rim::RimeDensityRate, bounds_r;
+    quad, gamma_table = nothing,
 )
     FT = promote_type(eltype(state), UT.promote_typeof(ρₐ, L_r, N_r))
     ρw = psd_r.ρw
@@ -521,7 +533,7 @@ The velocities and the rain velocity-curve coefficients come from the
     # `D_min`, `D_max`, and the rain PSD slope `λ = inv(Dr_mean)` do not depend
     # on the outer ice diameter; build the closed-form channels' incomplete-gamma
     # setup once per point instead of once per outer node.
-    channel_setups = closed_rain_inner_NM_setup(ai, bi, ci, D_min, D_max, inv(Dr_mean))
+    channel_setups = closed_rain_inner_NM_setup(ai, bi, ci, D_min, D_max, inv(Dr_mean), gamma_table)
     function liquid_integrals(Dᵢ)
         if iszero(N₀r) || !(D_max > D_min)
             return zero_rates
@@ -532,7 +544,7 @@ The velocities and the rain velocity-curve coefficients come from the
         Dstar = crossover_diameter(v_i_at_Dᵢ, v_l, D_min, D_max)
         ∂ₜN_col, ∂ₜM_col = closed_rain_inner_NM(
             v_i_at_Dᵢ, Dstar, rᵢ, ρw, ai, bi, ci,
-            D_min, D_max, N₀r, Dr_mean; channel_setups,
+            D_min, D_max, N₀r, Dr_mean; channel_setups, table = gamma_table,
         )
         if !(isfinite(∂ₜN_col) && isfinite(∂ₜM_col))
             return zero_rates
@@ -557,13 +569,13 @@ end
 @inline _rain_inner_integrals(
     psd_r::CMP.RainParticlePDF_SB2006,
     n_r, ∂ₜV::VolumetricCollisionRate{<:Any, <:Any, <:CO.Chen2022VelocityCurve},
-    m_liq, ρ′_rim, bounds_r, ρₐ, L_r, N_r, state; quad,
+    m_liq, ρ′_rim, bounds_r, ρₐ, L_r, N_r, state; quad, gamma_table = nothing,
 ) = get_liquid_integrals_rain_closed(
     psd_r, n_r, ρₐ, L_r, N_r, state, ∂ₜV, m_liq, ρ′_rim, bounds_r;
-    quad,
+    quad, gamma_table,
 )
 @inline _rain_inner_integrals(
-    psd_r, n_r, ∂ₜV, m_liq, ρ′_rim, bounds_r, ρₐ, L_r, N_r, state; quad,
+    psd_r, n_r, ∂ₜV, m_liq, ρ′_rim, bounds_r, ρₐ, L_r, N_r, state; quad, gamma_table = nothing,
 ) = get_liquid_integrals(n_r, ∂ₜV, m_liq, ρ′_rim, bounds_r; quad)
 
 """
@@ -621,7 +633,7 @@ end
 """
     ∫liquid_ice_collisions(
         state, logλ, psd_c, psd_r, L_c, N_c, L_r, N_r,
-        aps, tps, vel, ρₐ, T, m_liq; [quad]
+        aps, tps, vel, ρₐ, T, m_liq; [quad], [gamma_table]
     )
 
 Compute key liquid-ice collision rates and quantities. Used by [`bulk_liquid_ice_collision_sources`](@ref).
@@ -644,6 +656,10 @@ Compute key liquid-ice collision rates and quantities. Used by [`bulk_liquid_ice
 
 # Keyword arguments
 - `quad`: A `QuadratureRule` instance
+- `gamma_table`: an optional [`UT.GammaIncTable`](@ref) that routes the rain
+  inner integral's closed-form incomplete-gamma evaluations through a table
+  lookup instead of the iterative primal. By default (`nothing`), the
+  iterative primal is used.
 
 # Returns
 A tuple `(QCFRZ, QCSHD, NCCOL, QRFRZ, QRSHD, NRCOL, ∫M_col, BCCOL, BRCOL, ∫𝟙_wet_M_col)`, where:
@@ -661,7 +677,7 @@ A tuple `(QCFRZ, QCSHD, NCCOL, QRFRZ, QRSHD, NRCOL, ∫M_col, BCCOL, BRCOL, ∫�
 @inline function ∫liquid_ice_collisions(
     state, logλ,
     psd_c, psd_r, L_c, N_c, L_r, N_r,
-    aps, tps, vel, ρₐ, T, m_liq; quad,
+    aps, tps, vel, ρₐ, T, m_liq; quad, gamma_table = nothing,
 )
     FT = eltype(state)
 
@@ -706,7 +722,7 @@ A tuple `(QCFRZ, QCSHD, NCCOL, QRFRZ, QRSHD, NRCOL, ∫M_col, BCCOL, BRCOL, ∫�
     # Numerical fallback for any other PSD/velocity type.
     rain_integrals = _rain_inner_integrals(
         psd_r, n_r, ∂ₜV, m_liq, ρ′_rim, bounds_r,
-        ρₐ, L_r, N_r, state; quad,
+        ρₐ, L_r, N_r, state; quad, gamma_table,
     )  # (∂ₜN_r_col, ∂ₜM_r_col, ∂ₜB_r_col)
 
     return ∫liquid_ice_collisions(n_i, ∂ₜM_max, cloud_integrals, rain_integrals, ice_bounds; quad)
@@ -839,6 +855,12 @@ Computes the bulk rates for ice and liquid particle collisions.
 - `ρₐ`: air density [kg/m³]
 - `T`: temperature [K]
 
+# Keyword arguments
+- `quad`: A `QuadratureRule` instance
+- `gamma_table`: an optional [`UT.GammaIncTable`](@ref), forwarded to
+  [`∫liquid_ice_collisions`](@ref). By default (`nothing`), the iterative
+  primal is used.
+
 # Returns
 A `NamedTuple` of `(; ∂ₜq_c, ∂ₜq_r, ∂ₜN_c, ∂ₜN_r, ∂ₜL_rim, ∂ₜL_ice, ∂ₜB_rim)`, where:
 1. `∂ₜq_c`: cloud liquid water content tendency [kg/kg/s]
@@ -852,7 +874,7 @@ A `NamedTuple` of `(; ∂ₜq_c, ∂ₜq_r, ∂ₜN_c, ∂ₜN_r, ∂ₜL_rim, �
 @inline function bulk_liquid_ice_collision_sources(
     state, logλ,
     psd_c, psd_r, L_c, N_c, L_r, N_r,
-    aps, tps, vel, ρₐ, T; quad,
+    aps, tps, vel, ρₐ, T; quad, gamma_table = nothing,
 )
     FT = promote_type(eltype(state), UT.promote_typeof(L_c, N_c, L_r, N_r, ρₐ, T))
     (; τ_wet, ρ_i) = state.params
@@ -865,7 +887,7 @@ A `NamedTuple` of `(; ∂ₜq_c, ∂ₜq_r, ∂ₜN_c, ∂ₜN_r, ∂ₜL_rim, �
     rates = ∫liquid_ice_collisions(
         state, logλ,
         psd_c, psd_r, L_c, N_c, L_r, N_r,
-        aps, tps, vel, ρₐ, T, m_liq; quad,
+        aps, tps, vel, ρₐ, T, m_liq; quad, gamma_table,
     )
     (QCFRZ, QCSHD, NCCOL, QRFRZ, QRSHD, NRCOL, ∫∂ₜM_col, BCCOL, BRCOL, ∫𝟙_wet_M_col) = rates
 

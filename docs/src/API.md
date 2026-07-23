@@ -406,6 +406,8 @@ Utilities.ϵ_numerics_2M_N
 Utilities.ϵ_numerics_P3_B
 Utilities.gamma_inc
 Utilities.gamma_inc_inv
+Utilities.GammaIncTable
+Utilities.build_gamma_inc_table
 Utilities.rime_mass_fraction
 Utilities.rime_density
 Utilities.sgs_weight_function

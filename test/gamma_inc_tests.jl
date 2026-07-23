@@ -74,9 +74,50 @@ function test_gamma_inc(FT)
     end
 end
 
+function test_gamma_inc_table(FT)
+    TT.@testset "GammaIncTable [FT=$FT]" begin
+        table = UT.build_gamma_inc_table(FT)
+        avals = FT[1, 1.5, 2, 2.5, 3.5, 5, 7.5]
+        xvals = FT[0.1, 0.5, 1, 2.5, 5, 8, 12]
+
+        TT.@testset "in-domain accuracy vs SpecialFunctions" begin
+            for a in avals, x in xvals
+                P_sf, Q_sf = SF.gamma_inc(a, x)
+                P_t, Q_t = UT.gamma_inc(table, a, x)
+                TT.@test isapprox(P_t, P_sf; atol = FT(2e-4))
+                TT.@test isapprox(Q_t, Q_sf; atol = FT(2e-4))
+                TT.@test isapprox(P_t + Q_t, one(FT); atol = 10 * eps(FT))
+            end
+        end
+
+        TT.@testset "out-of-domain falls back to the iterative primal" begin
+            oob_pairs = ((FT(0.5), FT(1)), (FT(20), FT(5)), (FT(3), FT(1e6)), (FT(3), FT(1e-10)))
+            for (a, x) in oob_pairs
+                TT.@test UT.gamma_inc(table, a, x) == UT.gamma_inc(a, x)
+            end
+        end
+
+        TT.@testset "analytic AD rule (x-derivative) matches the iterative primal" begin
+            for a in avals, x in xvals
+                check_derivative(x -> UT.gamma_inc(table, a, x)[1], x; rtol = FT(1e-3), atol = FT(1e-5))
+            end
+        end
+
+        TT.@testset "shape-parameter (`a`) derivative is rejected" begin
+            TT.@test_throws ErrorException FD.derivative(a -> UT.gamma_inc(table, a, FT(3))[1], FT(2.5))
+            Tag = typeof(FD.Tag(identity, FT))
+            a0 = FD.Dual{Tag}(FT(2.5), zero(FT))
+            TT.@test UT.gamma_inc(table, a0, FT(3))[1] isa FD.Dual
+            x1 = FD.Dual{Tag}(FT(3), one(FT))
+            TT.@test FD.partials(UT.gamma_inc(table, a0, x1)[1])[1] != 0
+        end
+    end
+end
+
 TT.@testset "Incomplete gamma utilities" begin
     for FT in (Float32, Float64)
         test_gamma_inc(FT)
+        test_gamma_inc_table(FT)
     end
 end
 nothing

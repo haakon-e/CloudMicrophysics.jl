@@ -133,7 +133,7 @@ See also [`loggamma_inc_moment`](@ref)
 end
 
 """
-    gamma_inc_Q_chain(zf0, x, invΓ)
+    gamma_inc_Q_chain(zf0, x, invΓ, [table])
 
 Return `(Q(zf0,x), Q(zf0+1,x), ..., Q(zf0+5,x))`, the regularized upper
 incomplete gamma at six consecutive orders starting at `zf0`, via one
@@ -142,9 +142,13 @@ incomplete gamma at six consecutive orders starting at `zf0`, via one
 `invΓ` holds `1/Γ(zf0+1), ..., 1/Γ(zf0+5)` (from
 [`gamma_inc_moment_channel_setup`](@ref)); the boundary term's `x^p` shares
 one `log(x)` across all five steps.
+
+`table`, a [`UT.GammaIncTable`](@ref), routes the single `gamma_inc`
+evaluation through a bicubic-interpolated lookup instead of the iterative
+primal; by default (`table = nothing`) the iterative primal is used.
 """
-@inline function gamma_inc_Q_chain(zf0, x, invΓ)
-    (_, q0) = UT.gamma_inc(zf0, x)
+@inline function gamma_inc_Q_chain(zf0, x, invΓ, table = nothing)
+    (_, q0) = table === nothing ? UT.gamma_inc(zf0, x) : UT.gamma_inc(table, zf0, x)
     logx = log(x)
     ex = exp(-x)
     q1 = q0 + exp(zf0 * logx) * ex * invΓ[1]
@@ -156,7 +160,7 @@ one `log(x)` across all five steps.
 end
 
 """
-    gamma_inc_moment_channel_setup(p0, α, D_min, D_max)
+    gamma_inc_moment_channel_setup(p0, α, D_min, D_max, [table])
 
 Precompute, for one collision-rate channel (six consecutive moment orders
 `p0, ..., p0 + 5` at rate `α`), the pieces of the crossing-split moment that
@@ -169,17 +173,19 @@ An `Integer` order `p0` routes `α^(p0+1)` through `Base.power_by_squaring`
 instead of the general real-exponent path, and `Γ(p0+1)` through `UT.fac`
 (`= p0!`) instead of `SF.gamma`, since `SF.gamma` on small integers reads a
 host-memory factorial table.
+
+`table`, a [`UT.GammaIncTable`](@ref), is forwarded to [`gamma_inc_Q_chain`](@ref).
 """
-@inline function gamma_inc_moment_channel_setup(p0, α, D_min, D_max)
+@inline function gamma_inc_moment_channel_setup(p0, α, D_min, D_max, table = nothing)
     z0 = p0 + 1
-    return _gamma_inc_moment_channel_setup(z0, z0, SF.gamma(z0), α, D_min, D_max)
+    return _gamma_inc_moment_channel_setup(z0, z0, SF.gamma(z0), α, D_min, D_max, table)
 end
-@inline function gamma_inc_moment_channel_setup(p0::Integer, α, D_min, D_max)
+@inline function gamma_inc_moment_channel_setup(p0::Integer, α, D_min, D_max, table = nothing)
     z0 = p0 + 1
     FT = float(promote_type(typeof(α), typeof(D_min), typeof(D_max)))
-    return _gamma_inc_moment_channel_setup(FT(z0), z0, FT(UT.fac(p0)), α, D_min, D_max)
+    return _gamma_inc_moment_channel_setup(FT(z0), z0, FT(UT.fac(p0)), α, D_min, D_max, table)
 end
-@inline function _gamma_inc_moment_channel_setup(zf0, zpow0, Γ0, α, D_min, D_max)
+@inline function _gamma_inc_moment_channel_setup(zf0, zpow0, Γ0, α, D_min, D_max, table = nothing)
     FT = float(promote_type(typeof(zf0), typeof(Γ0), typeof(α), typeof(D_min), typeof(D_max)))
     if !(α > 0)
         nan = FT(NaN)
@@ -204,24 +210,27 @@ end
     scale5 = scale4 * (zf0 + 4) * invα
     scale = (scale0, scale1, scale2, scale3, scale4, scale5)
 
-    Q_min = gamma_inc_Q_chain(zf0, α * D_min, invΓ)
-    Q_max = gamma_inc_Q_chain(zf0, α * D_max, invΓ)
+    Q_min = gamma_inc_Q_chain(zf0, α * D_min, invΓ, table)
+    Q_max = gamma_inc_Q_chain(zf0, α * D_max, invΓ, table)
     return (; zf0, α, invΓ, scale, Q_min, Q_max)
 end
 
 """
-    gamma_inc_moment_channel_finish(setup, D_min, Dstar, D_max)
+    gamma_inc_moment_channel_finish(setup, D_min, Dstar, D_max, [table])
 
 Combine a channel's outer-diameter-independent
 [`gamma_inc_moment_channel_setup`](@ref) with a fresh `Q`-chain evaluation at
 the crossing diameter `Dstar`, returning the six consecutive-order
 crossing-split moment pairs
 `(∫_{D_min}^{Dstar} D^p e^{-α D} dD, ∫_{Dstar}^{D_max} D^p e^{-α D} dD)`.
+
+`table`, a [`UT.GammaIncTable`](@ref), is forwarded to [`gamma_inc_Q_chain`](@ref);
+it should match the `table` (if any) that built `setup`.
 """
-@inline function gamma_inc_moment_channel_finish(setup, D_min, Dstar, D_max)
+@inline function gamma_inc_moment_channel_finish(setup, D_min, Dstar, D_max, table = nothing)
     (; zf0, α, invΓ, scale, Q_min, Q_max) = setup
     FT = typeof(scale[1])
-    Q_star = gamma_inc_Q_chain(zf0, α * Dstar, invΓ)
+    Q_star = gamma_inc_Q_chain(zf0, α * Dstar, invΓ, table)
     z0 = zero(FT)
     return ntuple(Val(6)) do k
         m_lo = D_min < Dstar ? scale[k] * max(Q_min[k] - Q_star[k], z0) : z0
