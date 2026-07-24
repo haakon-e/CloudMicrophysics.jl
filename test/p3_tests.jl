@@ -66,7 +66,7 @@ function test_p3_nonphysical_state_bounds(FT)
         for (ρq_ice, ρn_ice, ρq_rim, ρb_rim) in nonphysical
             state = @inferred P3.state_from_prognostic(params, ρq_ice, ρn_ice, ρq_rim, ρb_rim)
             @test FT(0) <= state.F_rim <= FT(1)
-            @test FT(0) <= state.ρ_rim <= FT(0.8) * params.ρ_l
+            @test FT(0) <= state.ρ_rim <= params.ρ_i
             @test state.ρq_ice >= FT(0)
             @test state.ρn_ice >= FT(0)
             for D in Ds
@@ -133,12 +133,24 @@ function test_thresholds_solver(FT)
             end
         end
 
-        # For very high rimed density, the thresholds are ill-defined. TODO: Investigate this
+        # The raw thresholds invert for a rime density above solid ice: `get_D_gr`
+        # decreases with ρ_g, so ρ_g > ρ_i gives D_gr < D_th. The `P3State`
+        # constructor bounds ρ_rim ≤ ρ_i (hence ρ_g ≤ ρ_i) to prevent this.
         F_rim_bad = FT(0.93)
-        ρ_rim_bad = FT(975)
-        ρ_g_bad = P3.get_ρ_g(mass, F_rim_bad, ρ_rim_bad)
-        D_gr_bad = P3.get_D_gr(mass, ρ_g_bad)
-        @test_broken D_th < D_gr_bad
+        ρ_rim_bad = FT(975)  # unphysical: denser than solid ice ρ_i
+        D_gr_bad = P3.get_D_gr(mass, P3.get_ρ_g(mass, F_rim_bad, ρ_rim_bad))
+        @test D_gr_bad < D_th  # raw inversion for the unphysical input
+
+        # Constructor clamp: binding above ρ_i, inert below, ordering preserved.
+        mk(ρ_rim) = P3.P3State(params, FT(1e-4), FT(1e6), F_rim_bad, FT(ρ_rim))
+        @test mk(975).ρ_rim == ρ_i        # binding: clamped to ρ_i
+        @test mk(2 * ρ_i).ρ_rim == ρ_i    # binding: far above
+        @test mk(400).ρ_rim == FT(400)    # inert: physical value unchanged
+        @test mk(ρ_i).ρ_rim == ρ_i        # marginal: exactly at the bound
+        for ρ_rim in (FT(50), FT(400), FT(800), ρ_i, FT(975), 2 * ρ_i)
+            st = mk(ρ_rim)
+            @test st.D_th ≤ st.D_gr ≤ st.D_cr  # ordering never inverts
+        end
 
         # Check that the P3 scheme solution matches the published values
         # D_cr and D_gr vs Fig. 1a Morrison and Milbrandt 2015
