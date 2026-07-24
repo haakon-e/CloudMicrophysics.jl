@@ -409,7 +409,10 @@ function test_framework_2m(FT)
                 manual = collect(BMT._numadj_derivs(FT, q_test, n_test, x_min, x_max, τ, qmin))
                 h(v) = CM2.number_tendency_from_mass_limits((; x_min, x_max, τ), v[1], v[2])
                 fd = FD.gradient(h, FT[q_test, n_test])
-                @test all(isapprox.(manual, fd; rtol, atol))
+                # the mass coupling is treated explicitly; the implicit part is
+                # the relaxation diagonal
+                @test manual[1] == 0
+                @test isapprox(manual[2], fd[2]; rtol, atol)
             end
         end
     end

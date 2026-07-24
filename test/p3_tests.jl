@@ -758,12 +758,26 @@ function test_p3_melting(FT)
         @test rate.dNdt >= 0
         @test rate.dNdt == rate.dLdt / P3.ice_mean_particle_mass_min(FT)
 
-        # A mean mass above the physical range melts number at the upper bound.
+        # A mean mass above the physical range melts number at the true
+        # (unclamped) mean mass, not a fixed ceiling: the number rate is
+        # smaller than a fixed-ceiling rate would give, and shrinks further
+        # as the mean mass grows.
         state₁ = P3.P3State(params, FT(1.2e-3), FT(12), F_rim, ρ_rim)
         shape₁ = P3.get_distribution_shape(state₁)
         rate = P3.ice_melt(vel, aps, tps, T_warm, ρₐ, state₁, shape₁; quad)
         @test isfinite(rate.dNdt)
-        @test rate.dNdt == rate.dLdt / P3.ice_mean_particle_mass_max(FT)
+        @test rate.dNdt == rate.dLdt / (state₁.ρq_ice / state₁.ρn_ice)
+        @test rate.dNdt < rate.dLdt / P3.ice_mean_particle_mass_max(FT)
+
+        # At an even more depleted ρn_ice, the melt number rate keeps tracking
+        # the true (unclamped) mean mass rather than re-saturating at the old
+        # fixed ceiling rate.
+        state_lown = P3.P3State(params, FT(1.2e-3), FT(1e-3), F_rim, ρ_rim)
+        shape_lown = P3.get_distribution_shape(state_lown)
+        rate_lown = P3.ice_melt(vel, aps, tps, T_warm, ρₐ, state_lown, shape_lown; quad)
+        @test isfinite(rate_lown.dNdt)
+        @test rate_lown.dNdt == rate_lown.dLdt / (state_lown.ρq_ice / state_lown.ρn_ice)
+        @test rate_lown.dNdt < rate_lown.dLdt / P3.ice_mean_particle_mass_max(FT)
     end
 end
 
@@ -804,6 +818,11 @@ function test_p3_bulk_liquid_ice_collisions(FT)
     end
 
     @testset "local rime density" begin
+        Tₐ = T_freeze - 1 // 10
+        ρ′_rim_func = P3.compute_local_rime_density(vel_params, ρₐ, Tₐ, state)
+        # Corrected for the Cober-List sign fix (previously pinned at the Rᵢ = 1 floor, 159.5).
+        @test ρ′_rim_func(D̄, D̄) ≈ FT(282.8765520969483) rtol = 2e-4
+
         a, b, c = 51, 114, -11 // 2 # coeffs for Eq. 17 in Cober and List (1993), converted to [kg / m³]
         ρ′_rim_CL93(Rᵢ) = a + b * Rᵢ + c * Rᵢ^2  # Eq. 17 in Cober and List (1993), in [kg / m³], valid for 1 ≤ Rᵢ ≤ 8
         ρ_ice = FT(916.7)  # density of solid bulk ice
@@ -973,15 +992,16 @@ function test_p3_bulk_liquid_ice_collisions(FT)
         # `rtol = 5e-4` admits both Float32 and Float64 against these (Float64)
         # reference values.
         @test QCFRZ ≈ 5.942471550989089e-7 rtol = 5e-4
-        @test QCSHD ≈ 2.0728862241368704e-9 rtol = 5e-4
+        @test QCSHD ≈ 2.07611985935298e-9 rtol = 5e-4
         @test NCCOL ≈ 60651.35670910096 rtol = 5e-4
         @test QRFRZ ≈ 6.642674674038379e-5 rtol = 5e-4
-        @test QRSHD ≈ 3.6526001759370415e-6 rtol = 5e-4
+        @test QRSHD ≈ 3.64983632601479e-6 rtol = 5e-4
         @test NRCOL ≈ 172.61819652435105 rtol = 5e-4
         @test ∫M_col ≈ 7.067566695764388e-5 rtol = 5e-4
-        @test BCCOL ≈ 3.5089264947330093e-9 rtol = 5e-4
-        @test BRCOL ≈ 7.247197349759121e-8 rtol = 5e-4
-        @test ∫𝟙_wet_M_col ≈ 1.5520362321253953e-5 rtol = 5e-4
+        # BCCOL, BRCOL updated for the Cober-List sign fix in compute_local_rime_density.
+        @test BCCOL ≈ 3.50892649473301e-9 rtol = 5e-4
+        @test BRCOL ≈ 7.247197349759124e-8 rtol = 5e-4
+        @test ∫𝟙_wet_M_col ≈ 1.7043104560594327e-5 rtol = 5e-4
 
         ### Test the bulk source function
         state = P3.P3State(params, Lᵢ, Nᵢ, F_rim, ρ_rim)
@@ -1322,15 +1342,20 @@ function _p3_bit_identity_hash(vals::Vector{FT}) where {FT}
     return h
 end
 
-# Re-baselined for the underflow-safe melting number rate (dNdt = dLdt divided by
-# a bounded mean particle mass): a numerically inert reassociation of the melt
-# number tendency shifts the exact hash while the melt reference values are
-# unchanged. Previous baseline was (0xcf3d1f5482548ddf, 0xdb0584ac8ef32b6b).
-# Re-baselined earlier after the value-lane branch-guard fixes (differentiated
-# zeros select the primal branch); the baseline before that at the foundation
-# base dd26bc32 was (0x89c023ee67cce5b7, 0x50df586fb4467f48).
+# Re-baselined on merging the 2M/P3 base-stability stack. Unlike the earlier
+# re-baselines this one is not behavior-neutral: the reference trajectory moves
+# because ice deposition now relaxes on the population's capacitance integral
+# instead of a fixed timescale, the melting number rate divides by an unceilinged
+# mean particle mass, the Cober-List impact factor carries its leading minus, and
+# process rates are evaluated at mean-mass-bounded populations. Previous baseline
+# was (0x280bcaeb64fa4798, 0x72efc27a03f46f17).
+#
+# Earlier baselines, both behavior-neutral: (0xcf3d1f5482548ddf, 0xdb0584ac8ef32b6b)
+# before the melt number rate was made underflow-safe, and
+# (0x89c023ee67cce5b7, 0x50df586fb4467f48) at the foundation base dd26bc32,
+# before the value-lane branch guards.
 const _P3_BIT_IDENTITY_GOLDEN =
-    Dict{DataType, UInt64}(Float64 => 0x280bcaeb64fa4798, Float32 => 0x72efc27a03f46f17)
+    Dict{DataType, UInt64}(Float64 => 0xc63f43609a32f562, Float32 => 0x977ce491fc1d233a)
 
 function test_p3_bit_identity(FT)
     @testset "Bit-identity regression (default 2M+P3 config)" begin

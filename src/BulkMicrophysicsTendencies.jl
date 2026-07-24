@@ -181,6 +181,19 @@ block.
 struct ManualJacobian <: Jacobian end
 
 """
+    TemperatureCoupledJacobian <: Jacobian
+
+The [`ManualJacobian`](@ref) extended to the temperature-coupled substep state
+`(q_lcl, n_lcl, q_rai, n_rai, q_ice, n_ice, q_rim, b_rim, T)`. The phase-change
+rates carry their bare relaxation `−1/τ` (the psychrometric damping emerges
+from the coupled `(q, T)` block instead of the folded `−1/(τ·Γ)`), the
+temperature column carries the saturation shift `−∂q_sat/∂T / τ` and the
+melting rate's linear temperature dependence, and the temperature row is the
+latent-heating combination of the species rows.
+"""
+struct TemperatureCoupledJacobian <: Jacobian end
+
+"""
     GrowthTreatment
 
 Abstract type selecting how the positive (growth) diagonal of the Jacobian
@@ -277,10 +290,21 @@ rosenbrock_exact() =
     rosenbrock_manual()
 
 [`RosenbrockAverage`](@ref) with the hand-built 2M+P3 [`ManualJacobian`](@ref),
-implicit growth, and the end-state saturation adjustment.
+the explicit growth diagonal, and the end-state saturation adjustment.
 """
 rosenbrock_manual() =
-    RosenbrockAverage(ManualJacobian(), ImplicitGrowth(), EndStateSaturationAdjustment())
+    RosenbrockAverage(ManualJacobian(), ExplicitGrowthDiagonal(), EndStateSaturationAdjustment())
+
+"""
+    rosenbrock_manual_temperature()
+
+[`RosenbrockAverage`](@ref) on the temperature-coupled substep state with the
+[`TemperatureCoupledJacobian`](@ref), the explicit growth diagonal, and no
+increment limiter: temperature evolves implicitly inside each substep, so the
+saturation-overshoot adjustment is not required.
+"""
+rosenbrock_manual_temperature() =
+    RosenbrockAverage(TemperatureCoupledJacobian(), ExplicitGrowthDiagonal(), NoLimiter())
 
 """
     Verbose(mode) <: TendencyMode
@@ -742,11 +766,16 @@ Used by both warm-only and warm+ice dispatch methods to reduce code duplication.
     # Unpack parameters
     sb = warm_rain.seifert_beheng
     aps = warm_rain.air_properties
-    condevap = warm_rain.condevap
 
-    # Convert to number densities for CM2 functions
-    N_lcl = ρ * n_lcl
-    N_rai = ρ * n_rai
+    # Convert to number densities for CM2 functions. Process rates are
+    # evaluated at the mean-mass-bounded populations; the number adjustments
+    # relax the prognostic numbers toward the same bounds.
+    n_lcl_b = CM2.number_bounded_by_mass_limits(
+        (; x_min = sb.pdf_c.xc_min, x_max = sb.pdf_c.xc_max), q_lcl, n_lcl)
+    n_rai_b = CM2.number_bounded_by_mass_limits(
+        (; x_min = sb.pdf_r.xr_min, x_max = sb.pdf_r.xr_max), q_rai, n_rai)
+    N_lcl = ρ * n_lcl_b
+    N_rai = ρ * n_rai_b
 
     # Initialize tendencies
     FT = typeof(ρ)
@@ -759,10 +788,13 @@ Used by both warm-only and warm+ice dispatch methods to reduce code duplication.
     dn_lcl_activation_dt = zero(FT)
 
     # --- Condensation of vapor / evaporation of cloud liquid water ---
+    # The relaxation timescale follows the droplet population's capacitance
+    # integral, so the rate vanishes with the population.
     micro_mock = (; q_tot, q_lcl, q_icl = q_ice, q_rai, q_sno = zero(q_ice))
     thermo_mock = (; ρ, T)
+    τ_cond = CM2.cloud_condensation_timescale(sb.pdf_c, aps, tps, T, ρ, q_lcl, N_lcl)
     ∂ₜq_lcl_cond = CMNonEq.conv_q_vap_to_q_lcl(
-        CMP.CloudLiquidFormation(condevap.τ_relax), nothing, tps, micro_mock, thermo_mock,
+        CMP.CloudLiquidFormation(τ_cond), nothing, tps, micro_mock, thermo_mock,
     )
     ∂ₜn_lcl_cond = zero(∂ₜq_lcl_cond)  # neglect number change from condensation/evaporation
     dq_lcl_dt += ∂ₜq_lcl_cond
@@ -780,8 +812,8 @@ Used by both warm-only and warm+ice dispatch methods to reduce code duplication.
     dn_lcl_dt += acnv.dN_lcl_dt / ρ
     dn_rai_dt += acnv.dN_rai_dt / ρ
 
-    # --- Cloud liquid self-collection ---
-    ∂ₜN_lcl_sc = CM2.cloud_liquid_self_collection(sb.acnv, sb.pdf_c, q_lcl, ρ, acnv.dN_lcl_dt)
+    # --- Cloud liquid self-collection (evaluated at the true N_lcl) ---
+    ∂ₜN_lcl_sc = CM2.cloud_liquid_self_collection(sb.acnv, sb.pdf_c, q_lcl, ρ, ρ * n_lcl, acnv.dN_lcl_dt)
     dn_lcl_dt += ∂ₜN_lcl_sc / ρ
 
     # --- Accretion ---

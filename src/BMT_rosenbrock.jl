@@ -190,11 +190,19 @@ sides `f_p` for the linear post-solve attribution and is not differentiated.
     # q_ice, n_ice, q_rim, b_rim) order shared with the entry's accumulators
     Z() = MicroState2MP3{FT}((o, o, o, o, o, o, o, o))
 
+    # Process rates are evaluated at the mean-mass-bounded populations; the
+    # number adjustments relax the prognostic numbers toward the same bounds.
+    sb = mp.warm_rain.seifert_beheng
+    n_lcl_b = CM2.number_bounded_by_mass_limits(
+        (; x_min = sb.pdf_c.xc_min, x_max = sb.pdf_c.xc_max), q_lcl, n_lcl)
+    n_rai_b = CM2.number_bounded_by_mass_limits(
+        (; x_min = sb.pdf_r.xr_min, x_max = sb.pdf_r.xr_max), q_rai, n_rai)
+
     # Volumetric quantities for P3 functions (entry convention).
     L_lcl = q_lcl * ρ
     L_rai = q_rai * ρ
-    N_lcl = n_lcl * ρ
-    N_rai = n_rai * ρ
+    N_lcl = n_lcl_b * ρ
+    N_rai = n_rai_b * ρ
     L_ice = q_ice * ρ
     N_ice = n_ice * ρ
     L_rim = q_rim * ρ
@@ -203,26 +211,26 @@ sides `f_p` for the linear post-solve attribution and is not differentiated.
     shape = shapes[1]
 
     aps = mp.warm_rain.air_properties
-    subdep = mp.warm_rain.subdep
 
     #####
     ##### Warm-rain processes (mirrors `warm_rain_tendencies_2m`)
     #####
     warm_rain = mp.warm_rain
-    sb = warm_rain.seifert_beheng
-    condevap = warm_rain.condevap
-    N_lcl_wr = ρ * n_lcl
-    N_rai_wr = ρ * n_rai
+    N_lcl_wr = ρ * n_lcl_b
+    N_rai_wr = ρ * n_rai_b
 
     # activation (cloud number only): no activation source
     dn_lcl_activation_dt = o
     activation = MicroState2MP3{FT}((o, dn_lcl_activation_dt, o, o, o, o, o, o))
 
-    # cloud condensation / evaporation (cloud mass only; number neglected)
+    # cloud condensation / evaporation (cloud mass only; number neglected);
+    # the relaxation timescale follows the droplet population's capacitance
+    # integral, so the rate vanishes with the population
     micro_mock = (; q_tot, q_lcl, q_icl = q_ice, q_rai, q_sno = zero(q_ice))
     thermo_mock = (; ρ, T)
+    τ_cond = CM2.cloud_condensation_timescale(sb.pdf_c, aps, tps, T, ρ, q_lcl, N_lcl_wr)
     ∂ₜq_lcl_cond = CMNonEq.conv_q_vap_to_q_lcl(
-        CMP.CloudLiquidFormation(condevap.τ_relax), nothing, tps, micro_mock, thermo_mock,
+        CMP.CloudLiquidFormation(τ_cond), nothing, tps, micro_mock, thermo_mock,
     )
     cloud_condevap = MicroState2MP3{FT}((∂ₜq_lcl_cond, o, o, o, o, o, o, o))
 
@@ -236,8 +244,8 @@ sides `f_p` for the linear post-solve attribution and is not differentiated.
         acnv.dq_lcl_dt, acnv.dN_lcl_dt / ρ, acnv.dq_rai_dt, acnv.dN_rai_dt / ρ, o, o, o, o,
     ))
 
-    # cloud self-collection (cloud number only)
-    ∂ₜN_lcl_sc = CM2.cloud_liquid_self_collection(sb.acnv, sb.pdf_c, q_lcl, ρ, acnv.dN_lcl_dt)
+    # cloud self-collection (cloud number only), evaluated at the true N_lcl
+    ∂ₜN_lcl_sc = CM2.cloud_liquid_self_collection(sb.acnv, sb.pdf_c, q_lcl, ρ, ρ * n_lcl, acnv.dN_lcl_dt)
     cloud_selfcol = MicroState2MP3{FT}((o, ∂ₜN_lcl_sc / ρ, o, o, o, o, o, o))
 
     # accretion (cloud → rain, mass; cloud number)
@@ -314,11 +322,14 @@ sides `f_p` for the linear post-solve attribution and is not differentiated.
         -∂ₜq_imm, -∂ₜn_imm, o, o, ∂ₜq_imm, ∂ₜn_imm, ∂ₜq_imm, ∂ₜq_imm / p3.ρ_i,
     ))
 
-    # ice deposition / sublimation (rim drains on the sublimation branch only)
+    # ice deposition / sublimation (rim drains on the sublimation branch only);
+    # the relaxation timescale follows the population's capacitance integral,
+    # so the rate vanishes with the population instead of an existence threshold
     n_per_q_ice = ifelse(q_ice > ϵₘ, n_ice / q_ice, zero(n_ice))
     micro_mock_ice = (; q_tot, q_lcl, q_icl = q_ice, q_rai, q_sno = zero(q_ice))
+    τ_dep = CMP3.ice_deposition_timescale(vel, aps, tps, T, ρ, state, shape; quad)
     ∂ₜq_ice_dep = CMNonEq.conv_q_vap_to_q_icl(
-        CMP.ConstantTimescale(subdep.τ_relax), nothing, tps, micro_mock_ice, thermo_mock,
+        CMP.ConstantTimescale(τ_dep), nothing, tps, micro_mock_ice, thermo_mock,
     )
     ∂ₜq_ice_dep = ifelse(T > tps.T_freeze, min(∂ₜq_ice_dep, zero(T)), ∂ₜq_ice_dep)
     ∂ₜn_ice_dep = ifelse(∂ₜq_ice_dep < 0, n_per_q_ice * ∂ₜq_ice_dep, zero(∂ₜq_ice_dep))
@@ -480,7 +491,9 @@ end
 
 One linearized-implicit (Rosenbrock-Euler) substep: build the equilibrated
 system ([`_rosenbrock_system`](@ref)) for `(I/h - B) Δx = f` with the masked
-Jacobian `B = P J P`, solve it ([`_rosenbrock_solve`](@ref)), and return
+Jacobian `B = P J P`, solve it ([`_rosenbrock_solve`](@ref)), replace an
+increment outside the well-conditioned-solve bound
+([`_solve_increment_acceptable`](@ref)) with the explicit update, and return
 `max.(x + Δx, 0)`.
 """
 @inline function _rosenbrock_update(
@@ -488,7 +501,29 @@ Jacobian `B = P J P`, solve it ([`_rosenbrock_solve`](@ref)), and return
 ) where {N, FT}
     S, S⁻¹, A = _rosenbrock_system(x, f, J, z, h)
     Δx = _rosenbrock_solve(S, S⁻¹, A, f)
+    Δx = _solve_increment_acceptable(S⁻¹ * Δx, S⁻¹ * f, h) ? Δx : h .* f
     return max.(x .+ Δx, 0)
+end
+
+# Acceptance bound for the linearized-implicit increment relative to the
+# explicit-step scale. A well-conditioned solve of `(I/h - B) Δx = f` satisfies
+# `‖Δx‖∞ = O(h ‖f‖∞)`; increments far beyond that scale indicate a
+# near-singular system matrix.
+const ROSENBROCK_INCREMENT_LIMIT = 10
+
+"""
+    _solve_increment_acceptable(d, f, h)
+
+Whether the Rosenbrock increment `d` is consistent with a well-conditioned
+solve, `‖d‖∞ ≤ $(ROSENBROCK_INCREMENT_LIMIT) h ‖f‖∞`, with both vectors in the
+equilibrated units of [`_rosenbrock_system`](@ref) (`S⁻¹ Δx` and `S⁻¹ f`), so
+the bound is relative to each component's own scale. A rejected increment is
+replaced with the explicit update `h f`. Non-finite entries in `d` fail the
+bound.
+"""
+@inline function _solve_increment_acceptable(d, f, h)
+    FT = eltype(d)
+    return maximum(abs, Tuple(d)) <= FT(ROSENBROCK_INCREMENT_LIMIT) * h * maximum(abs, Tuple(f))
 end
 
 bulk_microphysics_tendencies(::RosenbrockAverage, ::Microphysics2Moment, args...) = throw(
@@ -706,6 +741,26 @@ the ice categories.
     (g(x), _jacobian_2mp3_manual(g, x))
 
 """
+    _tendency_and_jacobian(::ManualJacobian, g::Instantaneous2MP3Tendency, x::MicroState2MP3)
+
+The raw tendency and the [`ManualJacobian`](@ref) substep matrix from a single
+[`_per_process_2mp3`](@ref) evaluation: the tendency is the component-wise sum
+of the per-process breakdown, equal to `g(x)` (see the "verbose instantaneous
+parts sum to total" test), and [`_jacobian_2mp3_manual`](@ref) consumes the
+same breakdown for its Tier-2/Tier-3 donor coefficients. This shares the
+mixed-phase quadrature kernels between the tendency and the Jacobian instead
+of replaying them once for each.
+"""
+@inline function _tendency_and_jacobian(
+    ::ManualJacobian, g::Instantaneous2MP3Tendency, x::MicroState2MP3{FT},
+) where {FT}
+    (q_lcl, n_lcl, q_rai, n_rai, q_ice, n_ice, q_rim, b_rim) = x
+    pp = _per_process_2mp3(g.mp, g.tps, g.ρ, g.T, FT(g.q_tot),
+        q_lcl, n_lcl, q_rai, n_rai, ((; q_ice, n_ice, q_rim, b_rim),), g.shapes)
+    return (sum(values(pp)), _jacobian_2mp3_manual(g, x, map(_named_species, pp)))
+end
+
+"""
     _jacobian_2mp3(FT; lcl_lcl, lcl_rai, ..., brim_brim)
 
 Assemble the 8×8 Jacobian of the 2M+P3 tendency over the state
@@ -803,11 +858,21 @@ b_rim)`.
     cat_view(x, Val(1))...,
 )
 
+@inline _jacobian_2mp3_manual(g::Instantaneous2MP3Tendency, x::MicroState2MP3{FT}) where {FT} =
+    _jacobian_2mp3_manual(g, x, map(_named_species, _per_process_2mp3(
+        g.mp, g.tps, g.ρ, g.T, FT(g.q_tot),
+        x[IQ_LCL], x[IN_LCL], x[IQ_RAI], x[IN_RAI], (cat_view(x, Val(1)),), g.shapes,
+    )))
+
 """
-    _jacobian_2mp3_manual(g::Instantaneous2MP3Tendency, x::MicroState2MP3)
+    _jacobian_2mp3_manual(g::Instantaneous2MP3Tendency, x::MicroState2MP3, pp)
 
 The hand-built 2M+P3 substep Jacobian for [`ManualJacobian`](@ref), evaluated at
-the same `(ρ, Tsub, q_tot, shapes, x)` as the raw tendency `f = g(x)`.
+the same `(ρ, Tsub, q_tot, shapes, x)` as the raw tendency `f = g(x)`. `pp` is the
+[`_per_process_2mp3`](@ref) breakdown at that state as `_named_species` views,
+computed once by [`_tendency_and_jacobian`](@ref) and shared with the raw
+tendency rather than recomputed here. The two-argument method recomputes it, for
+the callers that hold no breakdown of their own.
 
 The entries are tiered:
 
@@ -832,7 +897,7 @@ The entries are tiered:
     is frozen and only the donor dependence is linearized.
 """
 @inline function _jacobian_2mp3_manual(
-    g::Instantaneous2MP3Tendency, x::MicroState2MP3{FT},
+    g::Instantaneous2MP3Tendency, x::MicroState2MP3{FT}, pp,
 ) where {FT}
     mp = g.mp
     tps = g.tps
@@ -847,14 +912,6 @@ The entries are tiered:
     # donor floor for the Tier-2 linearizations (the 1M donor recipe's `q_min`)
     q_floor = FT(TDI.TD.Parameters.q_min(tps))
     n_floor = q_floor
-
-    # per-process primal rates as named-species views (Tier-2 donor
-    # coefficients reuse these)
-    pp = map(
-        _named_species,
-        _per_process_2mp3(mp, tps, ρ, T, q_tot,
-            q_lcl, n_lcl, q_rai, n_rai, ((; q_ice, n_ice, q_rim, b_rim),), g.shapes),
-    )
 
     # --- shared thermodynamic constants (T, ρ, q_tot frozen in the substep) ---
     Rᵥ = TDI.Rᵥ(tps)
@@ -874,8 +931,15 @@ The entries are tiered:
     ##### Tier 1 — closed-form stiff couplings
     #####
 
-    # cloud condensation / evaporation (row q_lcl), branch matched to the primal
-    τ_l = mp.warm_rain.condevap.τ_relax
+    # cloud condensation / evaporation (row q_lcl), branch matched to the primal;
+    # τ matches the entry's capacitance-integral timescale
+    pdf_c_j = mp.warm_rain.seifert_beheng.pdf_c
+    n_lcl_j = CM2.number_bounded_by_mass_limits(
+        (; x_min = pdf_c_j.xc_min, x_max = pdf_c_j.xc_max),
+        UT.clamp_to_nonneg(q_lcl), UT.clamp_to_nonneg(n_lcl))
+    τ_l = CM2.cloud_condensation_timescale(
+        pdf_c_j, mp.warm_rain.air_properties, tps, T, ρ,
+        UT.clamp_to_nonneg(q_lcl), n_lcl_j * ρ)
     qᵥ_sat_liq = TDI.saturation_vapor_specific_content_over_liquid(tps, T, ρ)
     dqsl_dT = CMNonEq.dqcld_dT(qᵥ_sat_liq, Lᵥ, Rᵥ, T)
     Γₗ = CMNonEq.gamma_helper(Lᵥ, cp_air, dqsl_dT)
@@ -885,8 +949,16 @@ The entries are tiered:
     lcl_rai = cl.∂s_rai
     lcl_ice = cl.∂s_ice
 
-    # ice deposition / sublimation (rows q_ice, n_ice, q_rim, b_rim)
-    τ_i = mp.warm_rain.subdep.τ_relax
+    # ice deposition / sublimation (rows q_ice, n_ice, q_rim, b_rim);
+    # τ matches the entry's capacitance-integral timescale (inputs clamped
+    # to nonnegative as in the entry)
+    state_i = CMP3.state_from_prognostic(
+        mp.ice.scheme,
+        UT.clamp_to_nonneg(q_ice) * ρ, UT.clamp_to_nonneg(n_ice) * ρ,
+        UT.clamp_to_nonneg(q_rim) * ρ, UT.clamp_to_nonneg(b_rim) * ρ)
+    τ_i = CMP3.ice_deposition_timescale(
+        mp.ice.terminal_velocity, mp.warm_rain.air_properties, tps, T, ρ,
+        state_i, g.shapes[1]; quad = mp.ice.quad)
     qᵥ_sat_ice = TDI.saturation_vapor_specific_content_over_ice(tps, T, ρ)
     dqsi_dT = CMNonEq.dqcld_dT(qᵥ_sat_ice, Lₛ, Rᵥ, T)
     Γᵢ = CMNonEq.gamma_helper(Lₛ, cp_air, dqsi_dT)
@@ -1147,12 +1219,12 @@ end
 """
     _numadj_derivs(FT, q, n, x_min, x_max, τ, qmin)
 
-The two non-zero closed-form derivatives `(∂q, ∂n)` of
+The implicit derivatives `(∂q, ∂n)` of
 [`CM2.number_tendency_from_mass_limits`](@ref) `∂ₜn = (n_target − n)/τ` with
-`n_target = clamp(n, q/x_max, q/x_min)`: interior (no clamp) ⇒ both zero; the
-low clamp `n_target = q/x_max` ⇒ `(1/(x_max·τ), −1/τ)`; the high clamp
-`n_target = q/x_min` ⇒ `(1/(x_min·τ), −1/τ)`; the empty arm `q < qmin`
-(`n_target = 0`) ⇒ `(0, −1/τ)`.
+`n_target = clamp(n, q/x_max, q/x_min)`: the relaxation diagonal `∂n = −1/τ`
+on the clamped and empty arms, zero in the interior. The target's mass
+coupling (`1/(x_min·τ)` on the high clamp, a gain up to `1/x_min` per unit
+`τ`) is treated explicitly: `∂q = 0`.
 """
 @inline function _numadj_derivs(::Type{FT}, q, n, x_min, x_max, τ, qmin) where {FT}
     empty = q < qmin
@@ -1160,9 +1232,8 @@ low clamp `n_target = q/x_max` ⇒ `(1/(x_max·τ), −1/τ)`; the high clamp
     hi = q / x_min
     clamp_low = !empty && n < lo
     clamp_high = !empty && n > hi
-    ∂q = ifelse(clamp_low, 1 / (x_max * τ), ifelse(clamp_high, 1 / (x_min * τ), zero(FT)))
     ∂n = ifelse(empty || clamp_low || clamp_high, -1 / τ, zero(FT))
-    return (∂q, ∂n)
+    return (zero(FT), ∂n)
 end
 
 #####
@@ -1680,9 +1751,11 @@ function _rosenbrock_substep_verbose(g, g_verbose, J, z, x::SA.StaticVector{N, F
     if all(isfinite, x) && all(isfinite, J)
         S, S⁻¹, A = _rosenbrock_system(x, f, J, z, h)
         Δx = _rosenbrock_solve(S, S⁻¹, A, f)
-        Δxp = map(fp_i -> _rosenbrock_solve(S, S⁻¹, A, fp_i), fp)
-        x_new = max.(x .+ Δx, 0)
-        return x_new, Δxp, (x_new - x) - Δx
+        if _solve_increment_acceptable(S⁻¹ * Δx, S⁻¹ * f, h)
+            Δxp = map(fp_i -> _rosenbrock_solve(S, S⁻¹, A, fp_i), fp)
+            x_new = max.(x .+ Δx, 0)
+            return x_new, Δxp, (x_new - x) - Δx
+        end
     end
     Δx = h .* f
     Δxp = map(fp_i -> h .* fp_i, fp)
@@ -1882,4 +1955,264 @@ This is a diagnostic path, separate from the non-verbose entry.
     processes = map(Δxp_i -> Δxp_i / Δt, Δxp_sum)
     clamp_correction = Δx_clamp_sum / Δt
     return merge(net, (; processes, clamp_correction))
+end
+
+#####
+##### Temperature-coupled Rosenbrock substepping (`TemperatureCoupledJacobian`)
+#####
+
+"""
+    MicroState2MP3T{FT}
+
+The eight prognostic 2M+P3 species and the substep temperature as a
+`StaticArrays.FieldVector`. Internal to the temperature-coupled
+[`RosenbrockAverage`](@ref) implementation; the temperature is a substep
+auxiliary and is not returned by the entry.
+"""
+struct MicroState2MP3T{FT} <: SA.FieldVector{9, FT}
+    q_lcl::FT
+    n_lcl::FT
+    q_rai::FT
+    n_rai::FT
+    q_ice::FT
+    n_ice::FT
+    q_rim::FT
+    b_rim::FT
+    T::FT
+end
+SA.similar_type(::Type{<:MicroState2MP3T}, ::Type{FT}, ::SA.Size{(9,)}) where {FT} =
+    MicroState2MP3T{FT}
+
+"""
+    _phase_relaxation_context(mp, tps, ρ, T, q_tot, q_lcl, n_lcl, q_rai, n_rai, q_ice, n_ice, q_rim, b_rim, logλ)
+
+The shared phase-change quantities of the temperature-coupled tendency and its
+Jacobian: capacitance timescales, saturation excesses, saturation-slope
+derivatives, psychrometric factors, latent heats, and the moist heat capacity,
+evaluated at the mean-mass-bounded cloud population and the nonnegative-clamped
+ice state.
+"""
+@inline function _phase_relaxation_context(
+    mp, tps, ρ, T, q_tot, q_lcl, n_lcl, q_rai, n_rai, q_ice, n_ice, q_rim, b_rim, logλ,
+)
+    FT = typeof(q_tot)
+    Rᵥ = TDI.Rᵥ(tps)
+    Lᵥ = TDI.Lᵥ(tps, T)
+    Lₛ = TDI.Lₛ(tps, T)
+    cp_air = TDI.cpₘ(tps, q_tot, q_lcl + q_rai, q_ice)
+    qᵥ = TDI.q_vap(q_tot, q_lcl + q_rai, q_ice)
+
+    pdf_c = mp.warm_rain.seifert_beheng.pdf_c
+    n_lcl_b = CM2.number_bounded_by_mass_limits(
+        (; x_min = pdf_c.xc_min, x_max = pdf_c.xc_max),
+        UT.clamp_to_nonneg(q_lcl), UT.clamp_to_nonneg(n_lcl))
+    τ_l = CM2.cloud_condensation_timescale(
+        pdf_c, mp.warm_rain.air_properties, tps, T, ρ,
+        UT.clamp_to_nonneg(q_lcl), n_lcl_b * ρ)
+    qᵥ_sat_liq = TDI.saturation_vapor_specific_content_over_liquid(tps, T, ρ)
+    dqsl_dT = CMNonEq.dqcld_dT(qᵥ_sat_liq, Lᵥ, Rᵥ, T)
+    Γₗ = CMNonEq.gamma_helper(Lᵥ, cp_air, dqsl_dT)
+    sat_excess_l = qᵥ - qᵥ_sat_liq
+
+    state_i = CMP3.state_from_prognostic(
+        mp.ice.scheme,
+        UT.clamp_to_nonneg(q_ice) * ρ, UT.clamp_to_nonneg(n_ice) * ρ,
+        UT.clamp_to_nonneg(q_rim) * ρ, UT.clamp_to_nonneg(b_rim) * ρ)
+    τ_i = CMP3.ice_deposition_timescale(
+        mp.ice.terminal_velocity, mp.warm_rain.air_properties, tps, T, ρ,
+        state_i, logλ; quad = mp.ice.quad)
+    qᵥ_sat_ice = TDI.saturation_vapor_specific_content_over_ice(tps, T, ρ)
+    dqsi_dT = CMNonEq.dqcld_dT(qᵥ_sat_ice, Lₛ, Rᵥ, T)
+    Γᵢ = CMNonEq.gamma_helper(Lₛ, cp_air, dqsi_dT)
+    sat_excess_i = qᵥ - qᵥ_sat_ice
+
+    return (; Rᵥ, Lᵥ, Lₛ, cp_air, τ_l, dqsl_dT, Γₗ, sat_excess_l,
+        τ_i, dqsi_dT, Γᵢ, sat_excess_i, T_freeze = TDI.T_freeze(tps))
+end
+
+"""
+    Temperature2MP3Tendency(mp, tps, ρ, q_tot, logλ)
+
+Callable bundling the frozen per-substep context of the temperature-coupled
+state; applying it to a [`MicroState2MP3T`](@ref) returns the species rates
+with the bare phase-change relaxation (the folded `1/Γ` factor removed, since
+the psychrometric feedback is carried by the coupled temperature) and the
+latent-heating temperature rate.
+"""
+struct Temperature2MP3Tendency{P, H, F}
+    mp::P
+    tps::H
+    ρ::F
+    q_tot::F
+    logλ::F
+end
+"""
+    _temperature_2mp3_tendency(T, pp, ctx)
+
+The temperature-coupled tendency [`MicroState2MP3T`](@ref) from a
+[`_per_process_2mp3`](@ref) breakdown `pp` and a
+[`_phase_relaxation_context`](@ref) `ctx` at temperature `T`: the
+component-wise sum of `pp`, corrected from the folded to the bare
+condensation/deposition relaxation (the psychrometric `1/Γ` factor is instead
+carried by the coupled temperature), with the latent-heating temperature rate
+appended.
+"""
+@inline function _temperature_2mp3_tendency(T, pp, ctx)
+    f8 = reduce(+, values(pp)) +
+         (ctx.Γₗ - 1) * pp.cloud_condevap + (ctx.Γᵢ - 1) * pp.ice_depsub
+    fT = (ctx.Lᵥ * (f8.q_lcl + f8.q_rai) + ctx.Lₛ * f8.q_ice) / ctx.cp_air
+    return MicroState2MP3T(Tuple(f8)..., fT)
+end
+@inline function (g::Temperature2MP3Tendency)(y::SA.StaticVector{9, FT}) where {FT}
+    (q_lcl, n_lcl, q_rai, n_rai, q_ice, n_ice, q_rim, b_rim, T) = y
+    pp = _per_process_2mp3(g.mp, g.tps, g.ρ, T, FT(g.q_tot),
+        q_lcl, n_lcl, q_rai, n_rai, q_ice, n_ice, q_rim, b_rim, g.logλ)
+    ctx = _phase_relaxation_context(g.mp, g.tps, g.ρ, T, FT(g.q_tot),
+        q_lcl, n_lcl, q_rai, n_rai, q_ice, n_ice, q_rim, b_rim, g.logλ)
+    return _temperature_2mp3_tendency(T, pp, ctx)
+end
+
+# Minimum temperature excess of the melting-rate linearization [K].
+const MELT_LINEARIZATION_ΔT_MIN = 1e-3
+
+"""
+    _jacobian_2mp3t_manual(g::Temperature2MP3Tendency, y::MicroState2MP3T, pp, ctx)
+
+The temperature-coupled 9×9 substep Jacobian. The species block is the
+[`_jacobian_2mp3_manual`](@ref) 8×8 with the folded phase-change entries
+(`−1/(τ·Γ)`) replaced by their bare counterparts (`−1/τ`); the temperature
+column carries the saturation shift of condensation and deposition
+(`−∂q_sat/∂T / τ` on the active branches, with the ice-number sublimation
+pathway) and the melting rate's linear dependence on `T − T_freeze`; the
+temperature row is the latent-heating combination of the species rows. The
+freezing rates' exponential temperature dependence is not carried (explicit).
+`pp` (the [`_per_process_2mp3`](@ref) breakdown) and `ctx` (the
+[`_phase_relaxation_context`](@ref)) are computed once by
+[`_tendency_and_jacobian`](@ref) at the same state and shared with the raw
+tendency rather than recomputed here.
+"""
+function _jacobian_2mp3t_manual(
+    g::Temperature2MP3Tendency, y::MicroState2MP3T{FT}, pp, ctx,
+) where {FT}
+    (q_lcl, n_lcl, q_rai, n_rai, q_ice, n_ice, q_rim, b_rim, T) = y
+    o = zero(FT)
+    q_tot = FT(g.q_tot)
+    x8 = MicroState2MP3(q_lcl, n_lcl, q_rai, n_rai, q_ice, n_ice, q_rim, b_rim)
+    g8 = Instantaneous2MP3Tendency(g.mp, g.tps, g.ρ, T, q_tot, g.logλ)
+    J8 = _jacobian_2mp3_manual(g8, x8, pp)
+    (; Lᵥ, Lₛ, cp_air, τ_l, dqsl_dT, Γₗ, sat_excess_l,
+        τ_i, dqsi_dT, Γᵢ, sat_excess_i, T_freeze) = ctx
+
+    cp_v = TDI.TD.Parameters.cp_v(g.tps)
+    dcp_dliq = TDI.TD.Parameters.cp_l(g.tps) - cp_v
+    dcp_dice = TDI.TD.Parameters.cp_i(g.tps) - cp_v
+    qmin = UT.ϵ_numerics_2M_M(FT)
+
+    # folded vs bare condensation/deposition derivatives (the bare form is the
+    # Γ = 1 evaluation with the heat-capacity couplings dropped)
+    cl_f = _condevap_derivs(τ_l, sat_excess_l, Γₗ, cp_air, Lᵥ, dqsl_dT, q_lcl, false, dcp_dliq, dcp_dice)
+    cl_b = _condevap_derivs(τ_l, sat_excess_l, one(FT), cp_air, Lᵥ, dqsl_dT, q_lcl, false, o, o)
+    ci_f = _condevap_derivs(τ_i, sat_excess_i, Γᵢ, cp_air, Lₛ, dqsi_dT, q_ice, true, dcp_dliq, dcp_dice)
+    ci_b = _condevap_derivs(τ_i, sat_excess_i, one(FT), cp_air, Lₛ, dqsi_dT, q_ice, true, o, o)
+    dep_active = !((T > T_freeze) & (sat_excess_i > 0))
+    Δ1 = (cl_b.∂s_liq - cl_f.∂s_liq, cl_b.∂s_rai - cl_f.∂s_rai, cl_b.∂s_ice - cl_f.∂s_ice)
+    Δ5 = dep_active ?
+        (ci_b.∂s_liq - ci_f.∂s_liq, ci_b.∂s_rai - ci_f.∂s_rai, ci_b.∂s_ice - ci_f.∂s_ice) :
+        (o, o, o)
+    ∂ₜq_ice_dep = pp.ice_depsub.q_ice
+    n_sub_active = ∂ₜq_ice_dep < 0 && q_ice > qmin && dep_active
+    n_per_q = n_ice / max(qmin, q_ice)
+    Δ6 = n_sub_active ? n_per_q .* Δ5 : (o, o, o)
+    Δ66 = n_sub_active ? (Γᵢ - 1) * ∂ₜq_ice_dep / max(qmin, q_ice) : o
+
+    # temperature column: saturation shift on the unlimited phase-change
+    # branches, the ice-number sublimation pathway, and the melting rate's
+    # linear dependence on the temperature excess
+    limit_l = (sat_excess_l < 0) & (-sat_excess_l > max(o, q_lcl))
+    limit_i = (sat_excess_i < 0) & (-sat_excess_i > max(o, q_ice))
+    t1 = limit_l ? o : -dqsl_dT / τ_l
+    t5 = (dep_active && !limit_i) ? -dqsi_dT / τ_i : o
+    t6 = n_sub_active ? n_per_q * t5 : o
+    melt_scale = ifelse(T > T_freeze, 1 / max(FT(MELT_LINEARIZATION_ΔT_MIN), T - T_freeze), o)
+    melt_col = Tuple(pp.ice_melting) .* melt_scale
+    col9 = SA.SVector{8, FT}(
+        t1 + melt_col[1], melt_col[2], melt_col[3], melt_col[4],
+        t5 + melt_col[5], t6 + melt_col[6], melt_col[7], melt_col[8])
+
+    Δ = SA.SMatrix{8, 8, FT}(ntuple(k -> begin
+        (i, j) = ((k - 1) % 8 + 1, (k - 1) ÷ 8 + 1)
+        j == 1 ? (i == 1 ? Δ1[1] : i == 5 ? Δ5[1] : i == 6 ? Δ6[1] : o) :
+        j == 3 ? (i == 1 ? Δ1[2] : i == 5 ? Δ5[2] : i == 6 ? Δ6[2] : o) :
+        j == 5 ? (i == 1 ? Δ1[3] : i == 5 ? Δ5[3] : i == 6 ? Δ6[3] : o) :
+        j == 6 ? (i == 6 ? Δ66 : o) : o
+    end, 64))
+    J8c = J8 + Δ
+
+    lh = (SA.SVector{8, FT}(ntuple(c -> J8c[1, c] + J8c[3, c], 8)) .* Lᵥ .+
+          SA.SVector{8, FT}(ntuple(c -> J8c[5, c], 8)) .* Lₛ) ./ cp_air
+    tTT = (Lᵥ * (col9[1] + col9[3]) + Lₛ * col9[5]) / cp_air
+    row9 = SA.SVector{9, FT}(Tuple(lh)..., tTT)
+    return vcat(hcat(J8c, col9), row9')
+end
+
+"""
+    _tendency_and_jacobian(::TemperatureCoupledJacobian, g::Temperature2MP3Tendency, y)
+
+The temperature-coupled tendency and 9×9 substep Jacobian from a single
+[`_per_process_2mp3`](@ref) and [`_phase_relaxation_context`](@ref)
+evaluation, shared between [`_temperature_2mp3_tendency`](@ref) and
+[`_jacobian_2mp3t_manual`](@ref) instead of each replaying the mixed-phase
+quadrature kernels independently.
+"""
+@inline function _tendency_and_jacobian(
+    ::TemperatureCoupledJacobian, g::Temperature2MP3Tendency, y::SA.StaticVector{9, FT},
+) where {FT}
+    (q_lcl, n_lcl, q_rai, n_rai, q_ice, n_ice, q_rim, b_rim, T) = y
+    q_tot = FT(g.q_tot)
+    pp = _per_process_2mp3(g.mp, g.tps, g.ρ, T, q_tot,
+        q_lcl, n_lcl, q_rai, n_rai, q_ice, n_ice, q_rim, b_rim, g.logλ)
+    ctx = _phase_relaxation_context(g.mp, g.tps, g.ρ, T, q_tot,
+        q_lcl, n_lcl, q_rai, n_rai, q_ice, n_ice, q_rim, b_rim, g.logλ)
+    return (_temperature_2mp3_tendency(T, pp, ctx), _jacobian_2mp3t_manual(g, y, pp, ctx))
+end
+@inline _species_mask(::TemperatureCoupledJacobian, ::GrowthTreatment) = _full_species_mask
+
+@inline function bulk_microphysics_tendencies(
+    mode::RosenbrockAverage{TemperatureCoupledJacobian}, cm::Microphysics2Moment,
+    mp::CMP.Microphysics2MParams{WR, ICE}, tps,
+    ρ, T, q_tot,
+    q_lcl, n_lcl, q_rai, n_rai, q_ice, n_ice, q_rim, b_rim, logλ,
+    Δt, nsub = 1,
+) where {WR, ICE <: CMP.P3IceParams}
+    FT = typeof(q_tot)
+    nsub_eff = max(Int(nsub), 1)
+    h = Δt / FT(nsub_eff)
+
+    y = MicroState2MP3T{FT}(q_lcl, n_lcl, q_rai, n_rai, q_ice, n_ice, q_rim, b_rim, T)
+    y₀ = y
+    g = Temperature2MP3Tendency(mp, tps, ρ, FT(q_tot), FT(logλ))
+    for _ in 1:nsub_eff
+        if all(isfinite, y)
+            f, J_raw = _tendency_and_jacobian(mode.jacobian, g, y)
+            J = _apply_growth(mode.growth, J_raw)
+            z = _species_mask(mode.jacobian, mode.growth)(y)
+            d = if all(isfinite, J)
+                _rosenbrock_update(y, f, J, z, h) - y
+            else
+                _euler_update(y, f, h) - y
+            end
+            y = max.(y .+ d, 0)
+        else
+            f = g(y)
+            y = _euler_update(y, f, h)
+        end
+    end
+
+    rates = (y - y₀) / Δt
+    return NamedTuple{(
+        :dq_lcl_dt, :dn_lcl_dt, :dq_rai_dt, :dn_rai_dt,
+        :dq_ice_dt, :dn_ice_dt, :dq_rim_dt, :db_rim_dt, :dn_lcl_activation_dt,
+    )}(
+        (Tuple(rates)[1:8]..., zero(FT)),
+    )
 end

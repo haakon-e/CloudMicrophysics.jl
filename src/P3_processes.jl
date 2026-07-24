@@ -100,14 +100,11 @@ with [`ice_refreeze`](@ref) (gains positive, the core loss explicit). See the
     # only consider melting (not fusion)
     dLdt = max(0, dLdt_unclamped)
     # Remove number in proportion to mass through the mean particle mass,
-    # bounded to the physical range, so the rate stays finite when `ρq_ice`
-    # underflows to zero while `ρn_ice` and the melt integral remain positive.
+    # floored (not ceilinged) so the rate stays finite when `ρq_ice`
+    # underflows to zero while `ρn_ice` and the melt integral remain positive,
+    # and vanishes as `ρn_ice` does rather than saturating at a fixed rate.
     FT = eltype(state)
-    m̄ = clamp(
-        ρq_ice / max(ρn_ice, floatmin(FT)),
-        ice_mean_particle_mass_min(FT),
-        ice_mean_particle_mass_max(FT),
-    )
+    m̄ = max(ρq_ice / max(ρn_ice, floatmin(FT)), ice_mean_particle_mass_min(FT))
     dNdt = dLdt / m̄
 
     return (; dNdt, dLdt)
@@ -286,6 +283,66 @@ number-adjustment bounds of the 2-moment scheme.
 @inline ice_mean_particle_mass_max(::Type{FT}) where {FT} = FT(1e-5)
 
 """
+    ice_deposition_timescale(velocity_params, aps, tps, Tₐ, ρₐ, state, shape; quad)
+
+Compute the vapor deposition relaxation timescale of the ice population from
+its capacitance integral,
+
+```math
+τ_{dep} = \\frac{ρₐ q_{v,si}}{2π G_i ∫ D F_v(D) N'(D) dD},
+```
+
+with spherical capacitance `C = D/2`, following Morrison and Milbrandt (2015).
+The timescale diverges as the population vanishes and shrinks as the
+integrated particle surface grows.
+
+# Arguments
+ - `velocity_params`: [`CMP.Chen2022VelType`](@ref)
+ - `aps`: [`CMP.AirProperties`](@ref)
+ - `tps`: thermodynamics parameters
+ - `Tₐ`: temperature (K)
+ - `ρₐ`: air density
+ - `state`: a [`P3State`](@ref) object
+ - `shape`: The diagnosed [`P3Shape`](@ref), or a real `logλ` from which the
+   shape is diagnosed via [`get_distribution_shape`](@ref)
+
+# Keyword arguments
+ - `quad`: quadrature rule (a `Quadrature.QuadratureRule`)
+
+# Returns
+- Deposition timescale [s], bounded above at `1e10` to stay finite.
+"""
+@inline function ice_deposition_timescale(
+    velocity_params, aps::CMP.AirProperties, tps::TDI.PS,
+    Tₐ, ρₐ, state::P3State, shape::P3Shape;
+    quad,
+)
+    FT = eltype(state)
+    (; vent) = state.params
+
+    G = CO.G_func_ice(aps, tps, Tₐ)
+    qᵥ_sat_ice = TDI.saturation_vapor_specific_content_over_ice(tps, Tₐ, ρₐ)
+
+    v_term = ice_particle_terminal_velocity(velocity_params, ρₐ, state)
+    F_v = CO.ventilation_factor(vent, aps, v_term)
+    N′ = size_distribution(state, shape)
+
+    bnds = velocity_integral_bounds(state, shape, v_term; p = 1e-6)
+    dep_integrand = D -> D * F_v(D) * N′(D)
+    ∫DFvN = integrate(dep_integrand, bnds, quad)
+
+    denom = 2 * FT(π) * G * ∫DFvN
+    return min(ρₐ * qᵥ_sat_ice / max(denom, floatmin(FT)), FT(1e10))
+end
+@inline ice_deposition_timescale(
+    velocity_params, aps::CMP.AirProperties, tps::TDI.PS,
+    Tₐ, ρₐ, state::P3State, logλ::Real;
+    kw...,
+) = ice_deposition_timescale(
+    velocity_params, aps, tps, Tₐ, ρₐ, state, get_distribution_shape(state, logλ); kw...,
+)
+
+"""
     collision_cross_section_ice_liquid_coeffs(rᵢ)
     collision_cross_section_ice_liquid_coeffs(state, Dᵢ)
 
@@ -458,31 +515,58 @@ See also [`LocalRimeDensity`](@ref CloudMicrophysics.Parameters.LocalRimeDensity
 
 # Extended help
 
- Implementation follows Cober and List (1993), Eq. 16 and 17.
- See also the P3 fortran code, `microphy_p3.f90`, Line 3315-3323,
- which extends the range of the calculation to ``R_i ≤ 12``, the upper limit of which
- then equals the solid bulk ice density, ``ρ_ice = 916.7 kg/m^3``.
+ Implementation follows Cober and List (1993), Eq. 16 and 17, and the P3 fortran code,
+ `microphy_p3.f90`. The leading minus sign in ``R_i`` matches both: with ``T_{sfc} < 0``
+ the minus makes ``R_i`` positive, and the fortran carries the explicit minus in
+ `Ri = -(0.5e6 D_c) V_impact iTc` (its `0.5e6 D_c` equals ``10^6 D_{liq} / 2``).
+
+ See also the P3 fortran code, Line 3315-3323, which extends the range of the calculation
+ to ``R_i ≤ 12``, the upper limit of which then equals the solid bulk ice density,
+ ``ρ_ice = 916.7 kg/m^3``.
+ ``T_{sfc}`` is additionally bounded strictly below 0°C, a numerical guard against the
+ ``R_i → ∞`` limit as ``T_{sfc} → 0``, carried over from the fortran code, Line 3380
+ (`iTc = 1/min(-0.001, Tc)`); this bound is not part of the paper's continuous form.
 
  Note that Morrison & Milbrandt (2015) [MorrisonMilbrandt2015](@cite) only uses this
  parameterization for collisions with cloud droplets.
  For rain drops, they use a value near the solid bulk ice density, ``ρ^* = 900 kg/m^3``.
  We do not consider this distinction, and use this parameterization for all liquid particles.
 """
+struct RimeDensityRate{R, FT, VI, VL} <: Function
+    ρ_rim_local::R
+    T°C::FT
+    v_ice::VI
+    v_liq::VL
+end
+@inline function (ρ′::RimeDensityRate)(Dᵢ, Dₗ)
+    v_term = abs(ρ′.v_ice(Dᵢ) - ρ′.v_liq(Dₗ))
+    return rime_density_at(ρ′, v_term, Dₗ)
+end
+
+"""
+    rime_density_at(ρ′::RimeDensityRate, v_term, Dₗ)
+
+Local rime density [kg/m³] at a precomputed sedimentation velocity difference
+`v_term = |v_ice(Dᵢ) - v_liq(Dₗ)|`, shared between the collision-rate and rime-density
+evaluations at the same liquid diameter node. See [`compute_local_rime_density`](@ref).
+"""
+@inline function rime_density_at(ρ′::RimeDensityRate, v_term, Dₗ)
+    μm = 1_000_000  # m to μm factor, c.f. units of rₘ in Eq. 16 in Cober and List (1993)
+    # Leading minus: Cober and List (1993), Eq. 16, and fortran `microphy_p3.f90`
+    # (`Ri = -(0.5e6*D_c)*V_impact*iTc`); T°C < 0 then makes Rᵢ positive.
+    Rᵢ = -(Dₗ * μm * v_term) / (2 * ρ′.T°C)
+    return ρ′.ρ_rim_local(Rᵢ)
+end
+
 function compute_local_rime_density(velocity_params, ρₐ, T, state)
     (; T_freeze, ρ_rim_local) = state.params
-    # Sub-zero surface temperature [°C], bounded strictly below 0°C (fortran
-    # `microphy_p3.f90` Line 3380: `iTc = 1/min(-0.001, Tc)`).
+    # Sub-zero surface temperature [°C], bounded strictly below 0°C. The bound is a
+    # numerical guard against R_i → ∞ as T°C → 0, carried over from the fortran code
+    # `microphy_p3.f90` Line 3380 (`iTc = 1/min(-0.001, Tc)`).
     T°C = min(T - T_freeze, -oftype(T_freeze, 1e-3))
-    μm = 1_000_000  # m to μm factor, c.f. units of rₘ in Eq. 16 in Cober and List (1993)
-
     v_ice = ice_particle_terminal_velocity(velocity_params, ρₐ, state)
     v_liq = CO.particle_terminal_velocity(velocity_params.rain, ρₐ)
-    function ρ′_rim(Dᵢ, Dₗ)
-        v_term = abs(v_ice(Dᵢ) - v_liq(Dₗ))
-        Rᵢ = -(Dₗ * μm * v_term) / (2 * T°C)  # Eq. 16 in Cober and List (1993)
-        return ρ_rim_local(Rᵢ)
-    end
-    return ρ′_rim
+    return RimeDensityRate(ρ_rim_local, T°C, v_ice, v_liq)
 end
 
 """
@@ -526,24 +610,53 @@ The function `liquid_integrals(Dᵢ)` returns a tuple `(∂ₜN_col, ∂ₜM_col
     return liquid_integrals
 end
 
+# `∂ₜV.v_i(Dᵢ)` and the cross-section coefficients derived from `ice_area(state, Dᵢ)`
+# depend only on the outer diameter `Dᵢ`; hoist both once per outer node instead of
+# reevaluating them at every inner quadrature node. `∂ₜV.v_l(D)` is likewise shared
+# between the collision-rate and rime-density evaluations at each inner node.
+@inline function get_liquid_integrals(
+    n, ∂ₜV::VolumetricCollisionRate, m_liq, ρ′_rim::RimeDensityRate, liq_bounds; quad,
+)
+    function liquid_integrals(Dᵢ)
+        v_i_at_Dᵢ = ∂ₜV.v_i(Dᵢ)
+        coeffs = collision_cross_section_ice_liquid_coeffs(∂ₜV.state, Dᵢ)
+        integrand = D -> begin
+            v_l_at_D = ∂ₜV.v_l(D)
+            v_term = abs(v_i_at_Dᵢ - v_l_at_D)
+            E = one(v_term)  # TODO - Make collision efficiency a function of Dᵢ and Dₗ
+            ∂ₜN = E * evalpoly(D, coeffs) * v_term * n(D)  # number collision rate
+            ∂ₜM = ∂ₜN * m_liq(D)                           # mass collision rate
+            ∂ₜB = ∂ₜM / rime_density_at(ρ′_rim, v_term, D)  # rime volume collision rate
+            return SA.SVector(∂ₜN, ∂ₜM, ∂ₜB)
+        end
+        bnds = crossing_integral_bounds(liq_bounds, ∂ₜV, Dᵢ, v_i_at_Dᵢ)
+        (∂ₜN_col, ∂ₜM_col, ∂ₜB_col) = integrate(integrand, bnds, quad)
+        return ∂ₜN_col, ∂ₜM_col, ∂ₜB_col
+    end
+    return liquid_integrals
+end
+
 """
-    crossing_integral_bounds(liq_bounds, ∂ₜV, Dᵢ)
+    crossing_integral_bounds(liq_bounds, ∂ₜV, Dᵢ, [v_i_at_Dᵢ])
 
 Insert the fall-speed crossing `∂ₜV.v_l(D) = ∂ₜV.v_i(Dᵢ)` into `liq_bounds`, so
 that the derivative discontinuity of `|v_i(Dᵢ) - v_l(D)|` lies on a subinterval
-boundary.
+boundary. `v_i_at_Dᵢ` defaults to `∂ₜV.v_i(Dᵢ)`; pass it explicitly to reuse an
+already-computed value.
 
 For a collision-rate integrand that does not carry the terminal-velocity
 closures, the bounds are returned unchanged.
 
 Called from [`get_liquid_integrals`](@ref).
 """
-@inline function crossing_integral_bounds(liq_bounds::NTuple{2, Any}, ∂ₜV::VolumetricCollisionRate, Dᵢ)
+@inline function crossing_integral_bounds(
+    liq_bounds::NTuple{2, Any}, ∂ₜV::VolumetricCollisionRate, Dᵢ, v_i_at_Dᵢ = ∂ₜV.v_i(Dᵢ),
+)
     (D_min, D_max) = liq_bounds
-    Dstar = crossover_diameter(∂ₜV.v_i(Dᵢ), ∂ₜV.v_l, D_min, D_max)
+    Dstar = crossover_diameter(v_i_at_Dᵢ, ∂ₜV.v_l, D_min, D_max)
     return (D_min, clamp(Dstar, D_min, D_max), D_max)
 end
-@inline crossing_integral_bounds(liq_bounds, ∂ₜV, Dᵢ) = liq_bounds
+@inline crossing_integral_bounds(liq_bounds, ∂ₜV, Dᵢ, v_i_at_Dᵢ = nothing) = liq_bounds
 
 """
     crossover_diameter(v_target, v_l, D_min, D_max)
@@ -562,38 +675,132 @@ function crossover_diameter(v_target, v_l::F, D_min, D_max) where {F}
 end
 
 """
+    liquid_species_segment(n_liq, m_liq, ρ′_rim, ∂ₜV, v_i_at_Dᵢ, coeffs, quad, a, b)
+
+Hand-written Gauss quadrature sum of the `(∂ₜN, ∂ₜM, ∂ₜB)` collision-rate
+integrand over one segment `[a, b]`, equivalent to `integrate` applied to the
+integrand built by [`get_liquid_integrals`](@ref)'s `VolumetricCollisionRate`-specialized
+method. `v_i_at_Dᵢ` and `coeffs` are the outer-node quantities hoisted by the caller.
+"""
+@inline function liquid_species_segment(
+    n_liq, m_liq, ρ′_rim::RimeDensityRate, ∂ₜV::VolumetricCollisionRate,
+    v_i_at_Dᵢ, coeffs, quad, a::FT, b::FT,
+) where {FT}
+    zero3 = SA.SVector(zero(FT), zero(FT), zero(FT))
+    a < b || return zero3
+    nnodes = quad.n
+    scale_factor = (b - a) / 2
+    shift = (a + b) / 2
+    acc = zero3
+    @inbounds for i in 1:nnodes
+        y = node(quad, FT(i), nnodes)
+        D = scale_factor * y + shift
+        w = inv_weight_fun(quad, y) * weight(quad, FT(i), nnodes)
+        v_term = abs(v_i_at_Dᵢ - ∂ₜV.v_l(D))
+        E = one(v_term)  # TODO - Make collision efficiency a function of Dᵢ and Dₗ
+        ∂ₜN = E * evalpoly(D, coeffs) * v_term * n_liq(D)  # number collision rate
+        ∂ₜM = ∂ₜN * m_liq(D)                               # mass collision rate
+        ∂ₜB = ∂ₜM / rime_density_at(ρ′_rim, v_term, D)      # rime volume collision rate
+        acc += SA.SVector(∂ₜN, ∂ₜM, ∂ₜB) * w
+    end
+    return scale_factor * acc
+end
+
+"""
+    rain_B_segment(n_liq, m_liq, ρ′_rim, ∂ₜV, v_i_at_Dᵢ, coeffs, quad, a, b)
+
+Hand-written Gauss quadrature sum of the rime-volume-collision-rate integrand
+over one segment `[a, b]`, equivalent to `integrate` applied to the B_rim
+integrand in [`get_liquid_integrals_rain_closed`](@ref). `v_i_at_Dᵢ` and
+`coeffs` are the outer-node quantities hoisted by the caller.
+"""
+@inline function rain_B_segment(
+    n_liq, m_liq, ρ′_rim::RimeDensityRate, ∂ₜV::VolumetricCollisionRate,
+    v_i_at_Dᵢ, coeffs, quad, a::FT, b::FT,
+) where {FT}
+    a < b || return zero(FT)
+    nnodes = quad.n
+    scale_factor = (b - a) / 2
+    shift = (a + b) / 2
+    acc = zero(FT)
+    @inbounds for i in 1:nnodes
+        y = node(quad, FT(i), nnodes)
+        D = scale_factor * y + shift
+        w = inv_weight_fun(quad, y) * weight(quad, FT(i), nnodes)
+        v_term = abs(v_i_at_Dᵢ - ∂ₜV.v_l(D))
+        E = one(v_term)  # TODO - Make collision efficiency a function of Dᵢ and Dₗ
+        acc += E * evalpoly(D, coeffs) * v_term * n_liq(D) * m_liq(D) / rime_density_at(ρ′_rim, v_term, D) * w
+    end
+    return scale_factor * acc
+end
+
+"""
+    closed_rain_inner_NM_setup(ai, bi, ci, D_min, D_max, λ)
+
+Precompute, once per point, the [`gamma_inc_moment_channel_setup`](@ref) for
+the ice-velocity channel (rate `λ`, moment orders `0:5`) and for each
+rain-velocity channel `j` (rate `λ + ci[j]`, moment orders `bi[j] .+ (0:5)`).
+Pass the result to [`closed_rain_inner_NM`](@ref)'s `channel_setups` argument
+to avoid rebuilding it at every outer ice diameter.
+"""
+@inline function closed_rain_inner_NM_setup(ai, bi, ci, D_min, D_max, λ)
+    ice_setup = gamma_inc_moment_channel_setup(0, λ, D_min, D_max)
+    rain_setups = map((b, c) -> gamma_inc_moment_channel_setup(b, λ + c, D_min, D_max), bi, ci)
+    return (ice_setup, rain_setups)
+end
+
+"""
     closed_rain_inner_NM(
-        v_i_at_Dᵢ, Dstar, rᵢ, ρw, ai, bi, ci, D_min, D_max, N₀r, Dr_mean,
+        v_i_at_Dᵢ, Dstar, rᵢ, ρw, ai, bi, ci, D_min, D_max, N₀r, Dr_mean;
+        [channel_setups],
     )
 
 Closed-form `(∂ₜN_col, ∂ₜM_col)` for the rain inner integral at one outer ice
 diameter, where `v_i_at_Dᵢ` is the ice particle terminal velocity there and
 `Dstar` the fall-speed crossing from [`crossover_diameter`](@ref).
+`channel_setups` defaults to a fresh [`closed_rain_inner_NM_setup`](@ref);
+pass the per-point value from [`get_liquid_integrals_rain_closed`](@ref) to
+avoid rebuilding it at every outer ice diameter.
 """
-function closed_rain_inner_NM(v_i_at_Dᵢ, Dstar, rᵢ, ρw, ai, bi, ci, D_min, D_max, N₀r, Dr_mean)
+function closed_rain_inner_NM(
+    v_i_at_Dᵢ, Dstar, rᵢ, ρw, ai, bi, ci, D_min, D_max, N₀r, Dr_mean;
+    channel_setups = closed_rain_inner_NM_setup(ai, bi, ci, D_min, D_max, inv(Dr_mean)),
+)
     FT = float(eltype(ai))
-    λ = inv(Dr_mean)  # rain PSD slope: n_r(D) ∝ e^{-λ D}
-
-    # Compute rain PSD incomplete moments weighted by ice-liquid collision
-    # cross-section `K`, and sedimentation velocity difference `|vᵢ - vₗ|`
+    (ice_setup, rain_setups) = channel_setups
     coeffs = SA.SVector(collision_cross_section_ice_liquid_coeffs(rᵢ))
-    function Iᵖ(a, b, p, α)
-        acc = @inbounds coeffs[1] * gamma_inc_moment(a, b, p, α)
+
+    # Each channel's `gamma_inc_moment_channel_finish` gives the six
+    # consecutive-order crossing-split moments at once (cross-section orders
+    # 0,1,2 for the N moment, indices 1:3; the same orders shifted by the M
+    # moment's base order 3, indices 4:6), weighted here by `coeffs` and the
+    # channel's velocity-curve weight (`v_i_at_Dᵢ` for the ice channel,
+    # `-ai[j]` for rain channel `j`).
+    function channel_NM(setup, weight)
+        moments = gamma_inc_moment_channel_finish(setup, D_min, Dstar, D_max)
+        N_lo = @inbounds coeffs[1] * moments[1][1]
+        N_hi = @inbounds coeffs[1] * moments[1][2]
+        M_lo = @inbounds coeffs[1] * moments[4][1]
+        M_hi = @inbounds coeffs[1] * moments[4][2]
         @inbounds for i in 2:lastindex(coeffs)
-            acc += coeffs[i] * gamma_inc_moment(a, b, p + (i - 1), α)
+            N_lo += coeffs[i] * moments[i][1]
+            N_hi += coeffs[i] * moments[i][2]
+            M_lo += coeffs[i] * moments[i + 3][1]
+            M_hi += coeffs[i] * moments[i + 3][2]
         end
-        return acc
+        return (weight * N_lo, weight * N_hi, weight * M_lo, weight * M_hi)
     end
-    function flux(a, b, p)  # ≡ ∫ₐᵇ K(Dᵢ, Dₗ) ⋅ (vᵢ(Dᵢ) - vₗ(Dₗ)) ⋅ n_r(Dₗ) dDₗ
-        s = v_i_at_Dᵢ * Iᵖ(a, b, p, λ)  # vᵢ ⋅ ∫ₐᵇ K ⋅ n_r dDₗ
-        @inbounds for j in eachindex(ai)  # - ∫ₐᵇ K ⋅ vₗ ⋅ n_r dDₗ
-            s -= ai[j] * Iᵖ(a, b, p + bi[j], λ + ci[j])
-        end
-        return s
+
+    (s_lo_N, s_hi_N, s_lo_M, s_hi_M) = channel_NM(ice_setup, v_i_at_Dᵢ)
+    @inbounds for j in eachindex(ai)
+        (lo_N, hi_N, lo_M, hi_M) = channel_NM(rain_setups[j], -ai[j])
+        s_lo_N += lo_N
+        s_hi_N += hi_N
+        s_lo_M += lo_M
+        s_hi_M += hi_M
     end
-    crossing(p) = flux(D_min, Dstar, p) - flux(Dstar, D_max, p)  # sign flip at Dstar
     mfac = ρw * CO.volume_sphere_D(one(FT))  # m_liq(D) = mfac Dₗ³
-    return (N₀r * crossing(FT(0)), N₀r * mfac * crossing(FT(3)))  # number: D⁰, mass: D³
+    return (N₀r * (s_lo_N - s_hi_N), N₀r * mfac * (s_lo_M - s_hi_M))  # number: D⁰, mass: D³
 end
 
 """
@@ -610,7 +817,7 @@ The velocities and the rain velocity-curve coefficients come from the
 """
 @inline function get_liquid_integrals_rain_closed(
     psd_r::CMP.RainParticlePDF_SB2006,
-    n_r, ρₐ, L_r, N_r, state, ∂ₜV, m_liq, ρ′_rim, bounds_r; quad,
+    n_r, ρₐ, L_r, N_r, state, ∂ₜV::VolumetricCollisionRate, m_liq, ρ′_rim::RimeDensityRate, bounds_r; quad,
 )
     FT = promote_type(eltype(state), UT.promote_typeof(ρₐ, L_r, N_r))
     ρw = psd_r.ρw
@@ -619,28 +826,106 @@ The velocities and the rain velocity-curve coefficients come from the
     ai, bi, ci = SA.SVector(v_l.ai), SA.SVector(v_l.bi), SA.SVector(v_l.ci)
     D_min, D_max = bounds_r
     zero_rates = (zero(FT), zero(FT), zero(FT))
+    # `D_min`, `D_max`, and the rain PSD slope `λ = inv(Dr_mean)` do not depend
+    # on the outer ice diameter; build the closed-form channels' incomplete-gamma
+    # setup once per point instead of once per outer node.
+    channel_setups = closed_rain_inner_NM_setup(ai, bi, ci, D_min, D_max, inv(Dr_mean))
     function liquid_integrals(Dᵢ)
         if iszero(FD.value(N₀r)) || !(D_max > D_min)
             return zero_rates
         end
         v_i_at_Dᵢ = v_i(Dᵢ)
         rᵢ = sqrt(ice_area(state, Dᵢ) / π)
+        coeffs = collision_cross_section_ice_liquid_coeffs(rᵢ)
         Dstar = crossover_diameter(v_i_at_Dᵢ, v_l, D_min, D_max)
         ∂ₜN_col, ∂ₜM_col = closed_rain_inner_NM(
             v_i_at_Dᵢ, Dstar, rᵢ, ρw, ai, bi, ci,
-            D_min, D_max, N₀r, Dr_mean,
+            D_min, D_max, N₀r, Dr_mean; channel_setups,
         )
         if !(isfinite(∂ₜN_col) && isfinite(∂ₜM_col))
             return zero_rates
         end
+        # Reuse `v_i_at_Dᵢ` and `coeffs` (hoisted above) and share `v_l(D)` between the
+        # collision rate and the rime density at each inner node.
         ∂ₜB_col = integrate(
-            D -> ∂ₜV(Dᵢ, D) * n_r(D) * m_liq(D) / ρ′_rim(Dᵢ, D),
+            D -> begin
+                v_l_at_D = v_l(D)
+                v_term = abs(v_i_at_Dᵢ - v_l_at_D)
+                E = one(v_term)  # TODO - Make collision efficiency a function of Dᵢ and Dₗ
+                E * evalpoly(D, coeffs) * v_term * n_r(D) * m_liq(D) / rime_density_at(ρ′_rim, v_term, D)
+            end,
             (D_min, clamp(Dstar, D_min, D_max), D_max),
             quad,
         )
         return (∂ₜN_col, ∂ₜM_col, ∂ₜB_col)
     end
     return liquid_integrals
+end
+
+"""
+    get_combined_liquid_integrals(
+        psd_r::RainParticlePDF_SB2006,
+        n_c, n_r, ρₐ, L_r, N_r, state, ∂ₜV, m_liq, ρ′_rim, bounds_c, bounds_r; quad,
+    )
+
+Return a function `combined_integrals(Dᵢ) -> (∂ₜN_c_col, ∂ₜM_c_col, ∂ₜB_c_col, ∂ₜN_r_col, ∂ₜM_r_col, ∂ₜB_r_col)`
+evaluating the cloud and rain inner integrals at a shared outer ice diameter `Dᵢ`.
+Rain N and M are the exact incomplete-gamma closed form
+([`closed_rain_inner_NM`](@ref), unchanged); cloud's three integrals and rain's
+B_rim are the [`liquid_species_segment`](@ref)/[`rain_B_segment`](@ref) hand-written
+per-segment quadrature sums, called in interleaved cloud/rain order and sharing
+the outer-node quantities `v_i_at_Dᵢ` and `coeffs` between the two species.
+"""
+@inline function get_combined_liquid_integrals(
+    psd_r::CMP.RainParticlePDF_SB2006,
+    n_c, n_r, ρₐ, L_r, N_r, state, ∂ₜV::VolumetricCollisionRate, m_liq, ρ′_rim::RimeDensityRate,
+    bounds_c, bounds_r; quad,
+)
+    FT = promote_type(eltype(state), UT.promote_typeof(ρₐ, L_r, N_r))
+    ρw = psd_r.ρw
+    (; N₀r, Dr_mean) = CM2.pdf_rain_parameters(psd_r, L_r / ρₐ, ρₐ, N_r)
+    (; v_l) = ∂ₜV
+    ai, bi, ci = SA.SVector(v_l.ai), SA.SVector(v_l.bi), SA.SVector(v_l.ci)
+    D_min_r, D_max_r = bounds_r
+    # `D_min_r`, `D_max_r`, and the rain PSD slope `λ = inv(Dr_mean)` do not depend on
+    # the outer ice diameter; build the closed-form channels' incomplete-gamma setup
+    # once per point instead of once per outer node.
+    channel_setups = closed_rain_inner_NM_setup(ai, bi, ci, D_min_r, D_max_r, inv(Dr_mean))
+    function combined_integrals(Dᵢ)
+        v_i_at_Dᵢ = ∂ₜV.v_i(Dᵢ)
+        rᵢ = sqrt(ice_area(state, Dᵢ) / π)
+        coeffs = collision_cross_section_ice_liquid_coeffs(rᵢ)
+
+        cb = crossing_integral_bounds(bounds_c, ∂ₜV, Dᵢ, v_i_at_Dᵢ)
+        c1 = liquid_species_segment(n_c, m_liq, ρ′_rim, ∂ₜV, v_i_at_Dᵢ, coeffs, quad, cb[1], cb[2])
+
+        rain_ok = !iszero(N₀r) && D_max_r > D_min_r
+        Dstar_r = rain_ok ? crossover_diameter(v_i_at_Dᵢ, v_l, D_min_r, D_max_r) : D_min_r
+        (∂ₜN_r, ∂ₜM_r) =
+            rain_ok ?
+            closed_rain_inner_NM(
+                v_i_at_Dᵢ, Dstar_r, rᵢ, ρw, ai, bi, ci,
+                D_min_r, D_max_r, N₀r, Dr_mean; channel_setups,
+            ) : (zero(FT), zero(FT))
+        rain_finite = rain_ok && isfinite(∂ₜN_r) && isfinite(∂ₜM_r)
+        Dstar_r_clamped = clamp(Dstar_r, D_min_r, D_max_r)
+
+        r1 =
+            rain_finite ? rain_B_segment(n_r, m_liq, ρ′_rim, ∂ₜV, v_i_at_Dᵢ, coeffs, quad, D_min_r, Dstar_r_clamped) :
+            zero(FT)
+        c2 = liquid_species_segment(n_c, m_liq, ρ′_rim, ∂ₜV, v_i_at_Dᵢ, coeffs, quad, cb[2], cb[3])
+        r2 =
+            rain_finite ? rain_B_segment(n_r, m_liq, ρ′_rim, ∂ₜV, v_i_at_Dᵢ, coeffs, quad, Dstar_r_clamped, D_max_r) :
+            zero(FT)
+
+        (∂ₜN_c, ∂ₜM_c, ∂ₜB_c) = Tuple(c1 + c2)
+        if !rain_finite
+            ∂ₜN_r, ∂ₜM_r = zero(FT), zero(FT)
+        end
+        ∂ₜB_r = r1 + r2
+        return (∂ₜN_c, ∂ₜM_c, ∂ₜB_c, ∂ₜN_r, ∂ₜM_r, ∂ₜB_r)
+    end
+    return combined_integrals
 end
 
 @inline _rain_inner_integrals(
@@ -675,33 +960,59 @@ Computes the bulk collision rate integrands between ice and liquid particles.
 # Returns
 A tuple of 8 integrands, see [`∫liquid_ice_collisions`](@ref) for details.
 """
+@inline function liquid_ice_collisions_partition(
+    n, ∂ₜM_max_at_Dᵢ, ∂ₜN_c_col, ∂ₜM_c_col, ∂ₜB_c_col, ∂ₜN_r_col, ∂ₜM_r_col, ∂ₜB_r_col,
+)
+    # Partition the mass collisions between freezing and shedding
+    ∂ₜM_col = ∂ₜM_c_col + ∂ₜM_r_col  # [kg / s]
+
+    ∂ₜM_frz = min(∂ₜM_col, ∂ₜM_max_at_Dᵢ)
+    # Branch on the primal so a differentiated zero selects the same branch as
+    # its value under `ForwardDiff`.
+    f_frz = iszero(FD.value(∂ₜM_col)) ? zero(∂ₜM_frz) : ∂ₜM_frz / ∂ₜM_col
+    𝟙_wet = ∂ₜM_col > ∂ₜM_frz  # Used for wet densification
+
+    # Integrating over `Dᵢ` gives another unit of `[m]`, so `[X / s / m]` --> `[X / s]`
+    # ∂ₜX = ∫ ∂ₜX(Dᵢ) nᵢ(Dᵢ) dDᵢ
+    return SA.SVector(
+        n * ∂ₜM_c_col * f_frz,        # QCFRZ
+        n * ∂ₜM_c_col * (1 - f_frz),  # QCSHD
+        n * ∂ₜN_c_col,                # NCCOL
+        n * ∂ₜM_r_col * f_frz,        # QRFRZ
+        n * ∂ₜM_r_col * (1 - f_frz),  # QRSHD
+        n * ∂ₜN_r_col,                # NRCOL
+        n * ∂ₜM_col,                  # ∫M_col,      total collision rate
+        n * ∂ₜB_c_col * f_frz,        # BCCOL,       ∂ₜB_rim source
+        n * ∂ₜB_r_col * f_frz,        # BRCOL,       ∂ₜB_rim source
+        n * 𝟙_wet * ∂ₜM_col,          # ∫𝟙_wet_M_col, wet growth indicator
+    )
+end
+
 @inline function ∫liquid_ice_collisions(n_i, ∂ₜM_max, cloud_integrals, rain_integrals, ice_bounds; quad)
     function liquid_ice_collisions_integrands(Dᵢ)
         # Inner integrals over liquid particle diameters
         ∂ₜN_c_col, ∂ₜM_c_col, ∂ₜB_c_col = cloud_integrals(Dᵢ)
         ∂ₜN_r_col, ∂ₜM_r_col, ∂ₜB_r_col = rain_integrals(Dᵢ)
+        return liquid_ice_collisions_partition(
+            n_i(Dᵢ), ∂ₜM_max(Dᵢ), ∂ₜN_c_col, ∂ₜM_c_col, ∂ₜB_c_col, ∂ₜN_r_col, ∂ₜM_r_col, ∂ₜB_r_col,
+        )
+    end
+    return integrate(liquid_ice_collisions_integrands, ice_bounds, quad)
+end
 
-        # Partition the mass collisions between freezing and shedding
-        ∂ₜM_col = ∂ₜM_c_col + ∂ₜM_r_col  # [kg / s]
+"""
+    ∫liquid_ice_collisions(n_i, ∂ₜM_max, combined_integrals, ice_bounds; [quad])
 
-        ∂ₜM_frz = min(∂ₜM_col, ∂ₜM_max(Dᵢ))
-        f_frz = iszero(FD.value(∂ₜM_col)) ? zero(∂ₜM_frz) : ∂ₜM_frz / ∂ₜM_col
-        𝟙_wet = ∂ₜM_col > ∂ₜM_frz  # Used for wet densification
-
-        n = n_i(Dᵢ)
-        # Integrating over `Dᵢ` gives another unit of `[m]`, so `[X / s / m]` --> `[X / s]`
-        # ∂ₜX = ∫ ∂ₜX(Dᵢ) nᵢ(Dᵢ) dDᵢ
-        return SA.SVector(
-            n * ∂ₜM_c_col * f_frz,        # QCFRZ
-            n * ∂ₜM_c_col * (1 - f_frz),  # QCSHD
-            n * ∂ₜN_c_col,                # NCCOL
-            n * ∂ₜM_r_col * f_frz,        # QRFRZ
-            n * ∂ₜM_r_col * (1 - f_frz),  # QRSHD
-            n * ∂ₜN_r_col,                # NRCOL
-            n * ∂ₜM_col,                  # ∫M_col,      total collision rate
-            n * ∂ₜB_c_col * f_frz,        # BCCOL,       ∂ₜB_rim source
-            n * ∂ₜB_r_col * f_frz,        # BRCOL,       ∂ₜB_rim source
-            n * 𝟙_wet * ∂ₜM_col,          # ∫𝟙_wet_M_col, wet growth indicator
+Same as [`∫liquid_ice_collisions`](@ref)`(n_i, ∂ₜM_max, cloud_integrals, rain_integrals, ice_bounds; quad)`,
+but with the cloud and rain inner integrals evaluated together by a single
+`combined_integrals(Dᵢ) -> (∂ₜN_c_col, ∂ₜM_c_col, ∂ₜB_c_col, ∂ₜN_r_col, ∂ₜM_r_col, ∂ₜB_r_col)`
+closure, e.g. [`get_combined_liquid_integrals`](@ref).
+"""
+@inline function ∫liquid_ice_collisions_combined(n_i, ∂ₜM_max, combined_integrals, ice_bounds; quad)
+    function liquid_ice_collisions_integrands(Dᵢ)
+        ∂ₜN_c_col, ∂ₜM_c_col, ∂ₜB_c_col, ∂ₜN_r_col, ∂ₜM_r_col, ∂ₜB_r_col = combined_integrals(Dᵢ)
+        return liquid_ice_collisions_partition(
+            n_i(Dᵢ), ∂ₜM_max(Dᵢ), ∂ₜN_c_col, ∂ₜM_c_col, ∂ₜB_c_col, ∂ₜN_r_col, ∂ₜM_r_col, ∂ₜB_r_col,
         )
     end
     return integrate(liquid_ice_collisions_integrands, ice_bounds, quad)
@@ -790,14 +1101,35 @@ A tuple `(QCFRZ, QCSHD, NCCOL, QRFRZ, QRSHD, NRCOL, ∫M_col, BCCOL, BRCOL, ∫�
         ),
     )
 
-    cloud_integrals = get_liquid_integrals(n_c, ∂ₜV, m_liq, ρ′_rim, bounds_c; quad)  # (∂ₜN_c_col, ∂ₜM_c_col, ∂ₜB_c_col)
-    # Rain inner: exact closed form for the (SB2006-exp PSD, Chen-2022) pair
-    # Numerical fallback for any other PSD/velocity type.
-    rain_integrals = _rain_inner_integrals(
-        psd_r, n_r, ∂ₜV, m_liq, ρ′_rim, bounds_r,
-        ρₐ, L_r, N_r, state; quad,
-    )  # (∂ₜN_r_col, ∂ₜM_r_col, ∂ₜB_r_col)
+    return _∫liquid_ice_collisions_inner(
+        psd_r, n_c, n_r, n_i, ∂ₜV, ρ′_rim, m_liq, ∂ₜM_max,
+        bounds_c, bounds_r, ice_bounds, ρₐ, L_r, N_r, state; quad,
+    )
+end
 
+# Fast path: cloud and rain-B_rim inner integrals evaluated by the interleaved
+# `get_combined_liquid_integrals` restructure; rain N/M stay the exact closed form
+# ([`closed_rain_inner_NM`](@ref)), for the (SB2006-exp rain PSD, Chen-2022 velocity) pair.
+@inline function _∫liquid_ice_collisions_inner(
+    psd_r::CMP.RainParticlePDF_SB2006, n_c, n_r, n_i,
+    ∂ₜV::VolumetricCollisionRate{<:Any, <:Any, <:CO.Chen2022VelocityCurve},
+    ρ′_rim::RimeDensityRate, m_liq, ∂ₜM_max, bounds_c, bounds_r, ice_bounds, ρₐ, L_r, N_r, state; quad,
+)
+    combined_integrals = get_combined_liquid_integrals(
+        psd_r, n_c, n_r, ρₐ, L_r, N_r, state, ∂ₜV, m_liq, ρ′_rim, bounds_c, bounds_r; quad,
+    )
+    return ∫liquid_ice_collisions_combined(n_i, ∂ₜM_max, combined_integrals, ice_bounds; quad)
+end
+# Numerical fallback for any other PSD/velocity type: cloud and rain inner integrals
+# evaluated by two independent `get_liquid_integrals`/`_rain_inner_integrals` closures.
+@inline function _∫liquid_ice_collisions_inner(
+    psd_r, n_c, n_r, n_i, ∂ₜV, ρ′_rim, m_liq, ∂ₜM_max,
+    bounds_c, bounds_r, ice_bounds, ρₐ, L_r, N_r, state; quad,
+)
+    cloud_integrals = get_liquid_integrals(n_c, ∂ₜV, m_liq, ρ′_rim, bounds_c; quad)
+    rain_integrals = _rain_inner_integrals(
+        psd_r, n_r, ∂ₜV, m_liq, ρ′_rim, bounds_r, ρₐ, L_r, N_r, state; quad,
+    )
     return ∫liquid_ice_collisions(n_i, ∂ₜM_max, cloud_integrals, rain_integrals, ice_bounds; quad)
 end
 
@@ -809,14 +1141,14 @@ end
 
 Return up to two ice diameters in `[D_lo, D_hi]` where the collected liquid
 mass rate balances the freeze limit `∂ₜM_max` (the boundaries of the wet-growth
-window; `D_lo` stands in for absent crossings). The balance is
-evaluated in closed form: the cloud collection term neglects the droplet fall
-speed relative to the ice fall speed, making it a polynomial moment of the
-cloud size distribution, and the rain term is the closed-form mass component
-from [`closed_rain_inner_NM`](@ref). Crossings are located on a log-spaced
-scan of the interval and refined by fixed-iteration bisection.
+window; `D_lo` stands in for absent crossings). The balance is evaluated with
+the liquid fall speeds simplified: the cloud collection term neglects the
+droplet fall speed relative to the ice fall speed, and the rain term evaluates
+the rain fall speed once at the mean rain diameter, so both reduce to polynomial
+moments of their size distributions. Crossings are located on a log-spaced scan
+of the interval and refined by fixed-iteration bisection.
 
-The closed form applies to the (`CMP.CloudParticlePDF_SB2006`,
+This applies to the (`CMP.CloudParticlePDF_SB2006`,
 `CMP.RainParticlePDF_SB2006`) distributions with a
 [`CO.Chen2022VelocityCurve`](@ref) liquid velocity; for any other combination
 `(D_lo, D_lo)` is returned.
@@ -830,9 +1162,14 @@ function wet_growth_onset_diameter(
     (; v_i, v_l) = ∂ₜV
     FT = promote_type(eltype(state), UT.promote_typeof(L_c, N_c, L_r, N_r, ρₐ))
     πFT = FT(π)
-    # Cloud collection with the droplet fall speed neglected:
-    #   ∫ K(D, Dₗ) n_c(Dₗ) m_liq(Dₗ) dDₗ = ∑ⱼ Kⱼ(rᵢ) (ρw π/6) M⁽ʲ⁺³⁾,
-    # with K quadratic in Dₗ and M⁽ᵏ⁾ the cloud size-distribution moments
+    # Locate the onset window with the cloud droplet fall speed neglected (cloud
+    # droplets fall far slower than the ice sizes that matter here) and the rain
+    # fall speed evaluated once at the mean rain diameter (rain and ice fall
+    # speeds are comparable, so dropping it entirely biases the search):
+    #   ∫ K(D, Dₗ) n(Dₗ) m_liq(Dₗ) dDₗ = ∑ⱼ Kⱼ(rᵢ) (ρw π/6) M⁽ʲ⁺³⁾,
+    # with K quadratic in Dₗ and M⁽ᵏ⁾ the (untruncated) size-distribution
+    # moments. The onset diameters only bound the outer-integral subintervals;
+    # the collision rates entering the physics keep the full fall-speed difference.
     (; λc, νcD, μcD) = CM2.pdf_cloud_parameters(psd_c, L_c / ρₐ, ρₐ, N_c)
     ρw = psd_c.ρw
     mfac = ρw * CO.volume_sphere_D(one(FT))
@@ -841,24 +1178,18 @@ function wet_growth_onset_diameter(
     M₅ = mfac * DT.generalized_gamma_Mⁿ(νcD, μcD, λc, N_c, 5)
 
     (; N₀r, Dr_mean) = CM2.pdf_rain_parameters(psd_r, L_r / ρₐ, ρₐ, N_r)
-    ai, bi, ci = SA.SVector(v_l.ai), SA.SVector(v_l.bi), SA.SVector(v_l.ci)
-    D_min_r, D_max_r = bounds_r
-    rain_active = !iszero(FD.value(N₀r)) && (D_max_r > D_min_r)
+    mfac_r = psd_r.ρw * CO.volume_sphere_D(one(FT))
+    M₃r = mfac_r * N₀r * FT(6) * Dr_mean^4    # k=3: k! = 6
+    M₄r = mfac_r * N₀r * FT(24) * Dr_mean^5   # k=4: k! = 24
+    M₅r = mfac_r * N₀r * FT(120) * Dr_mean^6  # k=5: k! = 120
+    v_l_r = v_l(Dr_mean)
 
     function excess_mass_rate(D)
         v = v_i(D)
         rᵢ = sqrt(ice_area(state, D) / πFT)
         (k₀, k₁, k₂) = collision_cross_section_ice_liquid_coeffs(rᵢ)
         cloud_rate = v * (k₀ * M₃ + k₁ * M₄ + k₂ * M₅)
-        rain_rate = if rain_active
-            Dstar = crossover_diameter(v, v_l, D_min_r, D_max_r)
-            (_, ∂ₜM_col_r) = closed_rain_inner_NM(
-                v, Dstar, rᵢ, ρw, ai, bi, ci, D_min_r, D_max_r, N₀r, Dr_mean,
-            )
-            ifelse(isfinite(∂ₜM_col_r), ∂ₜM_col_r, zero(∂ₜM_col_r))
-        else
-            zero(v)
-        end
+        rain_rate = abs(v - v_l_r) * (k₀ * M₃r + k₁ * M₄r + k₂ * M₅r)
         return cloud_rate + rain_rate - ∂ₜM_max(D)
     end
     # The balance can cross twice (a wet-growth window: collection outgrows the

@@ -236,6 +236,47 @@ function pdf_cloud_parameters(pdf_c, q, ρₐ, N)
 end
 
 """
+    cloud_condensation_timescale(pdf_c, aps, tps, Tₐ, ρₐ, q_lcl, N_lcl)
+
+Compute the condensation relaxation timescale of the cloud droplet population
+from its capacitance integral,
+
+```math
+τ_{cond} = \\frac{ρₐ q_{v,sl}}{2π G_l ∫ D n(D) dD},
+```
+
+with spherical capacitance `C = D/2` and unit ventilation. The diameter moment
+of the generalized gamma distribution is closed form,
+`∫ D n(D) dD = N₀/μ λ^{-(ν+2)/μ} Γ((ν+2)/μ)`. The timescale diverges as the
+population vanishes and shrinks as the integrated droplet surface grows.
+
+# Arguments
+ - `pdf_c`: cloud droplet size distribution parameters, [`CMP.CloudParticlePDF_SB2006`](@ref)
+ - `aps`: [`CMP.AirProperties`](@ref)
+ - `tps`: thermodynamics parameters
+ - `Tₐ`: temperature (K)
+ - `ρₐ`: air density
+ - `q_lcl`: cloud liquid mass content [kg/kg]
+ - `N_lcl`: cloud droplet number concentration [1/m³]
+
+# Returns
+- Condensation timescale [s], bounded above at `1e10` to stay finite.
+"""
+@inline function cloud_condensation_timescale(
+    pdf_c::CMP.CloudParticlePDF_SB2006, aps::CMP.AirProperties, tps::TDI.PS,
+    Tₐ, ρₐ, q_lcl, N_lcl,
+)
+    FT = UT.promote_typeof(q_lcl, ρₐ, N_lcl, Tₐ)
+    G = CO.G_func_liquid(aps, tps, Tₐ)
+    qᵥ_sat_liq = TDI.saturation_vapor_specific_content_over_liquid(tps, Tₐ, ρₐ)
+    (; logN₀c, λc, νcD, μcD) = pdf_cloud_parameters(pdf_c, q_lcl, ρₐ, N_lcl)
+    z = (νcD + 2) / μcD
+    log_moment = logN₀c - log(μcD) - z * log(λc) + SF.loggamma(z)
+    denom = 2 * FT(π) * G * exp(log_moment)
+    return min(ρₐ * qᵥ_sat_liq / max(denom, floatmin(FT)), FT(1e10))
+end
+
+"""
     log_size_distribution_mass(pdf::CMP.CloudParticlePDF_SB2006, q_c, ρₐ, N_c)
 
 Return the log of the size distribution, as a function of mass, of the form
@@ -339,7 +380,9 @@ function get_size_distribution_bounds(
 )
     FT = UT.promote_typeof(q, ρₐ, N)
     (; Dr_mean) = pdf_rain_parameters(pdf, q, ρₐ, N)
-    iszero(Dr_mean) && return (FT(0), FT(0))
+    # A non-positive or non-finite mean diameter is a degenerate (empty)
+    # population; return an empty interval rather than a quantile of it.
+    (isfinite(Dr_mean) && Dr_mean > 0) || return (FT(0), FT(0))
     D_min = DT.exponential_quantile(Dr_mean, p)
     D_max = DT.exponential_quantile(Dr_mean, 1 - p)
     return D_min, D_max
@@ -349,6 +392,7 @@ function get_size_distribution_bounds(
 )
     FT = UT.promote_typeof(q, ρₐ, N)
     (; λc, νcD, μcD) = pdf_cloud_parameters(pdf, q, ρₐ, N)
+    (isfinite(λc) && λc > 0 && μcD > 0) || return (FT(0), FT(0))
     D_min = FT(DT.generalized_gamma_quantile(νcD, μcD, λc, p))
     D_max = FT(DT.generalized_gamma_quantile(νcD, μcD, λc, 1 - p))
     return D_min, D_max
@@ -375,6 +419,21 @@ densities of cloud liquid water and rain water.
 end
 LclRaiRates(dq_lcl_dt, dN_lcl_dt, dq_rai_dt, dN_rai_dt) =
     LclRaiRates(promote(dq_lcl_dt, dN_lcl_dt, dq_rai_dt, dN_rai_dt)...)
+
+"""
+    mean_mass_bound_factor(x, x_max; onset = 1 // 2)
+
+Factor in `[0, 1]` for a mean-particle-mass-dependent rate: `1` for
+`x ≤ onset * x_max`, decreasing smoothly (continuous value and slope) to `0`
+as `x` increases from `onset * x_max` to `x_max`, and identically `0` for
+`x ≥ x_max`.
+"""
+@inline function mean_mass_bound_factor(x, x_max; onset = 1 // 2)
+    FT = UT.promote_typeof(x, x_max)
+    r = x / x_max
+    s = clamp((r - FT(onset)) / (1 - FT(onset)), zero(FT), one(FT))
+    return 1 - s^2 * (3 - 2 * s)
+end
 
 """
     autoconversion(acnv, pdf_c, q_lcl, q_rai, ρ, N_lcl)
@@ -404,15 +463,20 @@ function autoconversion(
     safe_N_lcl = max(N_lcl, UT.ϵ_numerics_2M_N(FT))
     L_lcl = ρ * safe_q_lcl
     x_lcl = min(x_star, L_lcl / safe_N_lcl)
+    bound_factor = mean_mass_bound_factor(L_lcl / safe_N_lcl, x_star)
     safe_q_rai = max(0, q_rai)
     τ = 1 - safe_q_lcl / (safe_q_lcl + safe_q_rai)  # Eq. (5) from SB2006
     # τ^a has a vertical tangent at τ = 0; the ifelse keeps the ForwardDiff
     # derivative w.r.t. q_rai finite at q_rai = 0 (and the code branch-free)
     ϕ_au = ifelse(q_rai < UT.ϵ_numerics_2M_M(FT), zero(τ), A * τ^a * (1 - τ^a)^b)
 
+    # Eq. (4) from SB2006, scaled by `bound_factor` so the whole event rate
+    # (mass and number together) vanishes continuously as the mean droplet
+    # mass approaches `x_star` from below, instead of saturating at a fixed
+    # value once `x_lcl` reaches the `min(x_star, ...)` clamp above.
     dL_rai_dt =
         kcc / 20 / x_star * (νc + 2) * (νc + 4) / (νc + 1)^2 *
-        L_lcl^2 * x_lcl^2 * (1 + ϕ_au / (1 - τ)^2) * ρ0 / ρ  # Eq. (4) from SB2006
+        L_lcl^2 * x_lcl^2 * (1 + ϕ_au / (1 - τ)^2) * ρ0 / ρ * bound_factor
     dN_rai_dt = dL_rai_dt / x_star
     dL_lcl_dt = -dL_rai_dt
     dN_lcl_dt = -2 * dN_rai_dt
@@ -470,7 +534,7 @@ function accretion((; accr)::CMP.SB2006, q_lcl, q_rai, ρ, N_lcl)
 end
 
 """
-    cloud_liquid_self_collection(acnv, pdf_c, q_lcl, ρ, dN_lcl_dt_au)
+    cloud_liquid_self_collection(acnv, pdf_c, q_lcl, ρ, N_lcl, dN_lcl_dt_au)
 
 Compute cloud liquid self-collection rate
 
@@ -479,6 +543,7 @@ Compute cloud liquid self-collection rate
  - `pdf_c`: Cloud size distribution parameters, [`CMP.CloudParticlePDF_SB2006`](@ref)
  - `q_lcl`: Cloud liquid water specific content [kg/kg]
  - `ρ`: Air density [kg/m³]
+ - `N_lcl`: Cloud droplet number density [1/m³]
  - `dN_lcl_dt_au`: Rate of change of cloud droplets number density due to autoconversion [1/m³/s]
 
 # Returns
@@ -486,15 +551,18 @@ Compute cloud liquid self-collection rate
     that produce larger cloud droplets (self-collection)
 """
 function cloud_liquid_self_collection(
-    acnv::CMP.AcnvSB2006, pdf_c::CMP.CloudParticlePDF_SB2006, q_lcl, ρ, dN_lcl_dt_au,
+    acnv::CMP.AcnvSB2006, pdf_c::CMP.CloudParticlePDF_SB2006, q_lcl, ρ, N_lcl, dN_lcl_dt_au,
 )
-    FT = UT.promote_typeof(q_lcl, ρ, dN_lcl_dt_au)
-    (; kcc, ρ0) = acnv
+    FT = UT.promote_typeof(q_lcl, ρ, N_lcl, dN_lcl_dt_au)
+    (; kcc, ρ0, x_star) = acnv
     (; νc) = pdf_c
 
     L_lcl = ρ * q_lcl
-    # Eq. (9) from SB2006
-    dN_lcl_dt_sc = -kcc * (νc + 2) / (νc + 1) * (ρ0 / ρ) * L_lcl^2 - dN_lcl_dt_au
+    safe_N_lcl = max(N_lcl, UT.ϵ_numerics_2M_N(FT))
+    bound_factor = mean_mass_bound_factor(L_lcl / safe_N_lcl, x_star)
+    # Eq. (9) from SB2006, scaled by `bound_factor` so the sink vanishes
+    # continuously as the mean droplet mass approaches `x_star` from below.
+    dN_lcl_dt_sc = -kcc * (νc + 2) / (νc + 1) * (ρ0 / ρ) * L_lcl^2 * bound_factor - dN_lcl_dt_au
 
     cond = q_lcl < UT.ϵ_numerics_2M_M(FT)
     return ifelse(cond, FT(0), dN_lcl_dt_sc)
@@ -521,7 +589,7 @@ function autoconversion_and_cloud_liquid_self_collection(
 )
 
     au = autoconversion(acnv, pdf_c, q_lcl, q_rai, ρ, N_lcl)
-    sc = cloud_liquid_self_collection(acnv, pdf_c, q_lcl, ρ, au.dN_lcl_dt)
+    sc = cloud_liquid_self_collection(acnv, pdf_c, q_lcl, ρ, N_lcl, au.dN_lcl_dt)
 
     return (; au, sc)
 end
@@ -888,6 +956,20 @@ function number_tendency_from_mass_limits((; x_min, x_max, τ), q, n)
     ϵₘ = UT.ϵ_numerics_2M_M(FT)
     n_target = ifelse(q < ϵₘ, zero(FT), clamp(n, q / x_max, q / x_min))
     return (n_target - n) / τ
+end
+
+"""
+    number_bounded_by_mass_limits((; x_min, x_max), q, n)
+
+Specific number bounded by the mean-particle-mass limits `[x_min, x_max]` [kg]:
+`clamp(n, q / x_max, q / x_min)` for `q ≥ ϵₘ`, `n` otherwise. Matches the
+target population of [`number_tendency_from_mass_limits`](@ref), so process
+rates evaluated at this number are consistent with the adjusted mean mass.
+"""
+function number_bounded_by_mass_limits((; x_min, x_max), q, n)
+    FT = UT.promote_typeof(q, n)
+    ϵₘ = UT.ϵ_numerics_2M_M(FT)
+    return ifelse(q < ϵₘ, FT(n), clamp(FT(n), q / x_max, q / x_min))
 end
 
 # Additional double moment autoconversion and accretion parametrizations:

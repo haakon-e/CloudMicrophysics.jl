@@ -4,6 +4,7 @@
 *.tar.gz
 *.jl.*.cov
 *.jl.mem
+*.log
 
 # Data
 *.vtk

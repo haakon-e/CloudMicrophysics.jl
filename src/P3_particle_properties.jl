@@ -78,7 +78,10 @@ function _p3state(params::CMP.ParametersP3, ρq_ice, ρn_ice, F_rim, ρ_rim, F_l
     # Clamp the liquid fraction into [0, F_melt] before any use.
     F_liq = clamp(FT(F_liq), FT(0), _liquid_fraction_ceiling(params.liquid, FT))
     ρ_d = get_ρ_d(mass, F_rim, ρ_rim)
-    ρ_g = get_ρ_g(F_rim, ρ_rim, ρ_d)
+    # Floored to a small positive value: a negative sub-domain graupel density would give a
+    # DomainError in `log(ρ_g·π/6)`, the graupel mass coefficient in the size-distribution
+    # moment integral, and a negative aspect-ratio material density.
+    ρ_g = max(get_ρ_g(F_rim, ρ_rim, ρ_d), oftype(F_rim, 1e-4))
     D_th = get_D_th(mass, ρ_i)
     unrimed = _unrimed_threshold_test(params.liquid, F_rim)
     D_gr = ifelse(unrimed, FT(Inf), get_D_gr(mass, ρ_g))
@@ -395,7 +398,10 @@ where for the different thresholds, `ρ` is:
 - `params`: [`CMP.MassPowerLaw`](@ref) parameters
 - `ρ`: (ice/graupel) density [kg/m³]
 """
-_get_threshold((; α_va, β_va)::CMP.MassPowerLaw, ρ) = (6α_va / (π * ρ))^(1 / (3 - β_va))
+# The density is floored to a small positive value: the regime threshold is a fractional
+# power of `1/ρ`, so a zero or negative sub-domain gain density would give a DomainError.
+_get_threshold((; α_va, β_va)::CMP.MassPowerLaw, ρ) =
+    (6α_va / (π * max(ρ, oftype(ρ, 1e-4))))^(1 / (3 - β_va))
 
 """
     get_D_th(mass::MassPowerLaw, ρ_i)

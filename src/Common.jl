@@ -288,6 +288,7 @@ Compute the coefficients for the Chen 2022 terminal velocity parametrization.
 See [Chen2022](@cite) for more details.
 """
 @inline function Chen2022_vel_coeffs(coeffs::CMP.Chen2022VelTypeRain, ρₐ)
+    FT = eltype(coeffs)
     (; ρ0, a, a3_pow, b, b_ρ, c) = coeffs
     ρₐ = max(ρₐ, zero(ρₐ))
     # Table B1
@@ -296,7 +297,7 @@ See [Chen2022](@cite) for more details.
     bi = (b[1] - b_ρ * ρₐ, b[2] - b_ρ * ρₐ, b[3] - b_ρ * ρₐ)
     ci = (c[1], c[2], c[3])
     # unit conversions
-    aiu = ai .* 1000 .^ bi
+    aiu = ai .* FT(1000) .^ bi
     ciu = ci .* 1000
     return (aiu, bi, ciu)
 end
@@ -304,7 +305,9 @@ end
 @inline function Chen2022_vel_coeffs(coeffs::CMP.Chen2022VelTypeSmallIce, ρₐ, ρᵢ)
     FT = eltype(coeffs)
     (; A, B, C, E, F, G) = coeffs
-    ρₐ = max(ρₐ, zero(ρₐ))
+    # The ice-density exponent `As` is negative, so `ρₐ` is floored to a small positive
+    # value: a zero or negative sub-domain density would give non-finite coefficients.
+    ρₐ = max(ρₐ, FT(1e-4))
     # Table B3 - cache sqrt for reuse
     log_ρᵢ = log(ρᵢ)
     sqrt_ρᵢ = sqrt(ρᵢ)
@@ -319,7 +322,7 @@ end
     bi = (Bs + ρₐ * Cs, Bs + ρₐ * Cs)
     ci = (FT(0), Gs)
     # unit conversions
-    aiu = ai .* 1000 .^ bi
+    aiu = ai .* FT(1000) .^ bi
     ciu = ci .* 1000
     return (aiu, bi, ciu)
 end
@@ -327,7 +330,9 @@ end
 @inline function Chen2022_vel_coeffs(coeffs::CMP.Chen2022VelTypeLargeIce, ρₐ, ρᵢ)
     FT = eltype(coeffs)
     (; A, B, C, E, F, G, H) = coeffs
-    ρₐ = max(ρₐ, zero(ρₐ))
+    # The ice-density exponent `Al` can be non-positive, so `ρₐ` is floored to a small
+    # positive value: a zero or negative sub-domain density would give non-finite coefficients.
+    ρₐ = max(ρₐ, FT(1e-4))
     # Table B5 - cache sqrt for reuse
     log_ρᵢ = log(ρᵢ)
     sqrt_ρᵢ = sqrt(ρᵢ)
@@ -343,7 +348,7 @@ end
     bi = (Cl, Fl)
     ci = (FT(0), Gl)
     # unit conversions
-    aiu = ai .* 1000 .^ bi
+    aiu = ai .* FT(1000) .^ bi
     ciu = ci .* 1000
     return (aiu, bi, ciu)
 end
@@ -377,8 +382,12 @@ function Chen2022VelocityCurve(ai::NTuple{N, Any}, bi::NTuple{N, Any}, ci::NTupl
     FT = promote_type(map(typeof, ai)..., map(typeof, bi)..., map(typeof, ci)...)
     return Chen2022VelocityCurve{N, FT}(map(FT, ai), map(FT, bi), map(FT, ci))
 end
-@inline (v::Chen2022VelocityCurve)(D) =
-    unrolled_sum(abc -> abc[1] * D^abc[2] * exp(-abc[3] * D), map(tuple, v.ai, v.bi, v.ci))
+@inline function (v::Chen2022VelocityCurve)(D)
+    # Shared `log(D)` fuses each term's `D^b * exp(-c*D)` into one `exp`, as in
+    # `Chen2022_monodisperse_pdf`.
+    logD = log(D)
+    return unrolled_sum(abc -> abc[1] * exp(muladd(abc[2], logD, -abc[3] * D)), map(tuple, v.ai, v.bi, v.ci))
+end
 
 """
     Chen2022_monodisperse_pdf(a, b, c)

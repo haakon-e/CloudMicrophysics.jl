@@ -493,34 +493,45 @@ zero when `denominator` is below machine precision.
 end
 
 """
-    rime_mass_fraction(q_rim, q_ice, q_ice_half)
+    rime_mass_fraction(q_rim, q_ice, q_ice_half = 1e-12, ϵ = q_ice_half^2)
 
 Regularised rime mass fraction `F_rim = q_rim / q_ice` that stays finite when
 `q_ice` is zero or very small, with the result clamped to `[0, 1]` via
 `min(q_rim, q_ice)`.
 
 # Arguments
-- `q_rim`: rime specific mass `[kg rim / kg air]`.
-- `q_ice`: total ice specific mass `[kg ice / kg air]`.
-- `q_ice_half`: value of `q_ice` at which the blending weight equals 0.5
-  (default `eps(typeof(q_ice))`).
+- `q_rim`: rime mass concentration `[kg rim / m³ air]`.
+- `q_ice`: total ice mass concentration `[kg ice / m³ air]`.
+- `q_ice_half`: value of `q_ice` at which the blending weight equals 0.5.
+  Default `1e-12 kg/m³`, several orders of magnitude below the smallest
+  physically meaningful ice content (a trace cirrus cell is `~1e-9 kg/m³`).
+  Deliberately independent of `eps(typeof(q_ice))`: an `eps`-tied default
+  places the transition at a genuinely different physical scale in `Float32`
+  (`~1.2e-7`) than `Float64` (`~2.2e-16`), so an ordinary ice content that is
+  unaffected in `Float64` gets spuriously smoothed toward `F_rim = 0` in
+  `Float32` alone — the value itself would depend on the working precision.
 """
-@inline rime_mass_fraction(q_rim, q_ice, kw...) =
-    _regularised_ratio(min(q_rim, q_ice), q_ice, kw...)
+@inline rime_mass_fraction(q_rim, q_ice, q_ice_half = oftype(q_ice, 1e-12), ϵ = q_ice_half^2) =
+    _regularised_ratio(min(q_rim, q_ice), q_ice, q_ice_half, ϵ)
 
 """
-    rime_density(q_rim, b_rim, b_rim_half)
+    rime_density(q_rim, b_rim, b_rim_half = 1e-15, ϵ = b_rim_half^2)
 
 Regularised rime density `ρ_rim = q_rim / b_rim` that stays finite when
 `b_rim` is zero or very small.
 
 # Arguments
-- `q_rim`: rime specific mass `[kg rim / kg air]`.
-- `b_rim`: rime specific volume `[m³ rim / kg air]`.
-- `b_rim_half`: value of `b_rim` at which the blending weight equals 0.5
-  (default `eps(typeof(b_rim))`).
+- `q_rim`: rime mass concentration `[kg rim / m³ air]`.
+- `b_rim`: rime volume concentration `[m³ rim / m³ air]`.
+- `b_rim_half`: value of `b_rim` at which the blending weight equals 0.5.
+  Default `1e-15 m³/m³`: the rime volume a trace rime mass (`~1e-12 kg/m³`,
+  matching `rime_mass_fraction`'s `q_ice_half`) occupies at a physically
+  plausible rime density (hundreds of `kg/m³`). Independent of
+  `eps(typeof(b_rim))` for the same reason as `rime_mass_fraction`'s
+  `q_ice_half` — see its docstring.
 """
-@inline rime_density(q_rim, b_rim, kw...) = _regularised_ratio(q_rim, b_rim, kw...)
+@inline rime_density(q_rim, b_rim, b_rim_half = oftype(b_rim, 1e-15), ϵ = b_rim_half^2) =
+    _regularised_ratio(q_rim, b_rim, b_rim_half, ϵ)
 
 """
     liquid_mass_fraction(ρq_liq, ρq_tot, q_present)
