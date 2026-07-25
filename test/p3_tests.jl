@@ -1342,21 +1342,22 @@ function _p3_bit_identity_hash(vals::Vector{FT}) where {FT}
     return h
 end
 
-# Re-baselined on relaxing the entry's ice deposition on the capacitance
-# timescale, which is the rate the reference trajectory integrates. The previous
-# baseline (0xc63f43609a32f562, 0x977ce491fc1d233a) was set on merging the 2M/P3
-# base-stability stack, which moved the trajectory through the melt-ceiling
-# removal, the Cober-List sign, and rate evaluation at mean-mass-bounded
-# populations, but reached the capacitance timescale only in the per-process
-# decomposition and the manual Jacobian rather than the entry.
+# Re-baselined on stripping the derivative from the refined wet-growth onset
+# crossing. This golden drives `rosenbrock_exact`, so any change to the exact
+# Jacobian moves it; the primal rates are untouched, and the exact-versus-finite-
+# difference cross-check in the liquid-fraction suite passes at both precisions,
+# which is the evidence that the dropped boundary derivative is not detectable in
+# the true Jacobian. Previous baseline (0x3bd9f7e27faac981, 0x9154f3a533ab16de).
 #
-# Neither of those two re-baselines is behavior-neutral. The ones before them
-# were: (0x280bcaeb64fa4798, 0x72efc27a03f46f17) before the base-stack merge,
-# (0xcf3d1f5482548ddf, 0xdb0584ac8ef32b6b) before the melt number rate was made
-# underflow-safe, and (0x89c023ee67cce5b7, 0x50df586fb4467f48) at the foundation
-# base dd26bc32, before the value-lane branch guards.
+# Earlier baselines, none of the last three behavior-neutral:
+# (0xc63f43609a32f562, 0x977ce491fc1d233a) before the capacitance timescale
+# reached the entry, (0x280bcaeb64fa4798, 0x72efc27a03f46f17) before the
+# base-stack merge, (0xcf3d1f5482548ddf, 0xdb0584ac8ef32b6b) before the melt
+# number rate was made underflow-safe, and (0x89c023ee67cce5b7,
+# 0x50df586fb4467f48) at the foundation base dd26bc32, before the value-lane
+# branch guards.
 const _P3_BIT_IDENTITY_GOLDEN =
-    Dict{DataType, UInt64}(Float64 => 0x3bd9f7e27faac981, Float32 => 0x9154f3a533ab16de)
+    Dict{DataType, UInt64}(Float64 => 0x42db6d13152b1212, Float32 => 0x290b700231800d11)
 
 function test_p3_bit_identity(FT)
     @testset "Bit-identity regression (default 2M+P3 config)" begin

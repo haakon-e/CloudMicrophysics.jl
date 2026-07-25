@@ -989,7 +989,7 @@ A tuple of 8 integrands, see [`∫liquid_ice_collisions`](@ref) for details.
 end
 
 @inline function ∫liquid_ice_collisions(n_i, ∂ₜM_max, cloud_integrals, rain_integrals, ice_bounds; quad)
-    function liquid_ice_collisions_integrands(Dᵢ)
+    @inline function liquid_ice_collisions_integrands(Dᵢ)
         # Inner integrals over liquid particle diameters
         ∂ₜN_c_col, ∂ₜM_c_col, ∂ₜB_c_col = cloud_integrals(Dᵢ)
         ∂ₜN_r_col, ∂ₜM_r_col, ∂ₜB_r_col = rain_integrals(Dᵢ)
@@ -1009,7 +1009,13 @@ but with the cloud and rain inner integrals evaluated together by a single
 closure, e.g. [`get_combined_liquid_integrals`](@ref).
 """
 @inline function ∫liquid_ice_collisions_combined(n_i, ∂ₜM_max, combined_integrals, ice_bounds; quad)
-    function liquid_ice_collisions_integrands(Dᵢ)
+    # Inlined so the closure is not materialized. Its captured `ForwardDiff`
+    # payload is roughly 1376*(N+1) bytes for an N-state layout, which crosses a
+    # codegen stack-promotion boundary between the 24-state and 28-state layouts;
+    # above it the object is heap-allocated once per category per substep. Inlining
+    # lets the escape analysis delete the allocation entirely. Guarded by the
+    # substep-solve allocation test in test/p3_multicategory_tests.jl.
+    @inline function liquid_ice_collisions_integrands(Dᵢ)
         ∂ₜN_c_col, ∂ₜM_c_col, ∂ₜB_c_col, ∂ₜN_r_col, ∂ₜM_r_col, ∂ₜB_r_col = combined_integrals(Dᵢ)
         return liquid_ice_collisions_partition(
             n_i(Dᵢ), ∂ₜM_max(Dᵢ), ∂ₜN_c_col, ∂ₜM_c_col, ∂ₜB_c_col, ∂ₜN_r_col, ∂ₜM_r_col, ∂ₜB_r_col,
