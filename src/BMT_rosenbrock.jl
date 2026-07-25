@@ -421,6 +421,37 @@ Forward-Euler substep, floored at zero.
 @inline _euler_update(x, f, h) = max.(x .+ h .* f, 0)
 
 """
+    _condensate_total(x)
+
+Condensed-water content of a [`MicroState`](@ref)-typed vector: cloud, rain, and
+the ice categories' core and liquid-on-ice contents.
+"""
+@inline _condensate_total(x::MicroState) =
+    x[IQ_LCL] + x[IQ_RAI] + _ice_q_total(x) + _q_liq_on_ice_slot(x)
+
+"""
+    _water_bounded_increment(x, d, q_tot)
+
+The increment `d` scaled so the condensate it produces stays within the cell's
+total water `q_tot`, which the vapour budget cannot exceed.
+
+Used only on the fallback branch taken when the substep Jacobian is non-finite.
+There the linearization is unusable and the bare explicit step spans the whole
+substep, so a stiff phase-change rate can convert far more mass than the cell
+holds; the resulting latent release then carries the substep temperature outside
+the thermodynamic domain. Scaling keeps the degraded step physical instead. The
+condensate total is linear in the increment, so the scale factor is exact rather
+than iterative, and it is one whenever the step is already admissible.
+"""
+@inline function _water_bounded_increment(x::MicroState{FT}, d, q_tot) where {FT}
+    c₀ = _condensate_total(x)
+    c₁ = _condensate_total(x .+ d)
+    over = (c₁ > FT(q_tot)) & (c₁ > c₀)
+    σ = ifelse(over, clamp((FT(q_tot) - c₀) / (c₁ - c₀), zero(FT), one(FT)), one(FT))
+    return σ .* d
+end
+
+"""
     _rosenbrock_system(x, f, J, z, h)
 
 Build the equilibrated linear system of one linearized-implicit
@@ -466,6 +497,14 @@ const STATIC_SOLVE_UNROLL_LIMIT = 14
 
 Dense solve `A \\ v` of the substep system: StaticArrays' unrolled solve up to
 [`STATIC_SOLVE_UNROLL_LIMIT`](@ref) states, [`_static_lu_solve`](@ref) above it.
+
+The unrolled solve raises `LinearAlgebra.SingularException` on an exactly zero
+pivot. It is kept as is because it is the bit-identical reference for the layouts
+at or below the cutoff, and because a singular system matrix has no constructed
+trigger here: `A = I/h - B` has `A[i,i] = 1/h - B[i,i]` with `1/h` non-zero, so no
+row can vanish and singularity requires the masked Jacobian to carry an eigenvalue
+of exactly `1/h`. `_static_lu_solve` above the cutoff does test its pivots, since
+it already forms them.
 """
 @inline _rosenbrock_ldiv(A::SA.SMatrix{N, N, FT}, v::SA.StaticVector{N, FT}) where {N, FT} =
     N ≤ STATIC_SOLVE_UNROLL_LIMIT ? A \ v : _static_lu_solve(A, v)
@@ -474,8 +513,14 @@ Dense solve `A \\ v` of the substep system: StaticArrays' unrolled solve up to
     _static_lu_solve(A::SMatrix{N, N}, b::StaticVector{N})
 
 Allocation-free dense solve `A \\ b` through StaticArrays' static LU kernel and
-triangular substitutions. A singular `A` yields a non-finite solution (as the
-unrolled StaticArrays solve does), handled by the caller's finiteness checks.
+triangular substitutions.
+
+A singular `A` returns a non-finite solution, which the caller's finiteness
+checks act on. The triangular substitutions themselves raise
+`LinearAlgebra.SingularException` on an exactly zero pivot, as does the unrolled
+StaticArrays solve, so the pivots are tested first: a throw inside a GPU kernel
+aborts the whole kernel and hides the state that caused it, which no finiteness
+check downstream can recover.
 """
 @inline function _static_lu_solve(A::SA.SMatrix{N, N, FT}, b::SA.StaticVector{N, FT}) where {N, FT}
     # Internal-API dependency (StaticArrays 1.9.18, src/lu.jl): the public `\`
@@ -483,6 +528,11 @@ unrolled StaticArrays solve does), handled by the caller's finiteness checks.
     # `_lu`, while the static `__lu` kernel is size-independent. Cross-checked
     # against the public path in test/p3_multicategory_tests.jl.
     L, U, p = SA.__lu(A, Val(true))
+    singular = false
+    for i in 1:N
+        singular |= iszero(@inbounds U[i, i])
+    end
+    singular && return SA.similar_type(b)(ntuple(_ -> FT(NaN), Val(N)))
     return LA.UpperTriangular(U) \ (LA.LowerTriangular(L) \ b[p])
 end
 
@@ -623,8 +673,13 @@ tendency cache (droplet activation is added by the host, not the substep loop).
                 _rosenbrock_update(x, f, J, z, h) - x
             else
                 # The fallback consumes the primal tendency when the
-                # differentiated evaluation is non-finite in the value lane.
-                _euler_update(x, all(isfinite, f) ? f : g(x), h) - x
+                # differentiated evaluation is non-finite in the value lane, and
+                # its increment is bounded by the available water so an unusable
+                # linearization degrades to a short step rather than to a state
+                # outside the thermodynamic domain.
+                _water_bounded_increment(
+                    x, _euler_update(x, all(isfinite, f) ? f : g(x), h) - x, q_tot,
+                )
             end
             d = _apply_limiter(mode.limiter, x, d, ρ, Tsub, q_tot, Lv_over_cp, Ls_over_cp, tps)
             x = max.(x .+ d, 0)
