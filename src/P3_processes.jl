@@ -1207,12 +1207,25 @@ function wet_growth_onset_diameter(
     Δl = (lhi - llo) / n_scan
     maxiters = FT === Float32 ? 8 : 10
     tol = FixedIterations{FT}()
+    # The crossing is returned with its derivative stripped, so under `ForwardDiff`
+    # it carries zero partials. Brent's inverse-quadratic step divides by residual
+    # differences that fall to the rounding floor near convergence, which leaves the
+    # root's value finite but its partials not, and those partials would otherwise
+    # poison the collision quadrature bounds. The crossing only bounds quadrature
+    # subintervals, and the integrands are continuous across it apart from the
+    # freezing partition, so the Leibniz boundary terms cancel and dropping the
+    # derivative costs no accuracy in the rates themselves.
+    #
+    # The residual itself stays in the dual lane. Solving on a stripped `l` instead
+    # would hand the captured maximum-freeze-rate closure a plain diameter while its
+    # state is dual, and that closure types its result from its arguments, so it
+    # could not represent the dual rate it computes.
     function refine_crossing(l₁, l₂)
         sol = RS.find_zero(l -> excess_mass_rate(exp(l)),
             RS.BrentsMethod(l₁, l₂), RS.CompactSolution(),
             tol, maxiters,
         )
-        return exp(sol.root)
+        return FT(FD.value(exp(sol.root)))
     end
     onset₁ = FT(D_lo)
     onset₂ = FT(D_lo)
