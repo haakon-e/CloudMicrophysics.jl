@@ -79,15 +79,30 @@ q_vap_from_RH_over_liquid(tps::PS, p, T, RH) =
 ###
 ### Supersaturations
 ###
+
+"""
+    saturation_domain_T(T)
+
+`T` floored to the domain on which the saturation functions are defined. They
+evaluate a log of the temperature, so a non-positive `T` throws a `DomainError`
+rather than returning a value a caller can act on. A microphysics substep can
+carry its temperature below the domain transiently, on the latent release of an
+extreme condensate increment; flooring here keeps the saturation quantities
+finite so the substep's own limiter and fallback resolve the step, and keeps the
+kernels free of reachable throws for the GPU. The floor is far below any
+atmospheric temperature, so it is inert on physical states.
+"""
+@inline saturation_domain_T(T) = max(T, oftype(float(T), 1))
+
 saturation_vapor_pressure_over_liquid(tps::PS, T) =
-    TD.saturation_vapor_pressure(tps, T, TD.Liquid())
+    TD.saturation_vapor_pressure(tps, saturation_domain_T(T), TD.Liquid())
 saturation_vapor_pressure_over_ice(tps::PS, T) =
-    TD.saturation_vapor_pressure(tps, T, TD.Ice())
+    TD.saturation_vapor_pressure(tps, saturation_domain_T(T), TD.Ice())
 
 saturation_vapor_specific_content_over_liquid(tps::PS, T, ρ) =
-    TD.q_vap_saturation(tps, T, ρ, TD.Liquid())
+    TD.q_vap_saturation(tps, saturation_domain_T(T), ρ, TD.Liquid())
 saturation_vapor_specific_content_over_ice(tps::PS, T, ρ) =
-    TD.q_vap_saturation(tps, T, ρ, TD.Ice())
+    TD.q_vap_saturation(tps, saturation_domain_T(T), ρ, TD.Ice())
 
 """
     supersaturation_over_liquid(tps, qₜ, qₗ, qᵢ, ρ, T)
@@ -117,11 +132,11 @@ negative humidity inputs while preserving AD compatibility.
 """
 function supersaturation_over_liquid(tps::PS, qₜ, qₗ, qᵢ, ρ, T)
     qᵥ = q_vap(qₜ, qₗ, qᵢ)
-    return TD.supersaturation(tps, qᵥ, ρ, T, TD.Liquid())
+    return TD.supersaturation(tps, qᵥ, ρ, saturation_domain_T(T), TD.Liquid())
 end
 function supersaturation_over_ice(tps::PS, qₜ, qₗ, qᵢ, ρ, T)
     qᵥ = q_vap(qₜ, qₗ, qᵢ)
-    return TD.supersaturation(tps, qᵥ, ρ, T, TD.Ice())
+    return TD.supersaturation(tps, qᵥ, ρ, saturation_domain_T(T), TD.Ice())
 end
 
 end
