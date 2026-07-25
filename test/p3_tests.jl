@@ -1342,22 +1342,23 @@ function _p3_bit_identity_hash(vals::Vector{FT}) where {FT}
     return h
 end
 
-# Re-baselined on stripping the derivative from the refined wet-growth onset
-# crossing. This golden drives `rosenbrock_exact`, so any change to the exact
-# Jacobian moves it; the primal rates are untouched, and the exact-versus-finite-
-# difference cross-check in the liquid-fraction suite passes at both precisions,
-# which is the evidence that the dropped boundary derivative is not detectable in
-# the true Jacobian. Previous baseline (0x3bd9f7e27faac981, 0x9154f3a533ab16de).
+# Re-baselined on bounding the rejected-increment fallback by the available water.
+# That this golden moves at all is the significant part: the rejection branch is
+# reached, and mints condensate beyond the cell's total water, on ordinary sampled
+# states in this default configuration, so it is not a degraded-path guard for
+# exotic states. Every other assertion in this suite is unchanged. Previous
+# baseline (0x42db6d13152b1212, 0x290b700231800d11).
 #
-# Earlier baselines, none of the last three behavior-neutral:
+# Earlier baselines. Behavior-changing: (0x3bd9f7e27faac981, 0x9154f3a533ab16de)
+# before the wet-growth onset crossing's derivative was stripped,
 # (0xc63f43609a32f562, 0x977ce491fc1d233a) before the capacitance timescale
-# reached the entry, (0x280bcaeb64fa4798, 0x72efc27a03f46f17) before the
-# base-stack merge, (0xcf3d1f5482548ddf, 0xdb0584ac8ef32b6b) before the melt
-# number rate was made underflow-safe, and (0x89c023ee67cce5b7,
+# reached the entry, and (0x280bcaeb64fa4798, 0x72efc27a03f46f17) before the
+# base-stack merge. Behavior-neutral: (0xcf3d1f5482548ddf, 0xdb0584ac8ef32b6b)
+# before the melt number rate was made underflow-safe, and (0x89c023ee67cce5b7,
 # 0x50df586fb4467f48) at the foundation base dd26bc32, before the value-lane
 # branch guards.
 const _P3_BIT_IDENTITY_GOLDEN =
-    Dict{DataType, UInt64}(Float64 => 0x42db6d13152b1212, Float32 => 0x290b700231800d11)
+    Dict{DataType, UInt64}(Float64 => 0xc89d56c5d858617b, Float32 => 0xc022adf3df956daa)
 
 function test_p3_bit_identity(FT)
     @testset "Bit-identity regression (default 2M+P3 config)" begin

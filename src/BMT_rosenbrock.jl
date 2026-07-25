@@ -546,14 +546,27 @@ increment outside the well-conditioned-solve bound
 ([`_solve_increment_acceptable`](@ref)) with the explicit update, and return
 `max.(x + Δx, 0)`.
 """
+@inline _rosenbrock_update(x::SA.StaticVector, f, J, z, h) =
+    _rosenbrock_update(x, f, J, z, h, nothing)
 @inline function _rosenbrock_update(
-    x::SA.StaticVector{N, FT}, f, J, z, h,
+    x::SA.StaticVector{N, FT}, f, J, z, h, q_tot,
 ) where {N, FT}
     S, S⁻¹, A = _rosenbrock_system(x, f, J, z, h)
     Δx = _rosenbrock_solve(S, S⁻¹, A, f)
-    Δx = _solve_increment_acceptable(S⁻¹ * Δx, S⁻¹ * f, h) ? Δx : h .* f
+    # A rejected increment falls back to the bare explicit step, which spans the
+    # whole substep width. That step is bounded by the available water where a
+    # budget is supplied. This is the branch a near-singular system takes, and a
+    # near-singular system is far more common than a non-finite Jacobian, so it is
+    # the reachable route to an unphysical increment.
+    Δx = _solve_increment_acceptable(S⁻¹ * Δx, S⁻¹ * f, h) ? Δx :
+         _bounded_explicit_step(x, h .* f, q_tot)
     return max.(x .+ Δx, 0)
 end
+
+# No bound where the caller supplies no water budget: the 1M substep and the
+# temperature-coupled entry keep the bare explicit step.
+@inline _bounded_explicit_step(x, d, ::Nothing) = d
+@inline _bounded_explicit_step(x, d, q_tot) = _water_bounded_increment(x, d, q_tot)
 
 # Acceptance bound for the linearized-implicit increment relative to the
 # explicit-step scale. A well-conditioned solve of `(I/h - B) Δx = f` satisfies
@@ -670,7 +683,7 @@ tendency cache (droplet activation is added by the host, not the substep loop).
             J = _apply_growth(mode.growth, J_raw)
             z = _species_mask(mode.jacobian, mode.growth)(x)
             d = if all(isfinite, J)
-                _rosenbrock_update(x, f, J, z, h) - x
+                _rosenbrock_update(x, f, J, z, h, q_tot) - x
             else
                 # The fallback consumes the primal tendency when the
                 # differentiated evaluation is non-finite in the value lane, and
