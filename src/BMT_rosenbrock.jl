@@ -469,7 +469,9 @@ tendency cache (droplet activation is added by the host, not the substep loop).
     x = MicroState2MP3{FT}(q_lcl, n_lcl, q_rai, n_rai, q_ice, n_ice, q_rim, b_rim)
     x₀ = x
     Tsub = T
+    isub = 0
     for _ in 1:nsub_eff
+        isub += 1
         g = Instantaneous2MP3Tendency(mp, tps, ρ, Tsub, q_tot, logλ)
         x_prev = x
         if all(isfinite, x)
@@ -486,6 +488,22 @@ tendency cache (droplet activation is added by the host, not the substep loop).
         else
             f = g(x)
             x = _euler_update(x, f, h)
+        end
+        # Physical-range trigger on the OUTPUT, dumping the INPUT that produced
+        # it (the actual GPU-executed x_prev/Tsub, not a reconstructed
+        # checkpoint state): fires the FIRST substep where n_ice crosses a
+        # physical ceiling, or lands non-finite - captures the real failing
+        # input, not the aftermath.
+        n_ice_bad = !isfinite(x.n_ice) || x.n_ice > FT(1e7) ||
+                    (x_prev.n_ice <= FT(1e7) && x.n_ice > FT(1e7))
+        if n_ice_bad
+            CUDA.@cuprintln("DEBUG_SUBSTEP_INPUT isub=", Float64(isub), " nsub_eff=", Float64(nsub_eff),
+                " rho=", Float64(ρ), " Tsub=", Float64(Tsub), " q_tot=", Float64(q_tot), " loglambda=", Float64(logλ),
+                " x_prev.q_lcl=", Float64(x_prev.q_lcl), " x_prev.n_lcl=", Float64(x_prev.n_lcl),
+                " x_prev.q_rai=", Float64(x_prev.q_rai), " x_prev.n_rai=", Float64(x_prev.n_rai),
+                " x_prev.q_ice=", Float64(x_prev.q_ice), " x_prev.n_ice=", Float64(x_prev.n_ice),
+                " x_prev.q_rim=", Float64(x_prev.q_rim), " x_prev.b_rim=", Float64(x_prev.b_rim),
+                " x_new.n_ice=", Float64(x.n_ice), " x_new.q_ice=", Float64(x.q_ice))
         end
         Δ = x - x_prev
         T_safe = max(150, Tsub)
@@ -654,7 +672,12 @@ The entries are tiered:
     qmin = UT.ϵ_numerics_2M_M(FT)
     # donor floor for the Tier-2 linearizations (the 1M donor recipe's `q_min`)
     q_floor = FT(TDI.TD.Parameters.q_min(tps))
-    n_floor = q_floor
+    # DEBUG FIX (test, not yet a final value): q_floor is a mass-mixing-ratio
+    # scale (~1e-10); reusing it as the number-concentration donor floor lets
+    # dnlcl/dnrai/dnice/dbrim blow up to ~1e10 whenever a donor number is
+    # exactly zero. Use an FT-independent, number-concentration-scale floor
+    # instead, following the p3-eps-tied-regularization-bug precedent.
+    n_floor = FT(1e-6)
 
     # --- shared thermodynamic constants (T, ρ, q_tot frozen in the substep) ---
     Rᵥ = TDI.Rᵥ(tps)

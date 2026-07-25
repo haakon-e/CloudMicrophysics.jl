@@ -7,6 +7,7 @@ module P3Scheme
 
 using DocStringExtensions
 
+import CUDA
 import SpecialFunctions as SF
 import ForwardDiff as FD
 import RootSolvers as RS
