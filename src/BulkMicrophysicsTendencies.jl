@@ -24,6 +24,7 @@ tendencies = bulk_microphysics_tendencies(
 """
 module BulkMicrophysicsTendencies
 
+import CUDA
 import ..Parameters as CMP
 import ..Utilities as UT
 import ..Microphysics0M as CM0

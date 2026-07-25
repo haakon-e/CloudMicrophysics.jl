@@ -469,7 +469,9 @@ tendency cache (droplet activation is added by the host, not the substep loop).
     x = MicroState2MP3{FT}(q_lcl, n_lcl, q_rai, n_rai, q_ice, n_ice, q_rim, b_rim)
     x₀ = x
     Tsub = T
+    isub = 0
     for _ in 1:nsub_eff
+        isub += 1
         g = Instantaneous2MP3Tendency(mp, tps, ρ, Tsub, q_tot, logλ)
         x_prev = x
         if all(isfinite, x)
@@ -486,6 +488,84 @@ tendency cache (droplet activation is added by the host, not the substep loop).
         else
             f = g(x)
             x = _euler_update(x, f, h)
+        end
+        # Generic one-step-blowup fingerprint: fires on the FIRST substep where
+        # any species goes non-finite or exceeds a generous, clearly-unphysical
+        # absolute ceiling, dumping the pre-step input that produced it (not
+        # the corrupted aftermath) plus a per-species flag so the triggering
+        # species can be identified offline. No relative-jump clause: an
+        # earlier version also fired on any >1000x growth from a near-zero
+        # value, which trivially matches ordinary process onset (e.g. rain
+        # formation growing n_rai from a tiny seed) and produced millions of
+        # false-positive firings.
+        onestep_blowup(new, old, abs_ceil) = !isfinite(new) || new > abs_ceil
+        bad_q_lcl = onestep_blowup(x.q_lcl, x_prev.q_lcl, FT(1))
+        bad_n_lcl = onestep_blowup(x.n_lcl, x_prev.n_lcl, FT(1e12))
+        bad_q_rai = onestep_blowup(x.q_rai, x_prev.q_rai, FT(1))
+        bad_n_rai = onestep_blowup(x.n_rai, x_prev.n_rai, FT(1e12))
+        bad_q_ice = onestep_blowup(x.q_ice, x_prev.q_ice, FT(1))
+        bad_n_ice = onestep_blowup(x.n_ice, x_prev.n_ice, FT(1e12))
+        bad_q_rim = onestep_blowup(x.q_rim, x_prev.q_rim, FT(1))
+        bad_b_rim = onestep_blowup(x.b_rim, x_prev.b_rim, FT(1e12))
+        if bad_q_lcl || bad_n_lcl || bad_q_rai || bad_n_rai || bad_q_ice || bad_n_ice || bad_q_rim || bad_b_rim
+            CUDA.@cuprintln("DEBUG_FINGERPRINT isub=", Float64(isub), " nsub_eff=", Float64(nsub_eff),
+                " rho=", Float64(ρ), " Tsub=", Float64(Tsub), " q_tot=", Float64(q_tot), " loglambda=", Float64(logλ),
+                " flags[qlcl,nlcl,qrai,nrai,qice,nice,qrim,brim]=",
+                Float64(bad_q_lcl), ",", Float64(bad_n_lcl), ",", Float64(bad_q_rai), ",", Float64(bad_n_rai),
+                ",", Float64(bad_q_ice), ",", Float64(bad_n_ice), ",", Float64(bad_q_rim), ",", Float64(bad_b_rim),
+                " x_prev.q_lcl=", Float64(x_prev.q_lcl), " x_prev.n_lcl=", Float64(x_prev.n_lcl),
+                " x_prev.q_rai=", Float64(x_prev.q_rai), " x_prev.n_rai=", Float64(x_prev.n_rai),
+                " x_prev.q_ice=", Float64(x_prev.q_ice), " x_prev.n_ice=", Float64(x_prev.n_ice),
+                " x_prev.q_rim=", Float64(x_prev.q_rim), " x_prev.b_rim=", Float64(x_prev.b_rim),
+                " x_new.q_lcl=", Float64(x.q_lcl), " x_new.n_lcl=", Float64(x.n_lcl),
+                " x_new.q_rai=", Float64(x.q_rai), " x_new.n_rai=", Float64(x.n_rai),
+                " x_new.q_ice=", Float64(x.q_ice), " x_new.n_ice=", Float64(x.n_ice),
+                " x_new.q_rim=", Float64(x.q_rim), " x_new.b_rim=", Float64(x.b_rim))
+            # Solve-internals dump: redundant recompute of the same Rosenbrock
+            # system already solved above, gated behind the trigger so it costs
+            # nothing on ordinary substeps. f, J, z are the primary branch's
+            # bindings (defined whenever x_prev is finite, the case of interest
+            # for a finite-to-blowup transition).
+            if all(isfinite, x_prev)
+                s = abs.(x_prev) .+ h .* abs.(f) .+ eps(FT)
+                S, S⁻¹, A = _rosenbrock_system(x_prev, f, J, z, h)
+                Δx_raw = _rosenbrock_solve(S, S⁻¹, A, f)
+                d_eq = S⁻¹ * Δx_raw
+                f_eq = S⁻¹ * f
+                ratio = maximum(abs, Tuple(d_eq)) / (h * maximum(abs, Tuple(f_eq)))
+                accepted = _solve_increment_acceptable(d_eq, f_eq, h)
+                CUDA.@cuprintln("DEBUG_SOLVE isub=", Float64(isub),
+                    " ratio=", Float64(ratio), " limit=", Float64(ROSENBROCK_INCREMENT_LIMIT),
+                    " accepted=", Float64(accepted),
+                    " scale_s=[", Float64(s[1]), ",", Float64(s[2]), ",", Float64(s[3]), ",", Float64(s[4]),
+                    ",", Float64(s[5]), ",", Float64(s[6]), ",", Float64(s[7]), ",", Float64(s[8]), "]",
+                    " f=[", Float64(f[1]), ",", Float64(f[2]), ",", Float64(f[3]), ",", Float64(f[4]),
+                    ",", Float64(f[5]), ",", Float64(f[6]), ",", Float64(f[7]), ",", Float64(f[8]), "]",
+                    " draw=[", Float64(Δx_raw[1]), ",", Float64(Δx_raw[2]), ",", Float64(Δx_raw[3]), ",", Float64(Δx_raw[4]),
+                    ",", Float64(Δx_raw[5]), ",", Float64(Δx_raw[6]), ",", Float64(Δx_raw[7]), ",", Float64(Δx_raw[8]), "]")
+                CUDA.@cuprintln("DEBUG_JACOBIAN isub=", Float64(isub),
+                    " row1=[", Float64(J[1, 1]), ",", Float64(J[1, 2]), ",", Float64(J[1, 3]), ",", Float64(J[1, 4]),
+                    ",", Float64(J[1, 5]), ",", Float64(J[1, 6]), ",", Float64(J[1, 7]), ",", Float64(J[1, 8]), "]",
+                    " row2=[", Float64(J[2, 1]), ",", Float64(J[2, 2]), ",", Float64(J[2, 3]), ",", Float64(J[2, 4]),
+                    ",", Float64(J[2, 5]), ",", Float64(J[2, 6]), ",", Float64(J[2, 7]), ",", Float64(J[2, 8]), "]")
+                CUDA.@cuprintln("DEBUG_JACOBIAN isub=", Float64(isub),
+                    " row3=[", Float64(J[3, 1]), ",", Float64(J[3, 2]), ",", Float64(J[3, 3]), ",", Float64(J[3, 4]),
+                    ",", Float64(J[3, 5]), ",", Float64(J[3, 6]), ",", Float64(J[3, 7]), ",", Float64(J[3, 8]), "]",
+                    " row4=[", Float64(J[4, 1]), ",", Float64(J[4, 2]), ",", Float64(J[4, 3]), ",", Float64(J[4, 4]),
+                    ",", Float64(J[4, 5]), ",", Float64(J[4, 6]), ",", Float64(J[4, 7]), ",", Float64(J[4, 8]), "]")
+                CUDA.@cuprintln("DEBUG_JACOBIAN isub=", Float64(isub),
+                    " row5=[", Float64(J[5, 1]), ",", Float64(J[5, 2]), ",", Float64(J[5, 3]), ",", Float64(J[5, 4]),
+                    ",", Float64(J[5, 5]), ",", Float64(J[5, 6]), ",", Float64(J[5, 7]), ",", Float64(J[5, 8]), "]",
+                    " row6=[", Float64(J[6, 1]), ",", Float64(J[6, 2]), ",", Float64(J[6, 3]), ",", Float64(J[6, 4]),
+                    ",", Float64(J[6, 5]), ",", Float64(J[6, 6]), ",", Float64(J[6, 7]), ",", Float64(J[6, 8]), "]")
+                CUDA.@cuprintln("DEBUG_JACOBIAN isub=", Float64(isub),
+                    " row7=[", Float64(J[7, 1]), ",", Float64(J[7, 2]), ",", Float64(J[7, 3]), ",", Float64(J[7, 4]),
+                    ",", Float64(J[7, 5]), ",", Float64(J[7, 6]), ",", Float64(J[7, 7]), ",", Float64(J[7, 8]), "]",
+                    " row8=[", Float64(J[8, 1]), ",", Float64(J[8, 2]), ",", Float64(J[8, 3]), ",", Float64(J[8, 4]),
+                    ",", Float64(J[8, 5]), ",", Float64(J[8, 6]), ",", Float64(J[8, 7]), ",", Float64(J[8, 8]), "]")
+            else
+                CUDA.@cuprintln("DEBUG_SOLVE isub=", Float64(isub), " euler_fallback_input_nonfinite=1")
+            end
         end
         Δ = x - x_prev
         T_safe = max(150, Tsub)
