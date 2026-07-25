@@ -969,7 +969,11 @@ The entries are tiered:
 ) where {FT}
     mp = g.mp
     tps = g.tps
-    ρ = g.ρ
+    # Clamped as the per-process entry clamps it. The density reaches a log through
+    # the capacitance deposition timescale, so a negative value here raises a
+    # DomainError rather than producing a Jacobian the caller's finiteness checks
+    # can reject, and inside a GPU kernel that aborts the whole kernel.
+    ρ = UT.clamp_to_nonneg(g.ρ)
     T = g.T
     q_tot = FT(g.q_tot)
 
