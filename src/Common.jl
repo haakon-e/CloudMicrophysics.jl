@@ -518,7 +518,10 @@ See e.g., Seifert and Beheng (2006), https://doi.org/10.1007/s00703-005-0112-4, 
     N_sc = ν_air / D_vapor           # Schmidt number
     cbrt_N_sc = cbrt(N_sc)           # loop-invariant over D; hoist out of F_v
     N_Re(D) = D * v_term(D) / ν_air  # Reynolds number
-    F_v(D) = aᵥ + bᵥ * cbrt_N_sc * sqrt(N_Re(D))  # Ventilation factor
+    # Floored: an extrapolated terminal-velocity curve can return a negative fall
+    # speed below its fitted range, and the square root would then throw rather
+    # than return a value the caller can act on.
+    F_v(D) = aᵥ + bᵥ * cbrt_N_sc * sqrt(max(N_Re(D), zero(N_Re(D))))  # Ventilation factor
     return F_v
 end
 
