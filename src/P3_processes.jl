@@ -1154,6 +1154,73 @@ function collision_cross_section_ice_ice(state, D_1, D_2)
     return π * (r_eff(D_1) + r_eff(D_2))^2  # collision cross section
 end
 
+@inline r_eff_ice(state, D) = √(ice_area(state, D) / π)
+
+"""
+    ice_self_collection_inner_segment(state, c0, c1, v_1, v_ice, n_i, quad, a, b)
+
+Hand-written Gauss quadrature sum of the ice self-collection integrand over
+one inner segment `[a, b]`, equivalent to `integrate` applied to the inner
+integrand in [`ice_self_collection`](@ref). `c0 = π r(D_1)²` and `c1 = 2π r(D_1)`
+are the outer-node-only terms of [`collision_cross_section_ice_ice`](@ref)'s
+expansion `π(r(D_1) + r(D_2))² = c0 + c1 r(D_2) + π r(D_2)²`, hoisted by the caller.
+"""
+@inline function ice_self_collection_inner_segment(
+    state, c0, c1, v_1, v_ice, n_i, quad, a::FT, b::FT,
+) where {FT}
+    a < b || return zero(FT)
+    nnodes = quad.n
+    scale_factor = (b - a) / 2
+    shift = (a + b) / 2
+    acc = zero(FT)
+    @inbounds for i in 1:nnodes
+        y = node(quad, FT(i), nnodes)
+        D_2 = scale_factor * y + shift
+        w = inv_weight_fun(quad, y) * weight(quad, FT(i), nnodes)
+        r_2 = r_eff_ice(state, D_2)
+        cs = c0 + c1 * r_2 + π * r_2^2
+        acc += cs * abs(v_1 - v_ice(D_2)) * n_i(D_2) * w
+    end
+    return scale_factor * acc
+end
+
+"""
+    ice_self_collection_outer_segment(state, ice_bounds, D_min, D_max, v_ice, n_i, quad, a, b)
+
+Hand-written Gauss quadrature sum of the ice self-collection outer integrand
+over one segment `[a, b]`. At each outer node `D_1`, the inner integral over
+`D_2 ∈ [D_1, D_max]` is evaluated by [`ice_self_collection_inner_segment`](@ref)
+over each of `ice_bounds`'s subintervals, clamped up to `D_1`.
+"""
+@inline function ice_self_collection_outer_segment(
+    state, ice_bounds, D_min, D_max, v_ice, n_i, quad, a::FT, b::FT,
+) where {FT}
+    a < b || return zero(FT)
+    nnodes = quad.n
+    scale_factor = (b - a) / 2
+    shift = (a + b) / 2
+    acc = zero(FT)
+    @inbounds for i in 1:nnodes
+        y = node(quad, FT(i), nnodes)
+        D_1 = scale_factor * y + shift
+        w = inv_weight_fun(quad, y) * weight(quad, FT(i), nnodes)
+        v_1 = v_ice(D_1)
+        n_1 = n_i(D_1)
+        r_1 = r_eff_ice(state, D_1)
+        c0 = π * r_1^2
+        c1 = π * r_1 * 2
+        D_lo = clamp(D_1, D_min, D_max)
+        inner_val = zero(FT)
+        for (lo, hi) in subintervals(ice_bounds)
+            inner_val += ice_self_collection_inner_segment(
+                state, c0, c1, v_1, v_ice, n_i, quad, max(lo, D_lo), max(hi, D_lo),
+            )
+        end
+        acc += n_1 * inner_val * w
+    end
+    return scale_factor * acc
+end
+
 """
     ice_self_collection(state, logλ, vel, ρₐ; [quad])
 
@@ -1181,23 +1248,11 @@ A `NamedTuple` of `(; dNdt)`, where:
     ice_bounds = velocity_integral_bounds(state, logλ, v_ice; p)
     D_min, D_max = ice_bounds[1], ice_bounds[end]
 
-    function inner_integral(D_1)
-        # Inner integral over D_2 ∈ [D_1, D_max] (the upper triangle). Its
-        # subinterval boundaries are the P3 regime breakpoints restricted to that
-        # window: clamping each breakpoint up to D_1 drops those below it to
-        # zero-width (no-op) subintervals. v_ice(D_1) and n_i(D_1) do not vary
-        # over the inner integral, so evaluate them once here.
-        v_1 = v_ice(D_1)
-        n_1 = n_i(D_1)
-        collision_rate =
-            D_2 -> collision_cross_section_ice_ice(state, D_1, D_2) * abs(v_1 - v_ice(D_2)) * n_i(D_2)
-        D_lo = clamp(D_1, D_min, D_max)
-        inner_bounds = map(D -> max(D, D_lo), ice_bounds)
-        return n_1 * integrate(collision_rate, inner_bounds, quad)
-    end
-
     # Integrate the upper triangle D_1 ≤ D_2, counting each unordered particle
     # pair once — the self-collection rate.
-    dNdt = integrate(inner_integral, ice_bounds, quad)
+    dNdt = zero(D_min)
+    for (lo, hi) in subintervals(ice_bounds)
+        dNdt += ice_self_collection_outer_segment(state, ice_bounds, D_min, D_max, v_ice, n_i, quad, lo, hi)
+    end
     return (; dNdt)
 end
