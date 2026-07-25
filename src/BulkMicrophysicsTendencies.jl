@@ -1136,7 +1136,7 @@ end
 
 """
     _vapor_exchange_accumulate(liquid, subdep, tps, ρ, T, q_tot, q_lcl, q_rai,
-        q_ice, n_ice, cat, state, q_other, share_core, share_liq,
+        q_ice, n_ice, cat, state, q_other, share_core, share_liq, τ_dep,
         dq_ice_dt, dn_ice_dt, dq_rim_dt, db_rim_dt, dq_liq_dt)
 
 Accumulate one ice category's vapor exchange onto the passed specific-rate
@@ -1147,9 +1147,15 @@ core deposition/sublimation relaxation with its number and rime pathways. Under
 (scaled by `1 - w`, with the liquid on ice in the vapor and heat budgets, and
 sublimation limited to the core) and the liquid-shell condensation/evaporation
 (scaled by `w`, a source/sink of the liquid on ice, with evaporation reducing
-the ice number in proportion to the whole mass). Both paths are bulk
-relaxations toward ice and liquid saturation on the `SubDep2M` timescale, not
-PSD-resolved integrals, consistent with the `NoLiquidFraction` treatment.
+the ice number in proportion to the whole mass). Both paths are bulk relaxations
+toward ice and liquid saturation, not PSD-resolved integrals, consistent with the
+`NoLiquidFraction` treatment.
+
+The core deposition and sublimation relax on `τ_dep`, the category's
+[`CMP3.ice_deposition_timescale`](@ref) capacitance integral, so the rate vanishes
+with the population. The liquid-shell condensation and evaporation still relax on
+the constant `SubDep2M` timescale: the shell's capacitance timescale needs the
+liquid rather than the ice diffusivity factor, so it is not the same integral.
 
 For multiple ice categories `q_other` carries the other categories' ice
 condensate (so the vapor and heat budgets see the full condensate), and the
@@ -1160,7 +1166,7 @@ single category.
 """
 @inline function _vapor_exchange_accumulate(
     ::CMP.NoLiquidFraction, subdep, tps, ρ, T, q_tot, q_lcl, q_rai, q_ice, n_ice, cat, state,
-    q_other, share_core, share_liq,
+    q_other, share_core, share_liq, τ_dep,
     dq_ice_dt, dn_ice_dt, dq_rim_dt, db_rim_dt, dq_liq_dt,
 )
     FT = eltype(ρ)
@@ -1170,7 +1176,7 @@ single category.
     micro_mock = (; q_tot, q_lcl, q_icl = q_ice, q_rai, q_sno = q_other)
     thermo_mock = (; ρ, T)
     ∂ₜq_ice_dep = CMNonEq.conv_q_vap_to_q_icl(
-        CMP.ConstantTimescale(subdep.τ_relax), nothing, tps, micro_mock, thermo_mock,
+        CMP.ConstantTimescale(τ_dep), nothing, tps, micro_mock, thermo_mock,
     )
     # No ice deposition above freezing (lack of INPs)
     ∂ₜq_ice_dep = ifelse(T > tps.T_freeze, min(∂ₜq_ice_dep, zero(T)), ∂ₜq_ice_dep)
@@ -1186,7 +1192,7 @@ single category.
 end
 @inline function _vapor_exchange_accumulate(
     liquid::CMP.PredictedLiquidFraction, subdep, tps, ρ, T, q_tot, q_lcl, q_rai, q_ice, n_ice, cat, state,
-    q_other, share_core, share_liq,
+    q_other, share_core, share_liq, τ_dep,
     dq_ice_dt, dn_ice_dt, dq_rim_dt, db_rim_dt, dq_liq_dt,
 )
     FT = eltype(ρ)
@@ -1200,7 +1206,7 @@ end
     n_per_q_ice = ifelse(q_ice > ϵₘ, n_ice / q_ice, zero(n_ice))
     micro_ice = (; q_tot, q_lcl, q_icl = q_ice, q_rai, q_sno = q_liq + q_other)
     ∂ₜq_ice_dep = CMNonEq.conv_q_vap_to_q_icl(
-        CMP.ConstantTimescale(subdep.τ_relax), nothing, tps, micro_ice, thermo_mock,
+        CMP.ConstantTimescale(τ_dep), nothing, tps, micro_ice, thermo_mock,
     )
     ∂ₜq_ice_dep = ifelse(T > tps.T_freeze, min(∂ₜq_ice_dep, zero(T)), ∂ₜq_ice_dep)
     ∂ₜn_ice_dep = ifelse(∂ₜq_ice_dep < 0, n_per_q_ice * ∂ₜq_ice_dep, zero(∂ₜq_ice_dep))
@@ -1437,14 +1443,17 @@ partition shares.
     return j == NCAT ? acc : _vapor_numadj_rec(ctx, cats, conds, totals, acc, Val(j + 1))
 end
 @inline function _category_vapor_numadj(ctx, c, cond_j, totals, a, ncat::Val)
-    (; liquid, moments, subdep, tps, ρ, T, q_tot, q_lcl, q_rai, ϵₘ) = ctx
+    (; liquid, moments, aps, subdep, tps, vel, quad, ρ, T, q_tot, q_lcl, q_rai, ϵₘ) = ctx
     q_other = totals.q_icl_tot - cond_j
     share_core = _category_share(ncat, c.q_ice, totals.q_ice_tot, ϵₘ)
     share_liq = _liquid_category_share(liquid, ncat, c.cat, totals.q_liq_tot, ϵₘ)
+    # The deposition relaxation follows this category's capacitance integral, so
+    # the rate vanishes with its population rather than at a fixed timescale.
+    τ_dep = CMP3.ice_deposition_timescale(vel, aps, tps, T, ρ, c.state, c.shape; quad)
     # --- Ice Sublimation / Deposition and liquid-shell condensation / evaporation
     (dq_ice_dt, dn_ice_dt, dq_rim_dt, db_rim_dt, dq_liq_dt) = _vapor_exchange_accumulate(
         liquid, subdep, tps, ρ, T, q_tot, q_lcl, q_rai, c.q_ice, c.n_ice, c.cat, c.state,
-        q_other, share_core, share_liq,
+        q_other, share_core, share_liq, τ_dep,
         a.dq_ice_dt, a.dn_ice_dt, a.dq_rim_dt, a.db_rim_dt, a.dq_liq_dt,
     )
     # --- Ice number adjustment for mass limits

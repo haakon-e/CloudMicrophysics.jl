@@ -178,12 +178,19 @@ function _joint_vapor_exchange(mp, tps, ρ, T, warm, cat, state)
     q_ice = cat.q_ice
     q_icl_tot = q_ice + q_liq
     thermo = (; ρ, T)
+    # The warm block evaluates its rates at the mean-mass-bounded populations and
+    # relaxes condensation on the droplet population's capacitance timescale.
+    n_lcl_b = CM2.number_bounded_by_mass_limits(
+        (; x_min = sb.pdf_c.xc_min, x_max = sb.pdf_c.xc_max), q_lcl, warm.n_lcl)
+    n_rai_b = CM2.number_bounded_by_mass_limits(
+        (; x_min = sb.pdf_r.xr_min, x_max = sb.pdf_r.xr_max), q_rai, n_rai)
+    τ_cond = CM2.cloud_condensation_timescale(sb.pdf_c, aps, tps, T, ρ, q_lcl, ρ * n_lcl_b)
     cond = CMNonEq.conv_q_vap_to_q_lcl(
-        CMP.CloudLiquidFormation(condevap.τ_relax), nothing, tps,
+        CMP.CloudLiquidFormation(τ_cond), nothing, tps,
         (; q_tot, q_lcl, q_icl = q_icl_tot, q_rai, q_sno = zero(q_ice)), thermo,
     )
     evap = CM2.rain_evaporation(
-        sb, aps, tps, q_tot, q_lcl, q_icl_tot, q_rai, zero(q_ice), ρ, n_rai * ρ, T,
+        sb, aps, tps, q_tot, q_lcl, q_icl_tot, q_rai, zero(q_ice), ρ, ρ * n_rai_b, T,
     ).∂ₜq_rai
     τ_act = mp.ice.inp_depletion_model.τ_act
     D_nuc = FT(10e-6)
@@ -194,8 +201,14 @@ function _joint_vapor_exchange(mp, tps, ρ, T, warm, cat, state)
         m_nuc, τ_act, inpc_log_shift = zero(ρ),
     ).∂ₜq_frz
     w = P3.vapor_path_weight(liq, state.F_liq)
+    # The core relaxes on the population's capacitance timescale, the shell on the
+    # constant one, matching `_vapor_exchange_accumulate`.
+    τ_dep = P3.ice_deposition_timescale(
+        mp.ice.terminal_velocity, aps, tps, T, ρ, state,
+        P3.get_distribution_shape(state); quad = mp.ice.quad,
+    )
     depsub = CMNonEq.conv_q_vap_to_q_icl(
-        CMP.ConstantTimescale(subdep.τ_relax), nothing, tps,
+        CMP.ConstantTimescale(τ_dep), nothing, tps,
         (; q_tot, q_lcl, q_icl = q_ice, q_rai, q_sno = q_liq), thermo,
     )
     depsub = ifelse(T > tps.T_freeze, min(depsub, zero(T)), depsub)

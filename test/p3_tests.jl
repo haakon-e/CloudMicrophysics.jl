@@ -1342,20 +1342,21 @@ function _p3_bit_identity_hash(vals::Vector{FT}) where {FT}
     return h
 end
 
-# Re-baselined on merging the 2M/P3 base-stability stack. Unlike the earlier
-# re-baselines this one is not behavior-neutral: the reference trajectory moves
-# because ice deposition now relaxes on the population's capacitance integral
-# instead of a fixed timescale, the melting number rate divides by an unceilinged
-# mean particle mass, the Cober-List impact factor carries its leading minus, and
-# process rates are evaluated at mean-mass-bounded populations. Previous baseline
-# was (0x280bcaeb64fa4798, 0x72efc27a03f46f17).
+# Re-baselined on relaxing the entry's ice deposition on the capacitance
+# timescale, which is the rate the reference trajectory integrates. The previous
+# baseline (0xc63f43609a32f562, 0x977ce491fc1d233a) was set on merging the 2M/P3
+# base-stability stack, which moved the trajectory through the melt-ceiling
+# removal, the Cober-List sign, and rate evaluation at mean-mass-bounded
+# populations, but reached the capacitance timescale only in the per-process
+# decomposition and the manual Jacobian rather than the entry.
 #
-# Earlier baselines, both behavior-neutral: (0xcf3d1f5482548ddf, 0xdb0584ac8ef32b6b)
-# before the melt number rate was made underflow-safe, and
-# (0x89c023ee67cce5b7, 0x50df586fb4467f48) at the foundation base dd26bc32,
-# before the value-lane branch guards.
+# Neither of those two re-baselines is behavior-neutral. The ones before them
+# were: (0x280bcaeb64fa4798, 0x72efc27a03f46f17) before the base-stack merge,
+# (0xcf3d1f5482548ddf, 0xdb0584ac8ef32b6b) before the melt number rate was made
+# underflow-safe, and (0x89c023ee67cce5b7, 0x50df586fb4467f48) at the foundation
+# base dd26bc32, before the value-lane branch guards.
 const _P3_BIT_IDENTITY_GOLDEN =
-    Dict{DataType, UInt64}(Float64 => 0xc63f43609a32f562, Float32 => 0x977ce491fc1d233a)
+    Dict{DataType, UInt64}(Float64 => 0x3bd9f7e27faac981, Float32 => 0x9154f3a533ab16de)
 
 function test_p3_bit_identity(FT)
     @testset "Bit-identity regression (default 2M+P3 config)" begin

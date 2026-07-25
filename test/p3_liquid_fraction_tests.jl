@@ -658,13 +658,21 @@ function test_liquid_entry_conservation(FT)
             q_ice = cat.q_ice
             q_icl_tot = q_ice + q_liq
             thermo = (; ρ, T)
-            # cloud condensation/evaporation and rain evaporation (warm block)
+            # cloud condensation/evaporation and rain evaporation (warm block).
+            # The warm block evaluates its rates at the mean-mass-bounded
+            # populations and relaxes condensation on the droplet population's
+            # capacitance timescale, so the reconstruction must do both.
+            n_lcl_b = CM2.number_bounded_by_mass_limits(
+                (; x_min = sb.pdf_c.xc_min, x_max = sb.pdf_c.xc_max), q_lcl, n_lcl)
+            n_rai_b = CM2.number_bounded_by_mass_limits(
+                (; x_min = sb.pdf_r.xr_min, x_max = sb.pdf_r.xr_max), q_rai, n_rai)
+            τ_cond = CM2.cloud_condensation_timescale(sb.pdf_c, aps, tps, T, ρ, q_lcl, ρ * n_lcl_b)
             cond = CMNonEq.conv_q_vap_to_q_lcl(
-                CMP.CloudLiquidFormation(condevap.τ_relax), nothing, tps,
+                CMP.CloudLiquidFormation(τ_cond), nothing, tps,
                 (; q_tot, q_lcl, q_icl = q_icl_tot, q_rai, q_sno = zero(q_ice)), thermo,
             )
             evap = CM2.rain_evaporation(
-                sb, aps, tps, q_tot, q_lcl, q_icl_tot, q_rai, zero(q_ice), ρ, n_rai * ρ, T,
+                sb, aps, tps, q_tot, q_lcl, q_icl_tot, q_rai, zero(q_ice), ρ, ρ * n_rai_b, T,
             ).∂ₜq_rai
             # deposition nucleation
             τ_act = mp.ice.inp_depletion_model.τ_act
@@ -675,10 +683,16 @@ function test_liquid_entry_conservation(FT)
                 mp.ice.ice_nucleation, tps, T, ρ, q_tot, q_lcl + q_rai, q_icl_tot, n_active;
                 m_nuc, τ_act, inpc_log_shift = zero(ρ),
             ).∂ₜq_frz
-            # ramped core deposition/sublimation and shell condensation/evaporation
+            # ramped core deposition/sublimation and shell condensation/evaporation.
+            # The core relaxes on the population's capacitance timescale, the shell
+            # on the constant one, matching `_vapor_exchange_accumulate`.
             w = P3.vapor_path_weight(liq, state.F_liq)
+            τ_dep = P3.ice_deposition_timescale(
+                mp.ice.terminal_velocity, aps, tps, T, ρ, state,
+                P3.get_distribution_shape(state); quad = mp.ice.quad,
+            )
             depsub = CMNonEq.conv_q_vap_to_q_icl(
-                CMP.ConstantTimescale(subdep.τ_relax), nothing, tps,
+                CMP.ConstantTimescale(τ_dep), nothing, tps,
                 (; q_tot, q_lcl, q_icl = q_ice, q_rai, q_sno = q_liq), thermo,
             )
             depsub = ifelse(T > tps.T_freeze, min(depsub, zero(T)), depsub)
@@ -876,21 +890,25 @@ function test_vapor_anchor(FT)
         Rᵥ = TDI.Rᵥ(tps)
         Lₛ = TDI.Lₛ(tps, T)
         Lᵥ = TDI.Lᵥ(tps, T)
-        τ = subdep.τ_relax
+        # The core relaxes on the supplied deposition timescale (the capacitance
+        # integral in the entry), the shell on the constant SubDep2M timescale.
+        # Chosen distinct here so the two paths cannot be confused.
+        τ_dep = FT(37)
+        τ_shell = subdep.τ_relax
         cp_core = TDI.cpₘ(tps, q_tot, q_lcl + q_rai, q_ice + q_liq)
         cp_shell = TDI.cpₘ(tps, q_tot, q_liq, q_ice)
         Γᵢ = 1 + (Lₛ / cp_core) * qs_ice * (Lₛ / (Rᵥ * T^2) - 1 / T)
         Γₗ = 1 + (Lᵥ / cp_shell) * qs_liq * (Lᵥ / (Rᵥ * T^2) - 1 / T)
-        expected_core = -(1 - w) * q_ice / (τ * Γᵢ)
-        expected_shell = -w * q_liq / (τ * Γₗ)
+        expected_core = -(1 - w) * q_ice / (τ_dep * Γᵢ)
+        expected_shell = -w * q_liq / (τ_shell * Γₗ)
         expected_n =
-            (1 - w) * (n_ice / q_ice) * (-q_ice / (τ * Γᵢ)) +
-            w * (n_ice / (q_ice + q_liq)) * (-q_liq / (τ * Γₗ))
+            (1 - w) * (n_ice / q_ice) * (-q_ice / (τ_dep * Γᵢ)) +
+            w * (n_ice / (q_ice + q_liq)) * (-q_liq / (τ_shell * Γₗ))
 
         z = zero(FT)
         (dq_ice, dn_ice, dq_rim, db_rim, dq_liq) = BMT._vapor_exchange_accumulate(
             liq, subdep, tps, ρ, T, q_tot, q_lcl, q_rai, q_ice, n_ice, cat, st,
-            zero(FT), one(FT), one(FT),  # single category: no other condensate, unit shares
+            zero(FT), one(FT), one(FT), τ_dep,  # single category: no other condensate, unit shares
             z, z, z, z, z,
         )
         rtol = FT === Float32 ? 1e-3 : 1e-6
@@ -927,7 +945,11 @@ function test_liquid_entry_jacobian(FT)
             f, J = BMT._tendency_and_jacobian(BMT.ExactJacobian(), g, x)
             @test all(isfinite, f)
             @test all(isfinite, J)
-            @test f == g(x)  # primal recovered from the dual pass
+            # Primal recovered from the dual pass. Compared to a few ulp rather
+            # than bit for bit: the collision kernels contain operations whose
+            # dual and plain evaluations round differently, so the recovered
+            # primal can differ in the last bits without being a wrong value.
+            @test f ≈ g(x) rtol = (FT === Float32 ? FT(1e-5) : FT(1e-12))
         end
     end
 end
