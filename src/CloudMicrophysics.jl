@@ -1,5 +1,7 @@
 module CloudMicrophysics
 
+import CUDA
+
 include("show.jl")
 
 # Quadrature rules are defined before `Parameters` so that a constructed
