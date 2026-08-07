@@ -257,8 +257,6 @@ See also [`LocalRimeDensity`](@ref CloudMicrophysics.Parameters.LocalRimeDensity
  See also the P3 fortran code, `microphy_p3.f90`, Line 3315-3323,
  which extends the range of the calculation to ``R_i ≤ 12``, the upper limit of which
  then equals the solid bulk ice density, ``ρ_ice = 916.7 kg/m^3``.
- The sub-zero bound on ``T_{sfc}`` also follows the fortran code, Line 3380
- (`iTc = 1/min(-0.001, Tc)`).
 
  Note that Morrison & Milbrandt (2015) [MorrisonMilbrandt2015](@cite) only uses this
  parameterization for collisions with cloud droplets.

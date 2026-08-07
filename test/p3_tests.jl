@@ -729,8 +729,8 @@ function test_p3_bulk_liquid_ice_collisions(FT)
 
         # Subfreezing Rᵢ is positive, so ρ′_rim densifies toward ρ_ice as T → T_freeze
         Dₗ = FT(200e-6)
-        ρ′_rim(T) = P3.compute_local_rime_density(vel_params, ρₐ, FT(T), state)(D̄, Dₗ)
-        ρ_subfreezing = ρ′_rim.((240, 250, 260, 265, 270))
+        ρ′_rim(T) = P3.compute_local_rime_density(vel_params, ρₐ, T, state)(D̄, Dₗ)
+        ρ_subfreezing = ρ′_rim.(FT[240, 250, 260, 265, 270])
         @test issorted(ρ_subfreezing)   # densifies toward ρ_ice as T → T_freeze
         @test all(ρ_subfreezing .≥ ρ′_rim_CL93(1))
         @test all(ρ_subfreezing .≤ ρ_ice)
