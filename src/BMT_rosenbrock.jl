@@ -461,9 +461,8 @@ fields as the `Instantaneous` entry (without the activation diagnostic).
     return NamedTuple{(
         :dq_lcl_dt, :dn_lcl_dt, :dq_rai_dt, :dn_rai_dt,
         :dq_ice_dt, :dn_ice_dt, :dq_rim_dt, :db_rim_dt,
-    )}(
-        Tuple(rates),
-    )
+        :dn_lcl_activation_dt,
+    )}((Tuple(rates)..., zero(FT)))
 end
 
 @inline _tendency_and_jacobian(::ManualJacobian, g::Instantaneous2MP3Tendency, x) =
