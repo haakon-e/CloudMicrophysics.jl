@@ -441,6 +441,14 @@ function test_microphysics2M(FT)
         TT.@test CM2.rain_terminal_velocity(
             SB2006, SB2006Vel, FT(0), ρ, N_rai,
         )[2] ≈ 0 atol = eps(FT)
+
+        # both velocities vanish when either moment is degenerate
+        TT.@test CM2.rain_terminal_velocity(
+            SB2006, SB2006Vel, q_rai, ρ, FT(0),
+        )[2] ≈ 0 atol = eps(FT)
+        TT.@test CM2.rain_terminal_velocity(
+            SB2006, SB2006Vel, FT(0), ρ, N_rai,
+        )[1] ≈ 0 atol = eps(FT)
     end
 
     TT.@testset "2M_microphysics - Seifert and Beheng 2006 modified rain terminal velocity without limiters" begin
@@ -479,6 +487,14 @@ function test_microphysics2M(FT)
         TT.@test CM2.rain_terminal_velocity(
             SB2006_no_limiters, SB2006Vel, FT(0), ρ, N_rai,
         )[2] ≈ 0 atol = eps(FT)
+
+        # both velocities vanish when either moment is degenerate
+        TT.@test CM2.rain_terminal_velocity(
+            SB2006_no_limiters, SB2006Vel, q_rai, ρ, FT(0),
+        )[2] ≈ 0 atol = eps(FT)
+        TT.@test CM2.rain_terminal_velocity(
+            SB2006_no_limiters, SB2006Vel, FT(0), ρ, N_rai,
+        )[1] ≈ 0 atol = eps(FT)
     end
 
     TT.@testset "2M_microphysics - Chen 2022 rain terminal velocity" begin
@@ -503,6 +519,14 @@ function test_microphysics2M(FT)
             TT.@test CM2.rain_terminal_velocity(
                 SB, Chen2022Vel, FT(0), ρ, N_rai,
             )[2] ≈ 0 atol = eps(FT)
+
+            # both velocities vanish when either moment is degenerate
+            TT.@test CM2.rain_terminal_velocity(
+                SB, Chen2022Vel, q_rai, ρ, FT(0),
+            )[2] ≈ 0 atol = eps(FT)
+            TT.@test CM2.rain_terminal_velocity(
+                SB, Chen2022Vel, FT(0), ρ, N_rai,
+            )[1] ≈ 0 atol = eps(FT)
 
             TT.@test v_bigger[1] > vt_rai[1]
             TT.@test v_bigger[2] > vt_rai[2]

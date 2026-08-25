@@ -692,6 +692,8 @@ Compute the raindrops terminal velocity.
 # Returns
 A tuple containing the number and mass weighted mean fall velocities of raindrops in [m/s],
 assuming an exponential size distribution from Seifert and Beheng 2006.
+Both velocities are zero when either `q_rai` or `N_rai` is less than its numerical
+threshold, where the size distribution is undefined.
 The fall velocity of individual rain drops is parameterized:
  - assuming an empirical relation similar to Rogers (1993) for `vel::CMP.SB2006VelType`,
  - following Chen et. al 2022, DOI: 10.1016/j.atmosres.2022.106171 for `vel::CMP.Chen2022VelTypeRain`.
@@ -710,9 +712,8 @@ function rain_terminal_velocity(
     vt0 = max(0, sqrt(ρ0 / ρ) * (aR * _pa0 - bR * _pb0 / (1 + cR * Dr_mean)))
     vt1 = max(0, sqrt(ρ0 / ρ) * (aR * _pa1 - bR * _pb1 / (1 + cR * Dr_mean)^4))
 
-    cond_N = N_rai < UT.ϵ_numerics_2M_N(FT)
-    cond_q = q_rai < UT.ϵ_numerics_2M_M(FT)
-    return (ifelse(cond_N, FT(0), vt0), ifelse(cond_q, FT(0), vt1))
+    cond = N_rai < UT.ϵ_numerics_2M_N(FT) || q_rai < UT.ϵ_numerics_2M_M(FT)
+    return (ifelse(cond, FT(0), vt0), ifelse(cond, FT(0), vt1))
 end
 function rain_terminal_velocity(
     (; pdf_r)::CMP.SB2006, vel::CMP.Chen2022VelTypeRain, q_rai, ρ, N_rai,
@@ -727,9 +728,8 @@ function rain_terminal_velocity(
     vt0 = sum(CO.Chen2022_exponential_pdf.(aiu, bi, ciu, Dr_mean, 0))
     vt3 = sum(CO.Chen2022_exponential_pdf.(aiu, bi, ciu, Dr_mean, 3))
 
-    cond_N = N_rai < UT.ϵ_numerics_2M_N(FT)
-    cond_q = q_rai < UT.ϵ_numerics_2M_M(FT)
-    return (ifelse(cond_N, FT(0), max(0, vt0)), ifelse(cond_q, FT(0), max(0, vt3)))
+    cond = N_rai < UT.ϵ_numerics_2M_N(FT) || q_rai < UT.ϵ_numerics_2M_M(FT)
+    return (ifelse(cond, FT(0), max(0, vt0)), ifelse(cond, FT(0), max(0, vt3)))
 end
 function _sb_rain_terminal_velocity_helper(
     ::CMP.RainParticlePDF_SB2006_limited, λr, aR, bR, cR,
