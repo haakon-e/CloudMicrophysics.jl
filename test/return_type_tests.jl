@@ -74,9 +74,11 @@ end
     # half no longer defaults (card #39 dropped the eps(FT)-tied default; there is no
     # universal scale to default to), so the arity is 3, not 2.
     @test concrete_for_all_mixes(UT._regularised_ratio, (), 3)
+    # τ_relax is the Frostenberg (2023) deposition timescale of the 1M non-equilibrium path
+    # and takes that spectrum explicitly; the P3 default target is Cooper from this unit on.
     @test concrete_for_all_mixes(
         CMNonEq.τ_relax,
-        (P(CMP.CloudIce(FT64)), P(CMP.AirProperties(FT64)), P(mp.ice.ice_nucleation)), 2,
+        (P(CMP.CloudIce(FT64)), P(CMP.AirProperties(FT64)), P(CMP.Frostenberg2023(FT64))), 2,
     )
     @test concrete_for_all_mixes(P3.loggamma_inc_moment, (), 4)
     # P3 aspect ratio: plain state with Dual D and vice versa
