@@ -397,9 +397,11 @@ Utilities.gamma_inc
 Utilities.gamma_inc_inv
 Utilities.rime_mass_fraction
 Utilities.rime_density
-Utilities.sgs_weight_function
 Utilities.unrolled_logsumexp
 Utilities.fac
+Utilities._regularised_ratio
+Utilities.guarded_quotient
+Utilities.nearest_admissible_b
 ```
 
 # Common utility functions

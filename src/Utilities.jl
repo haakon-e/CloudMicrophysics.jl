@@ -20,15 +20,14 @@ export fac
 
 The common promoted type of the arguments' types.
 
-Use it to type early returns and fallback values from all the arguments the
-main-path result derives from. Typing them from a single argument
-(`FT = eltype(q_tot)`-style) makes the function's return a union when a
-caller mixes plain floats with `ForwardDiff.Dual`s (or float widths) across
-arguments — non-concrete, heap-boxed, and silent.
+Similar to `promote_type`, but accepts concrete variables rather than
+their types. Useful to guarantee a single, concrete return type for functions
+that accept mixed input types (e.g. `Float32` and `ForwardDiff.Dual{Float32}`)
 """
 @inline promote_typeof(args...) = Base.promote_typeof(args...)
 export unrolled_logsumexp
-export sgs_weight_function, rime_mass_fraction, rime_density
+export rime_mass_fraction, rime_density
+export guarded_quotient, nearest_admissible_b
 export gamma_inc, gamma_inc_inv
 
 """
@@ -51,10 +50,10 @@ while guaranteeing excellent physical accuracy.
 # Automatic differentiation
 Analytic rules are provided for the derivative with respect to `x`
 (`∂P/∂x = x^{a-1} e^{-x} / Γ(a)`, `∂Q/∂x = -∂P/∂x`), so AD does not trace the
-internal iteration. The derivative with respect to the shape parameter `a` is
-**not** implemented: passing an `a` that depends on the differentiation variable
-(nonzero partials) raises an error rather than silently returning a wrong (zero)
-gradient. See `_assert_const_shape`.
+internal iteration. The derivative with respect to the shape parameter
+`a` is **not** implemented: passing an `a` that depends on the
+differentiation variable (nonzero partials) raises an error rather than
+silently returning a wrong (zero) gradient. See `_assert_const_shape`.
 """
 @inline function gamma_inc(a::Real, x::Real)
     FT = float(promote_type(typeof(a), typeof(x)))
@@ -68,7 +67,11 @@ end
     val_x = FD.value(x)
     P, Q = gamma_inc(val_a, val_x)
     T = FD.tagtype(typeof(x))
-    deriv = val_x > 0 ? exp((val_a - 1) * log(val_x) - val_x - SF.loggamma(val_a)) : zero(val_x)
+    # As `x → ∞` the derivative approaches zero. The branch must short-circuit:
+    # `ifelse` evaluates both arms and `log` throws below zero.
+    deriv =
+        (val_x > 0) && isfinite(val_x) ?
+        exp((val_a - 1) * log(val_x) - val_x - SF.loggamma(val_a)) : zero(val_x)
     return (FD.Dual{T}(P, deriv * FD.partials(x)), FD.Dual{T}(Q, -deriv * FD.partials(x)))
 end
 
@@ -101,7 +104,8 @@ end
     # factor = x^a * e^-x / Gamma(a)
     # Using loggamma for numerical stability
     factor = exp(a * log(x) - x - loggamma_a)
-    maxiters = FT === Float32 ? 20 : 30
+    # For Float32, 14 iters gives 0.029% error at the 99th percentile, 0.47% max error
+    maxiters = FT === Float32 ? 14 : 30
 
     if x < a + 1
         # Series expansion for P(a, x)
@@ -267,15 +271,15 @@ end
 #    truth (no bare literals/zeros scattered across the schemes).
 #
 # The threshold values intentionally differ by moment class:
-#   - `ϵ_numerics`      = cbrt(floatmin(FT))  (≈3.8e-13 @ f32) — a floatmin-derived
+#   - `ϵ_numerics`      = cbrt(floatmin(FT))  (≈3.8e-13 @ f32) - a floatmin-derived
 #     floor, sized so cbrt/pow arguments stay above `floatmin` (its cube is
 #     `floatmin`). Used by the 1-moment scheme.
-#   - `ϵ_numerics_2M_*` = eps(FT)             (≈1.2e-7  @ f32) — a relative round-off
+#   - `ϵ_numerics_2M_*` = eps(FT)             (≈1.2e-7  @ f32) - a relative round-off
 #     threshold for the 2-moment mass/number variables.
-#   - `ϵ_numerics_P3_B` = eps(FT)                                — same, for the P3
+#   - `ϵ_numerics_P3_B` = eps(FT)                                - same, for the P3
 #     rime-volume (B_rim) variable.
 # The ~6 orders of magnitude gap reflects the different roles (underflow-avoiding
-# floor vs. relative-precision threshold). If a scheme needs a different value, 
+# floor vs. relative-precision threshold). If a scheme needs a different value,
 # change it here rather than at the call sites.
 # ---------------------------------------------------------------------------
 
@@ -344,7 +348,6 @@ Physical smallness threshold for the **P3** rime-volume variable `B_rim`
 """
 @inline ϵ_numerics_P3_B(FT) = eps(FT)
 
-
 """
     unrolled_logsumexp(x)
 
@@ -356,7 +359,7 @@ making it transparent to GPU compilers.
 
 The standard shift-by-max trick is used for numerical stability.
 
-Note: This code is two-pass (find max, then sum shifted exponentials). 
+Note: This code is two-pass (find max, then sum shifted exponentials).
 LogExpFunctions.jl implements a one-pass version, but is not unrolled,
 so may result in more complicated GPU code.
 
@@ -416,106 +419,118 @@ function unrolled_logsumexp(x)
     return xmax + log(s)
 end
 
-
 """
-    sgs_weight_function(a, a_half)
+    _regularised_ratio(numerator, denominator, ϵ)
 
-Smooth, monotonic weight function `w(a)` ranging from 0 to 1.
+Compute `numerator / denominator`, returning zero when `denominator` is below `ϵ`.
 
-Used as the interpolation weight in regularised divisions so the result stays
-well-defined and smoothly blends toward zero when the denominator is small.
+The result is not smoothed as `denominator` shrinks toward `ϵ`. For a mass-volume
+ratio, a small denominator paired with a proportionally small numerator is ordinary
+physics at a small volume, not a degenerate state, so weighting on the denominator's
+magnitude alone would discard states this ratio must return correctly. What must be
+guarded against is a degenerate pair, not a small denominator; that invariant is
+enforced where the state is written, not here (see [`rime_density`](@ref)).
 
-Key properties:
-- `w(a) = 0` for `a ≤ 0` (and for `4a` below machine precision, to guard
-  autodiff).
-- `w(a) = 1` for `a ≥ min(1, 42 a_half)` (the upper guard keeps autodiff
-  finite; for small `a_half` the weight saturates before `a = 1`).
-- `w(a_half) = 0.5`.
-- Continuously differentiable away from the guard cutoffs; derivatives
-  vanish at `a = 0` and `a = 1` so the blend is smooth.
-- Grows very rapidly near `a_half`, very slowly elsewhere.
-
-Construction: for `a ∈ (0, 1)`, a bounded sigmoid is built by composing `tanh`
-with the inverse of a slower `tanh`; midpoint control `(a_half, 0.5)` is
-enforced by pre-transforming `a` via `1 - (1 - a)^k`.
-
-Mirrors the `sgs_weight_function` in `ClimaAtmos.jl/src/utils/variable_manipulations.jl`.
-
-# Arguments
-- `a`: the input variable (often approximated as an area fraction `ρa / ρ`).
-- `a_half`: value of `a` at which the weight equals 0.5 (controls the
-  transition point of the sigmoid).
-
-# Returns
-- `w(a)` in `[0, 1]`.
+`ϵ` alone decides presence. As in [`guarded_quotient`](@ref), a safe denominator is
+substituted before dividing, so no branch ever divides by a discarded, possibly
+non-finite `denominator`.
 """
-@inline function sgs_weight_function(a, a_half)
-    if a < 0
-        zero(a)
-    elseif a > min(1, 42 * a_half)   # autodiff generates NaNs when a is large
-        one(a)
-    elseif 4 * a < eps(typeof(a))
-        # 1 - a rounds to 1, making atanh(-1) = -Inf: the value is 0 either
-        # way, but autodiff generates NaNs (mirrors the upper guard)
-        zero(a)
-    else
-        (1 + tanh(2 * atanh(1 - 2 * (1 - a)^(-1 / log2(1 - a_half))))) / 2
-    end
+@inline function _regularised_ratio(numerator, denominator, ϵ)
+    denominator_safe = ifelse(denominator > ϵ, denominator, one(denominator))
+    val = numerator / denominator_safe
+    return ifelse(denominator > ϵ, val, zero(val))
 end
 
 """
-    _regularised_ratio(numerator, denominator, half, ϵ)
+    rime_mass_fraction(q_rim, q_ice, ϵ = 1e-24)
 
-Compute `numerator / denominator` with `sgs_weight_function`-based
-regularisation so the result stays finite when `denominator` is zero
-or very small.
+Regularised rime mass fraction `F_rim = q_rim / q_ice`, exactly zero when `q_ice` is
+below `ϵ`, the raw ratio otherwise (clamped to `[0, 1]` via `min(q_rim, q_ice)`). Not
+smoothed as `q_ice` shrinks toward `ϵ` - see [`_regularised_ratio`](@ref) for why.
 
-Returns `weight(denominator) * numerator / denominator`, falling to
-zero when `denominator < ϵ` (default `ϵ = eps(typeof(denominator))^2`);
-`half` (default `eps(typeof(denominator))`) is the denominator value at
-which the blending weight equals 0.5.
+# Arguments
+- `q_rim`: rime mass concentration `[kg rim / m³ air]`.
+- `q_ice`: total ice mass concentration `[kg ice / m³ air]`.
+- `ϵ`: the presence cutoff. The default corresponds to an ice content of `1e-12 kg/m³`,
+  several orders of magnitude below the smallest physically meaningful value (a trace
+  cirrus cell is `~1e-9 kg/m³`). Deliberately independent of `eps(typeof(q_ice))`:
+  an `eps`-tied default places the cutoff at a genuinely different physical scale in
+  `Float32` (`~1.2e-7`) than `Float64` (`~2.2e-16`), so an ordinary ice content that is
+  unaffected in `Float64` would be zeroed in `Float32` alone - the value itself would
+  depend on the working precision.
 """
-@inline function _regularised_ratio(
-    numerator, denominator,
-    half = eps(typeof(denominator)),
-    ϵ = eps(typeof(denominator))^2,
-)
-    weight = sgs_weight_function(denominator, half)
-    # zero of the promoted type: a single-argument zero makes the return a
-    # union when numerator and denominator mix plain floats with Duals
-    z = zero(promote_typeof(numerator, denominator))
-    return ifelse(denominator < ϵ, z, weight * numerator / denominator)
+@inline rime_mass_fraction(q_rim, q_ice, ϵ = oftype(q_ice, 1e-24)) =
+    clamp(_regularised_ratio(q_rim, q_ice, ϵ), zero(q_ice), one(q_ice))
+
+"""
+    rime_density(q_rim, b_rim, ϵ = 1e-30)
+
+Regularised rime density `ρ_rim = q_rim / b_rim`, exactly zero when `b_rim` is below
+`ϵ`, the raw ratio otherwise. Not smoothed as `b_rim` shrinks toward `ϵ`: a small
+`b_rim` paired with a proportionally small `q_rim` is ordinary physics at a small
+volume, not a degenerate state, and returning a fraction of the true density there
+would discard it on the wrong axis. See [`_regularised_ratio`](@ref).
+
+# Arguments
+- `q_rim`: rime mass concentration `[kg rim / m³ air]`.
+- `b_rim`: rime volume concentration `[m³ rim / m³ air]`.
+- `ϵ`: the presence cutoff. The default corresponds to a rime volume of `1e-15 m³/m³`,
+  which is what a trace rime mass (`~1e-12 kg/m³`, matching `rime_mass_fraction`) occupies
+  at a physically plausible rime density of hundreds of `kg/m³`. Independent of
+  `eps(typeof(b_rim))` for the same reason as `rime_mass_fraction`'s cutoff - see its
+  docstring.
+"""
+@inline rime_density(q_rim, b_rim, ϵ = oftype(b_rim, 1e-30)) =
+    _regularised_ratio(q_rim, b_rim, ϵ)
+
+"""
+    guarded_quotient(a, b, absent = zero(a / oneunit(b)))
+
+`a / b` when `b` is present, `absent` otherwise, with correct derivatives in both
+branches.
+
+Presence is tested on the plain value of `b`, not on `b` itself: `ForwardDiff` orders
+`Dual` numbers lexicographically, so a `Dual` with a zero value and nonzero partials
+compares greater than zero, and a plain `b > zero(b)` predicate then takes the present
+branch and runs the very division this function exists to avoid. A safe denominator is
+substituted before dividing, so the discarded branch never evaluates a quotient with an
+undefined derivative; selecting away from a `NaN` after the fact is only as reliable as
+the predicate that chose it.
+
+Presence is a threshold at exactly zero, not a floor on the denominator's magnitude:
+`a / max(b, floatmin(FT))` has the right value at `b = 0`, but its derivative, which
+scales as `-a / b²`, silently underflows to zero rather than reflecting that the
+quantity is identically absent over a neighborhood. A floor also states the wrong
+physics: it treats a small quantity as merely small rather than as absent.
+
+`absent` defaults to zero and is explicit for callers where the absent-state answer
+differs (for example, a budget with nothing to apportion is unconstrained, so its
+bound is `Inf` rather than `0`).
+"""
+@inline function guarded_quotient(a, b, absent = zero(a / oneunit(b)))
+    present = FD.value(b) > zero(FD.value(b))
+    bs = ifelse(present, b, one(b))
+    return ifelse(present, a / bs, absent)
 end
 
 """
-    rime_mass_fraction(q_rim, q_ice, kw...)
+    nearest_admissible_b(q, b̃, ρ_min, ρ_max)
 
-Regularised rime mass fraction `F_rim = q_rim / q_ice` that stays finite when
-`q_ice` is zero or very small, with the result clamped to `[0, 1]` via
-`min(q_rim, q_ice)`.
+The `b` to pair with an already-nonnegative `q` so that `q / b` falls inside
+`[ρ_min, ρ_max]`: `b̃` unchanged when `q / b̃` is already admissible, otherwise the
+nearest point in the admissible interval, `clamp(b̃, q / ρ_max, q / ρ_min)`. `q == 0`
+forces `b = 0` too, so a pair with no mass never carries a nonzero paired quantity
+either.
 
-# Arguments
-- `q_rim`: rime specific mass `[kg rim / kg air]`.
-- `q_ice`: total ice specific mass `[kg ice / kg air]`.
-- `kw...`: optional trailing arguments forwarded to
-  `_regularised_ratio` (`half`, then `ϵ`).
+Projects `(q, b)` onto the density cone `{q, b ≥ 0 : ρ_min·b ≤ q ≤ ρ_max·b}` as a pair,
+rather than clamping `q` and `b` independently, which can pass a positive `q` through
+while its paired `b` clips to zero, or the reverse.
 """
-@inline rime_mass_fraction(q_rim, q_ice, kw...) =
-    _regularised_ratio(min(q_rim, q_ice), q_ice, kw...)
-
-"""
-    rime_density(q_rim, b_rim, kw...)
-
-Regularised rime density `ρ_rim = q_rim / b_rim` that stays finite when
-`b_rim` is zero or very small.
-
-# Arguments
-- `q_rim`: rime specific mass `[kg rim / kg air]`.
-- `b_rim`: rime specific volume `[m³ rim / kg air]`.
-- `kw...`: optional trailing arguments forwarded to
-  `_regularised_ratio` (`half`, then `ϵ`).
-"""
-@inline rime_density(q_rim, b_rim, kw...) = _regularised_ratio(q_rim, b_rim, kw...)
-
+@inline function nearest_admissible_b(q::FT, b̃, ρ_min, ρ_max) where {FT}
+    lo = q / ρ_max
+    hi = q / ρ_min
+    admissible = (b̃ >= lo) & (b̃ <= hi)
+    return ifelse(q > zero(FT), ifelse(admissible, b̃, clamp(b̃, lo, hi)), zero(FT))
+end
 
 end # module

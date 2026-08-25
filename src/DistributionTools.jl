@@ -44,7 +44,10 @@ Calculate the quantile (inverse cumulative distribution function) for a
 function generalized_gamma_quantile(ν, μ, B, Y)
     # Compute the inverse of the regularized incomplete gamma function
     z = UT.gamma_inc_inv((ν + 1) / μ, Y, 1 - Y)
-    return (z / B)^(1 / μ)
+    base = z / B
+    # Negative base => DomainError of fractional power. Return NaN instead.
+    # The branch must short-circuit: `ifelse` evaluates both arms and throws.
+    return base ≥ 0 ? base^(1 / μ) : oftype(base, NaN)
 end
 
 """
@@ -75,9 +78,9 @@ The CDF gives the probability P(X ≤ x).
  - `p`: The probability P(X ≤ x)
 """
 function generalized_gamma_cdf(ν, μ, B, x)
-    # Check input validity
-    μ > 0 || throw(DomainError(μ, "Parameter μ must be positive"))
-    B > 0 || throw(DomainError(B, "Parameter B must be positive"))
+    # Invalid parameters (degenerate distribution) yield NaN rather than a
+    # DomainError, so device-kernel callers surface a catchable non-finite value.
+    (μ > 0) & (B > 0) || return oftype(float(x), NaN)
     # Handle edge cases
     x ≤ 0 && return zero(x)
 
@@ -107,6 +110,10 @@ Calculate the nth physical moment of a generalized gamma distribution parameteri
  - `Mⁿ`: The nth physical moment of the distribution
 """
 function generalized_gamma_Mⁿ(ν, μ, B, N, n)
+    # A non-positive B (degenerate distribution) yields NaN rather than a
+    # DomainError from the fractional power, so device-kernel callers surface a
+    # catchable non-finite value.
+    B > 0 || return oftype(float(B), NaN)
     # Equivalent to Eq. (82) in SB2006
     return N * B^(-n / μ) * SF.gamma((ν + 1 + n) / μ) / SF.gamma((ν + 1) / μ)
 end
@@ -129,8 +136,9 @@ where N₀ is a normalizing constant such that the total probability is 1.
 - `p`: The probability P(X ≤ D)
 """
 function exponential_cdf(D_mean, D)
-    # Check input validity
-    D_mean > 0 || throw(DomainError(D_mean, "Mean parameter must be positive"))
+    # A non-positive mean (degenerate distribution) yields NaN rather than a
+    # DomainError, so device-kernel callers surface a catchable non-finite value.
+    D_mean > 0 || return oftype(float(D), NaN)
     # Handle edge cases
     D < 0 && return zero(D)
     # Calculate CDF: P(X ≤ D) = 1 - exp(-D/D_mean)
@@ -156,9 +164,10 @@ where N₀ is a normalizing constant such that the total probability is 1.
 - `D`: The value D such that P(X ≤ D) = Y
 """
 function exponential_quantile(D_mean, Y)
-    # Check input validity
-    (0 ≤ Y ≤ 1) || throw(DomainError(Y, "Probability Y must be in [0,1]"))
-    D_mean > 0 || throw(DomainError(D_mean, "Mean parameter must be positive"))
+    # Out-of-range probability or a non-positive mean (degenerate distribution)
+    # yields NaN rather than a DomainError, so device-kernel callers surface a
+    # catchable non-finite value.
+    ((0 ≤ Y ≤ 1) & (D_mean > 0)) || return oftype(float(D_mean), NaN)
     # Calculate quantile: x = -D_mean * ln(1-Y)
     logquantile = log(D_mean) + LEF.cloglog(Y)  # careful calculation in log-space
     return exp(logquantile)

@@ -71,7 +71,9 @@ end
         CO.Chen2022_exponential_pdf, (), 4; post = (Int,),
     )
     @test concrete_for_all_mixes(CO.logistic_function_integral, (), 3)
-    @test concrete_for_all_mixes(UT._regularised_ratio, (), 2)
+    # half no longer defaults (card #39 dropped the eps(FT)-tied default; there is no
+    # universal scale to default to), so the arity is 3, not 2.
+    @test concrete_for_all_mixes(UT._regularised_ratio, (), 3)
     @test concrete_for_all_mixes(
         CMNonEq.τ_relax,
         (P(CMP.CloudIce(FT64)), P(CMP.AirProperties(FT64)), P(mp.ice.ice_nucleation)), 2,
