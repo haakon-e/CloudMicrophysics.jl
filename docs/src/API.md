@@ -173,6 +173,9 @@ CMP.SlopeConstant{Float64}
 CMP.VentilationFactor
 CMP.LocalRimeDensity
 CMP.AspectRatio
+CMP.SmoothSlopePowerLaw
+CMP.DEFAULT_SLOPE_LAW
+CMP.DEFAULT_ASPECT_RATIO
 ```
 
 ## Obtain particle state
@@ -276,7 +279,6 @@ P3Scheme.integrate
 P3Scheme.subintervals
 P3Scheme.ChebyshevGauss
 Quadrature.GaussLegendre
-Quadrature.build_quadrature
 P3Scheme.integral_bounds
 ```
 
