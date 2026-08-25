@@ -18,9 +18,10 @@ Parameters for 2-moment warm rain processes (Seifert-Beheng 2006).
     subdep::SD
 end
 # Construct WarmRainParams2M from a ClimaParams TOML dictionary
-WarmRainParams2M(toml_dict::CP.ParamDict; is_limited = true) =
+WarmRainParams2M(toml_dict::CP.ParamDict; is_limited = true,
+    rain_pdf = RainParticlePDF_SB2006(toml_dict; is_limited)) =
     WarmRainParams2M(;
-        seifert_beheng = SB2006(toml_dict; is_limited),
+        seifert_beheng = SB2006(toml_dict; is_limited, rain_pdf),
         air_properties = AirProperties(toml_dict),
         condevap = CondEvap2M(toml_dict),
         subdep = SubDep2M(toml_dict),
@@ -110,6 +111,7 @@ P3IceParams(toml_dict::CP.ParamDict;
     inp_depletion_model = NIceProxyDepletion(),
     slope_law = DEFAULT_SLOPE_LAW,
     aspect_ratio = DEFAULT_ASPECT_RATIO,
+    rain_pdf = RainParticlePDF_SB2006(toml_dict; is_limited),
 ) = P3IceParams(;
     # Forwarded rather than left at the `ParametersP3` default, because a
     # `ParametersP3` built here is the only one a host model ever sees. Without
@@ -120,7 +122,7 @@ P3IceParams(toml_dict::CP.ParamDict;
     scheme = ParametersP3(toml_dict; slope_law, aspect_ratio),
     terminal_velocity = Chen2022VelType(toml_dict),
     cloud_pdf = CloudParticlePDF_SB2006(toml_dict),
-    rain_pdf = RainParticlePDF_SB2006(toml_dict; is_limited),
+    rain_pdf,
     ice_nucleation = ExponentialSupercoolingINP(toml_dict),
     rain_freezing = RainFreezing(toml_dict),
     homogeneous = Koop2000(toml_dict),
@@ -185,12 +187,15 @@ Microphysics2MParams(toml_dict::CP.ParamDict;
     inp_depletion_model = NIceProxyDepletion(),
     slope_law = DEFAULT_SLOPE_LAW,
     aspect_ratio = DEFAULT_ASPECT_RATIO,
+    rain_pdf = RainParticlePDF_SB2006(toml_dict; is_limited),
 ) = Microphysics2MParams(;
-    # Warm rain parameters (always present)
-    warm_rain = WarmRainParams2M(toml_dict; is_limited),
+    # One `rain_pdf` object reaches both halves rather than each building its own from the
+    # same TOML. They consume the same size-distribution inversion, so they must not be able
+    # to disagree, and a caller selecting `RainParticlePDF_SB2006_windowed` must reach both.
+    warm_rain = WarmRainParams2M(toml_dict; is_limited, rain_pdf),
     # Optional ice phase parameters
     ice = with_ice ?
           P3IceParams(toml_dict; is_limited, quad, inp_depletion_model,
-        slope_law, aspect_ratio) :
+        slope_law, aspect_ratio, rain_pdf) :
           nothing,
 )
