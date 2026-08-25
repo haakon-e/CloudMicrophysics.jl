@@ -185,4 +185,42 @@ function effective_radius_const(cloud_params::CMP.CloudIce{FT}) where {FT}
     return cloud_params.r_eff
 end
 
+"""
+    rain_intercept_plausibility(range, pdf_r, q_rai, ρ_air, N_rai)
+
+Report whether the rain intercept `N₀` implied by the state falls outside its observational
+plausibility range, WITHOUT touching the state or any rate.
+
+[SeifertBeheng2006](@cite) applies this range as a clamp inside the PSD inversion. Under
+[`CMP.RainParticlePDF_SB2006_windowed`](@ref) the only bound is on the mean drop mass, and the
+intercept range keeps its observational content here instead: a state that leaves the range is
+reported and integrated unchanged, rather than being silently rewritten into one that does not
+describe it.
+
+An out-of-range intercept is not by itself an error. `N₀ = λ N_r` grows with the drop number at
+fixed mean size, so ordinary heavy rain with many drops leaves the upper end and sparse large-drop
+populations leave the lower end; what the flag identifies is where the SB2006 cascade WOULD have
+intervened, which makes it the natural diagnostic for auditing the difference between the two.
+
+# Arguments
+ - `range`: the plausibility range, [`CMP.RainInterceptRange`](@ref)
+ - `pdf_r`: rain size distribution parameters, [`CMP.RainParticlePDF_SB2006`](@ref)
+ - `q_rai`: rain water specific content [kg/kg]
+ - `ρ_air`: air density [kg/m³]
+ - `N_rai`: raindrop number density [1/m³]
+
+# Returns
+ - `(; N₀r, below, above)`: the implied intercept [1/m⁴] and the two out-of-range flags. Both
+   flags are `false` on an empty population, where the inversion returns a zero intercept and
+   there is no distribution to call implausible.
+"""
+function rain_intercept_plausibility(
+    (; N0_min, N0_max)::CMP.RainInterceptRange,
+    pdf_r::CMP.RainParticlePDF_SB2006, q_rai, ρ_air, N_rai,
+)
+    (; N₀r) = CM2.pdf_rain_parameters(pdf_r, q_rai, ρ_air, N_rai)
+    populated = N₀r > 0
+    return (; N₀r, below = populated & (N₀r < N0_min), above = populated & (N₀r > N0_max))
+end
+
 end # end module

@@ -5,6 +5,7 @@ import ClimaParams as CP
 
 import CloudMicrophysics.Parameters as CMP
 import CloudMicrophysics.CloudDiagnostics as CMD
+import CloudMicrophysics.Microphysics2M as CM2
 
 function test_cloud_diagnostics(FT)
 
@@ -143,6 +144,52 @@ function test_cloud_diagnostics(FT)
     TT.@testset "Constant effective radius" begin
         TT.@test CMD.effective_radius_const(cloud_liquid) == FT(14e-6)
         TT.@test CMD.effective_radius_const(cloud_ice) == FT(25e-6)
+    end
+
+    TT.@testset "rain intercept plausibility is a flag and only a flag" begin
+        # The N₀ range is retired as a clamp under the mean-mass window and kept as a
+        # diagnostic. The two halves asserted here are that it FLAGS the states the cascade
+        # would have rewritten, and that it rewrites nothing itself.
+        rng = CMP.RainInterceptRange(toml_dict)
+        win = CMP.RainParticlePDF_SB2006_windowed(toml_dict)
+        ρ = FT(1)
+        (; N0_min, N0_max) = rng
+
+        # sparse large drops: below the range. The design note's worked example.
+        r = CMD.rain_intercept_plausibility(rng, win, FT(1.5e-4), ρ, FT(30))
+        TT.@test r.below && !r.above
+        TT.@test r.N₀r < N0_min
+
+        # many small drops: above the range. The window caps N₀ at `cbrt(π ρw/x_min)·L/x_min`,
+        # so clearing `N0_max` needs a heavy loading sitting on the small-drop edge.
+        r = CMD.rain_intercept_plausibility(rng, win, FT(1e-3), ρ, FT(1e9))
+        TT.@test r.above && !r.below
+        TT.@test r.N₀r > N0_max
+
+        # an ordinary population inside the range is not flagged either way
+        r = CMD.rain_intercept_plausibility(rng, win, FT(1e-4), ρ, FT(3e3))
+        TT.@test !r.below && !r.above
+        TT.@test N0_min <= r.N₀r <= N0_max
+
+        # an empty population has no distribution to call implausible
+        for (q, N) in ((FT(0), FT(0)), (FT(0), FT(1e4)), (FT(1e-4), FT(0)))
+            r = CMD.rain_intercept_plausibility(rng, win, q, ρ, N)
+            TT.@test !r.below && !r.above
+        end
+
+        # THE RIDER: flagging is not clamping. The reported intercept is the inversion's own,
+        # and evaluating the diagnostic leaves the PSD parameters bit-identical.
+        for (q, N) in ((FT(1.5e-4), FT(30)), (FT(1e-3), FT(1e9)), (FT(1e-3), FT(1e4)))
+            before = CM2.pdf_rain_parameters(win, q, ρ, N)
+            r = CMD.rain_intercept_plausibility(rng, win, q, ρ, N)
+            after = CM2.pdf_rain_parameters(win, q, ρ, N)
+            TT.@test r.N₀r === before.N₀r
+            TT.@test before === after
+            # and a flagged intercept is reported as it is, not clamped into the range
+            if r.below || r.above
+                TT.@test !(N0_min <= r.N₀r <= N0_max)
+            end
+        end
     end
 end
 
