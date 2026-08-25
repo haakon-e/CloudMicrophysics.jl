@@ -10,21 +10,33 @@ Parameters for 2-moment warm rain processes (Seifert-Beheng 2006).
 - `air_properties::AP`: AirProperties — air properties for evaporation
 - `condevap::CE`: MM2015 cond-evap relaxation timescale
 - `subdep::SD`: MM2015 sub-dep relaxation timescale
+- `activation::AC`: [`AerosolActivationParameters`](@ref), the ARG2000 fit
+- `aerosol::AE`: the aerosol population droplet activation draws on, a
+  [`PrescribedAerosol`](@ref) or `nothing`
+
+# Constructor keyword arguments
+- `aerosol`: the prescribed aerosol population. By default `nothing`, which computes zero
+  activation: the supply of cloud condensation nuclei is a per-configuration statement, so a run
+  that specifies it passes a [`PrescribedAerosol`](@ref) here rather than inheriting one.
 """
-@kwdef struct WarmRainParams2M{SB, AP, CE, SD} <: ParametersType
+@kwdef struct WarmRainParams2M{SB, AP, CE, SD, AC, AE} <: ParametersType
     seifert_beheng::SB
     air_properties::AP
     condevap::CE
     subdep::SD
+    activation::AC
+    aerosol::AE = nothing
 end
 # Construct WarmRainParams2M from a ClimaParams TOML dictionary
-WarmRainParams2M(toml_dict::CP.ParamDict; is_limited = true,
+WarmRainParams2M(toml_dict::CP.ParamDict; is_limited = true, aerosol = nothing,
     rain_pdf = RainParticlePDF_SB2006(toml_dict; is_limited)) =
     WarmRainParams2M(;
         seifert_beheng = SB2006(toml_dict; is_limited, rain_pdf),
         air_properties = AirProperties(toml_dict),
         condevap = CondEvap2M(toml_dict),
         subdep = SubDep2M(toml_dict),
+        activation = AerosolActivationParameters(toml_dict),
+        aerosol,
     )
 
 Base.show(io::IO, mime::MIME"text/plain", x::WarmRainParams2M) =
@@ -164,7 +176,8 @@ Base.show(io::IO, mime::MIME"text/plain", x::Microphysics2MParams) =
 """
     Microphysics2MParams(toml_dict::CP.ParamDict; with_ice = false, is_limited = true,
         slope_law = DEFAULT_SLOPE_LAW, aspect_ratio = DEFAULT_ASPECT_RATIO,
-        quadrature_order = 6, quad = Quadrature.GaussLegendre(FT, quadrature_order))
+        quadrature_order = 6, quad = Quadrature.GaussLegendre(FT, quadrature_order),
+        aerosol = nothing)
 
 Create a `Microphysics2MParams` object from a ClimaParams TOML dictionary.
 
@@ -179,6 +192,9 @@ Create a `Microphysics2MParams` object from a ClimaParams TOML dictionary.
   [`P3IceParams`](@ref) when `with_ice` (default: 6)
 - `quad`: the size-distribution `Quadrature.QuadratureRule` passed to
   [`P3IceParams`](@ref) when `with_ice` (default: `Quadrature.GaussLegendre(FT, quadrature_order)`)
+- `aerosol`: the aerosol population droplet activation draws on, passed to
+  [`WarmRainParams2M`](@ref). By default `nothing`, which computes zero activation; a
+  configuration that specifies cloud condensation nuclei passes a [`PrescribedAerosol`](@ref).
 """
 Microphysics2MParams(toml_dict::CP.ParamDict;
     with_ice = false, is_limited = true,
@@ -187,12 +203,13 @@ Microphysics2MParams(toml_dict::CP.ParamDict;
     inp_depletion_model = NIceProxyDepletion(),
     slope_law = DEFAULT_SLOPE_LAW,
     aspect_ratio = DEFAULT_ASPECT_RATIO,
+    aerosol = nothing,
     rain_pdf = RainParticlePDF_SB2006(toml_dict; is_limited),
 ) = Microphysics2MParams(;
     # One `rain_pdf` object reaches both halves rather than each building its own from the
     # same TOML. They consume the same size-distribution inversion, so they must not be able
     # to disagree, and a caller selecting `RainParticlePDF_SB2006_windowed` must reach both.
-    warm_rain = WarmRainParams2M(toml_dict; is_limited, rain_pdf),
+    warm_rain = WarmRainParams2M(toml_dict; is_limited, aerosol, rain_pdf),
     # Optional ice phase parameters
     ice = with_ice ?
           P3IceParams(toml_dict; is_limited, quad, inp_depletion_model,
